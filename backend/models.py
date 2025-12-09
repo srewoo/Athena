@@ -253,3 +253,133 @@ class GenerateEvalPromptWithExamplesResponse(BaseModel):
     test_scenarios: List[str]
     calibration_examples: List[EvalExample]
     generation_method: str
+
+
+# ============= Test Run Models =============
+
+class ExecutionResult(BaseModel):
+    """Result of executing prompt on a single test input and evaluating it"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    dataset_item_index: int  # Index in the dataset
+    input_data: Dict[str, Any]  # The test input (from dataset)
+    prompt_output: str  # LLM response when running the prompt
+    eval_score: float  # 1-5 score from evaluation
+    eval_feedback: str  # Detailed feedback from evaluation
+    passed: bool  # Whether score meets threshold
+    latency_ms: int  # Time to execute prompt
+    tokens_used: Optional[int] = None  # Token count if available
+    error: Optional[str] = None  # Error message if execution failed
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TestRunSummary(BaseModel):
+    """Aggregated summary of a test run"""
+    total_items: int
+    completed_items: int
+    passed_items: int
+    failed_items: int
+    error_items: int
+    pass_rate: float  # Percentage
+    avg_score: float
+    min_score: float
+    max_score: float
+    score_distribution: Dict[str, int]  # {"1": 5, "2": 10, ...}
+    avg_latency_ms: float
+    total_tokens: int
+    estimated_cost: float
+
+
+class TestRun(BaseModel):
+    """A test run executing dataset against a prompt version"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    prompt_version: int  # Which prompt version to test
+    prompt_text: str  # Snapshot of prompt at run time
+    eval_prompt_text: str  # Snapshot of eval prompt at run time
+    llm_provider: str  # Provider for execution
+    model_name: Optional[str] = None
+    status: str = "pending"  # "pending", "running", "completed", "failed", "cancelled"
+    pass_threshold: float = 3.5  # Score threshold for pass/fail
+    batch_size: int = 5
+    max_concurrent: int = 3
+    results: List[ExecutionResult] = []
+    summary: Optional[TestRunSummary] = None
+    error_message: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class TestRunRequest(BaseModel):
+    """Request to start a test run"""
+    prompt_version: int  # Which prompt version to test
+    dataset_item_indices: Optional[List[int]] = None  # Specific items, or None for all
+    llm_provider: str
+    model_name: Optional[str] = None
+    pass_threshold: float = 3.5
+    batch_size: int = 5
+    max_concurrent: int = 3
+
+
+class TestRunStatusResponse(BaseModel):
+    """Response for test run status check"""
+    run_id: str
+    status: str
+    progress: float  # 0-100 percentage
+    completed_items: int
+    total_items: int
+    current_batch: int
+    total_batches: int
+    partial_summary: Optional[TestRunSummary] = None
+    recent_results: List[ExecutionResult] = []  # Last 5 results
+
+
+class TestRunResultsResponse(BaseModel):
+    """Full results of a test run"""
+    test_run: TestRun
+    summary: TestRunSummary
+    results: List[ExecutionResult]
+
+
+class SingleTestRequest(BaseModel):
+    """Request to run a single test (for debugging)"""
+    prompt_text: str
+    test_input: Dict[str, Any]
+    llm_provider: str
+    model_name: Optional[str] = None
+    eval_prompt_text: Optional[str] = None  # If not provided, skip evaluation
+
+
+class SingleTestResponse(BaseModel):
+    """Response from single test execution"""
+    input_data: Dict[str, Any]
+    prompt_output: str
+    eval_score: Optional[float] = None
+    eval_feedback: Optional[str] = None
+    latency_ms: int
+    tokens_used: Optional[int] = None
+
+
+class TestRunComparisonRequest(BaseModel):
+    """Request to compare two test runs"""
+    run_id_a: str
+    run_id_b: str
+
+
+class TestRunComparisonResult(BaseModel):
+    """Comparison of two test runs"""
+    run_a: Dict[str, Any]  # Summary of run A
+    run_b: Dict[str, Any]  # Summary of run B
+    pass_rate_delta: float  # B - A
+    avg_score_delta: float  # B - A
+    improved_items: int  # Items that scored higher in B
+    regressed_items: int  # Items that scored lower in B
+    unchanged_items: int  # Items with same score
+    item_comparisons: List[Dict[str, Any]]  # Per-item comparison
+
+
+class RerunFailedRequest(BaseModel):
+    """Request to re-run failed items from a test run"""
+    source_run_id: str
+    llm_provider: Optional[str] = None  # Override provider
+    model_name: Optional[str] = None  # Override model
