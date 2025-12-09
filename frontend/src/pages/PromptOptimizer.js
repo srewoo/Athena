@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -79,12 +79,35 @@ const PromptOptimizer = () => {
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
 
-  // Model options per provider
+  // Model options per provider (2025 latest releases)
   const modelOptions = {
-    openai: ["gpt-4o", "gpt-4o-mini"],
-    claude: ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022"],
-    gemini: ["gemini-2.5-pro", "gemini-2.5-flash"]
+    openai: [
+      "gpt-5",  // Latest flagship (2025)
+      "gpt-4.1",  // April 2025, ~1M context
+      "gpt-4o",
+      "gpt-4o-mini",
+      { label: "--- Reasoning Models ---", disabled: true },
+      "o1",
+      "o1-preview",
+      "o1-mini",
+      "o3",
+      "o3-mini"
+    ],
+    claude: [
+      "claude-sonnet-4-5-20250929",  // Best coding model (Sep 2025)
+      "claude-haiku-4-5-20251001",  // Fast, low-latency (Oct 2025)
+      "claude-3-7-sonnet-20250219",
+      "claude-3-5-sonnet-20241022"
+    ],
+    gemini: [
+      "gemini-2.5-pro",  // Hybrid-reasoning (2025)
+      "gemini-2.5-flash",  // Fast variant (2025)
+      "gemini-2.0-flash-exp"
+    ]
   };
+
+  // State for thinking mode
+  const [useThinkingMode, setUseThinkingMode] = useState(false);
 
   // Load existing settings on mount
   useEffect(() => {
@@ -273,6 +296,43 @@ const PromptOptimizer = () => {
     setProjectSelectorOpen(false);
   };
 
+  const handleEditProject = async (project, event) => {
+    // Stop event propagation to prevent loading the project when clicking edit
+    event.stopPropagation();
+
+    // Load the project into the form fields for editing
+    setProjectId(project.id);
+    setProjectName(project.name);
+    setUseCase(project.requirements?.use_case || "");
+    setKeyRequirements(project.requirements?.key_requirements?.join(", ") || "");
+    setInitialPrompt(project.system_prompt_versions?.[0]?.prompt_text || "");
+    setTargetProvider(project.requirements?.target_provider || "openai");
+
+    // Reset other state to start fresh
+    setCurrentVersion(null);
+    setVersionHistory([]);
+    setAnalysisResults(null);
+    setEvalPrompt("");
+    setDataset(null);
+
+    // Close the project selector modal
+    setProjectSelectorOpen(false);
+
+    // Expand the requirements section
+    setExpandedSections(prev => ({
+      ...prev,
+      requirements: true,
+      optimization: false,
+      evalPrompt: false,
+      dataset: false
+    }));
+
+    toast({
+      title: "Project Loaded for Editing",
+      description: `You can now edit "${project.name}" and save your changes`
+    });
+  };
+
   const handleDeleteProject = async (projectIdToDelete, projectNameToDelete, event) => {
     // Stop event propagation to prevent loading the project when clicking delete
     event.stopPropagation();
@@ -391,7 +451,7 @@ const PromptOptimizer = () => {
     }
   };
 
-  const handleAnalyze = async (promptText = initialPrompt, idOverride = null) => {
+  const handleAnalyze = async (promptText = initialPrompt, idOverride = null, versionOverride = null) => {
     const projectIdToUse = idOverride || projectId;
     if (!projectIdToUse && !promptText) return;
 
@@ -407,6 +467,28 @@ const PromptOptimizer = () => {
 
       const results = await response.json();
       setAnalysisResults(results);
+
+      // Update the current version's evaluation in version history
+      // Use versionOverride if provided, otherwise use currentVersion from state
+      const versionToUpdate = versionOverride || currentVersion;
+      if (versionToUpdate) {
+        const evaluation = {
+          requirements_alignment: results.requirements_alignment_score || 0,
+          best_practices_score: results.best_practices_score || 0,
+          suggestions: results.suggestions || [],
+          requirements_gaps: results.requirements_gaps || []
+        };
+
+        // Update version history with the evaluation
+        setVersionHistory(prev => prev.map(v =>
+          v.version === versionToUpdate.version
+            ? { ...v, evaluation }
+            : v
+        ));
+
+        // Also update current version
+        setCurrentVersion(prev => ({ ...prev, evaluation }));
+      }
 
       toast({
         title: "Analysis Complete",
@@ -427,13 +509,42 @@ const PromptOptimizer = () => {
   const handleRewrite = async () => {
     if (!projectId || !currentVersion) return;
 
+    // Check if we have analysis results with suggestions to incorporate
+    if (!analysisResults || !analysisResults.suggestions || analysisResults.suggestions.length === 0) {
+      toast({
+        title: "No Suggestions Available",
+        description: "Please run Re-Analyze first to get suggestions to incorporate",
+        variant: "destructive"
+      });
+      return;
+    }
+
     setIsRewriting(true);
     try {
-      const response = await fetch(`${API}/projects/${projectId}/rewrite`, {
+      // Build focus areas from the analysis suggestions
+      const focusAreas = analysisResults.suggestions.slice(0, 5).map(sug => {
+        // Extract the suggestion text (remove priority prefix if present)
+        if (typeof sug === 'string') {
+          return sug;
+        }
+        return sug.suggestion || sug.text || String(sug);
+      });
+
+      // Include requirements gaps as additional focus areas
+      if (analysisResults.requirements_gaps && analysisResults.requirements_gaps.length > 0) {
+        analysisResults.requirements_gaps.slice(0, 3).forEach(gap => {
+          focusAreas.push(`Address requirement gap: ${gap}`);
+        });
+      }
+
+      const response = await fetch(`${API}/rewrite`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          current_prompt: currentVersion.prompt_text
+          prompt_text: currentVersion.prompt_text,
+          focus_areas: focusAreas,
+          use_case: useCase,  // Pass the original use case
+          key_requirements: keyRequirements  // Pass the key requirements
         })
       });
 
@@ -441,12 +552,18 @@ const PromptOptimizer = () => {
 
       const result = await response.json();
 
-      // Add new version
-      await addVersion(result.improved_prompt, result.changes_made.join("; "));
+      // Add new version with the changes made
+      // Backend returns "rewritten_prompt", handle both for compatibility
+      const newPrompt = result.rewritten_prompt || result.improved_prompt;
+      if (!newPrompt) {
+        throw new Error("No improved prompt returned from server");
+      }
+      const changesDescription = result.changes_made ? result.changes_made.join("; ") : "AI improvements applied";
+      await addVersion(newPrompt, changesDescription);
 
       toast({
-        title: "Rewrite Complete",
-        description: "Your prompt has been improved"
+        title: "Suggestions Incorporated",
+        description: `Applied ${focusAreas.length} improvements. New version is being analyzed...`
       });
 
     } catch (error) {
@@ -540,8 +657,8 @@ const PromptOptimizer = () => {
       setVersionHistory(prev => [...prev, newVersion]);
       setCurrentVersion(newVersion);
 
-      // Auto-analyze new version
-      handleAnalyze(promptText);
+      // Auto-analyze new version - pass the version object to avoid stale state
+      handleAnalyze(promptText, null, newVersion);
 
     } catch (error) {
       toast({
@@ -574,11 +691,10 @@ const PromptOptimizer = () => {
         description: "Your evaluation prompt is ready"
       });
 
-      // Auto-expand dataset section
+      // Keep evalPrompt section expanded to show the generated prompt
       setExpandedSections(prev => ({
         ...prev,
-        evalPrompt: false,
-        dataset: true
+        evalPrompt: true
       }));
 
     } catch (error) {
@@ -942,8 +1058,17 @@ const PromptOptimizer = () => {
                               <Button
                                 size="sm"
                                 variant="ghost"
+                                onClick={(e) => handleEditProject(project, e)}
+                                className="h-6 w-6 p-0 text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/20"
+                                title="Edit project details"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
                                 onClick={(e) => handleDeleteProject(project.id, project.name, e)}
-                                className="h-6 w-6 p-0 text-red-600 dark:text-red-400 hover:text-red-300 hover:bg-red-900/20"
+                                className="h-6 w-6 p-0 text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/20"
                                 title="Delete project"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -1018,11 +1143,22 @@ const PromptOptimizer = () => {
                       <SelectValue placeholder={`Select ${llmProvider} model`} />
                     </SelectTrigger>
                     <SelectContent className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
-                      {modelOptions[llmProvider]?.map((model) => (
-                        <SelectItem key={model} value={model} className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700">
-                          {model}
-                        </SelectItem>
-                      ))}
+                      {modelOptions[llmProvider]?.map((model, index) => {
+                        // Handle separator/disabled option objects
+                        if (typeof model === 'object' && model.label) {
+                          return (
+                            <SelectItem key={`separator-${index}`} value={`separator-${index}`} disabled className="text-slate-500 dark:text-slate-400 font-semibold">
+                              {model.label}
+                            </SelectItem>
+                          );
+                        }
+                        // Handle regular string model names
+                        return (
+                          <SelectItem key={model} value={model} className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700">
+                            {model}
+                          </SelectItem>
+                        );
+                      })}
                     </SelectContent>
                   </Select>
                 </div>
@@ -1153,7 +1289,6 @@ const PromptOptimizer = () => {
                     onChange={(e) => setProjectName(e.target.value)}
                     placeholder="e.g., Customer Support Bot"
                     className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100"
-                    disabled={!!projectId}
                   />
                 </div>
 
@@ -1165,7 +1300,6 @@ const PromptOptimizer = () => {
                     onChange={(e) => setUseCase(e.target.value)}
                     placeholder="Describe what this system prompt is for..."
                     className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[80px]"
-                    disabled={!!projectId}
                   />
                 </div>
 
@@ -1177,13 +1311,12 @@ const PromptOptimizer = () => {
                     onChange={(e) => setKeyRequirements(e.target.value)}
                     placeholder="e.g.,&#10;- Handle customer queries professionally&#10;- Provide accurate product information&#10;- Escalate complex issues to human agents"
                     className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[120px]"
-                    disabled={!!projectId}
                   />
                 </div>
 
                 <div>
                   <Label htmlFor="provider">Target LLM Provider *</Label>
-                  <Select value={targetProvider} onValueChange={setTargetProvider} disabled={!!projectId}>
+                  <Select value={targetProvider} onValueChange={setTargetProvider}>
                     <SelectTrigger className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                       <SelectValue />
                     </SelectTrigger>
@@ -1204,11 +1337,10 @@ const PromptOptimizer = () => {
                     onChange={(e) => setInitialPrompt(e.target.value)}
                     placeholder="Enter your initial system prompt here..."
                     className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[200px] font-mono text-sm"
-                    disabled={!!projectId}
                   />
                 </div>
 
-                {!projectId && (
+                {(
                   <>
                     {isCreatingProject && (
                       <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg p-4 mb-4">
@@ -1232,10 +1364,10 @@ const PromptOptimizer = () => {
                       {isCreatingProject ? (
                         <>
                           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                          Creating Project...
+                          {projectId ? "Updating Project..." : "Creating Project..."}
                         </>
                       ) : (
-                        "Create Project & Analyze"
+                        projectId ? "Update Project & Re-Analyze" : "Create Project & Analyze"
                       )}
                     </Button>
                   </>
@@ -1432,37 +1564,74 @@ const PromptOptimizer = () => {
                   {versionHistory.length > 1 && (
                     <div className="mt-6">
                       <h3 className="font-semibold mb-2 text-slate-900 dark:text-slate-100">Version History</h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">Click on a version to load it</p>
                       <div className="space-y-2">
                         {versionHistory.map((v, idx) => (
                           <div
                             key={idx}
-                            className={`p-3 rounded-lg border ${
+                            onClick={() => {
+                              if (v.version !== currentVersion?.version) {
+                                setCurrentVersion(v);
+                                // Load analysis for this version if available
+                                if (v.evaluation) {
+                                  setAnalysisResults({
+                                    overall_score: ((v.evaluation.requirements_alignment || 0) + (v.evaluation.best_practices_score || 0)) / 2,
+                                    requirements_alignment_score: v.evaluation.requirements_alignment || 0,
+                                    best_practices_score: v.evaluation.best_practices_score || 0,
+                                    suggestions: v.evaluation.suggestions || [],
+                                    requirements_gaps: v.evaluation.requirements_gaps || []
+                                  });
+                                } else {
+                                  // Clear analysis and prompt re-analyze
+                                  setAnalysisResults(null);
+                                }
+                                toast({
+                                  title: "Version Loaded",
+                                  description: `Switched to Version ${v.version}`
+                                });
+                              }
+                            }}
+                            className={`p-3 rounded-lg border cursor-pointer transition-all ${
                               v.version === currentVersion?.version
                                 ? 'bg-blue-100 dark:bg-blue-900/20 border-blue-600 dark:border-blue-700'
-                                : 'bg-slate-50 dark:bg-slate-800 border-slate-300 dark:border-slate-600'
+                                : 'bg-slate-50 dark:bg-slate-800 border-slate-300 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-100 dark:hover:bg-slate-700'
                             }`}
                           >
                             <div className="flex justify-between items-center">
                               <div className="flex items-center gap-2">
                                 <span className="font-medium text-slate-900 dark:text-white">Version {v.version}</span>
-                                {v.is_final && <span className="text-xs bg-green-600 text-white px-2 py-1 rounded">Final</span>}
+                                {v.version === currentVersion?.version && (
+                                  <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+                                )}
+                                {v.is_final && <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded">Final</span>}
                               </div>
-                              {v.version !== currentVersion?.version && versionHistory.length > 1 && (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() => handleDeleteVersion(v.version)}
-                                  className="h-6 w-6 p-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/20"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
-                              )}
+                              <div className="flex items-center gap-2">
+                                {v.evaluation && (
+                                  <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
+                                    ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2) >= 80
+                                      ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                      : ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2) >= 60
+                                        ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                        : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                                  }`}>
+                                    {((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2).toFixed(1)}
+                                  </span>
+                                )}
+                                {v.version !== currentVersion?.version && versionHistory.length > 1 && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={(e) => {
+                                      e.stopPropagation(); // Prevent triggering the parent onClick
+                                      handleDeleteVersion(v.version);
+                                    }}
+                                    className="h-6 w-6 p-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/20"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                )}
+                              </div>
                             </div>
-                            {v.evaluation && (
-                              <div className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-                                Score: {((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2).toFixed(1)}/100
-                              </div>
-                            )}
                           </div>
                         ))}
                       </div>
@@ -1628,67 +1797,65 @@ const PromptOptimizer = () => {
               </CardHeader>
               {expandedSections.dataset && (
                 <CardContent className="p-6 space-y-4">
-                  {!dataset ? (
-                    <>
-                      <div>
-                        <Label htmlFor="sampleCount" className="text-slate-700 dark:text-slate-300">Number of Samples</Label>
-                        <Input
-                          id="sampleCount"
-                          type="number"
-                          value={sampleCount}
-                          onChange={(e) => setSampleCount(parseInt(e.target.value))}
-                          min="10"
-                          max="500"
-                          className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100"
-                          disabled={isGeneratingDataset}
-                        />
-                        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-                          Default distribution: 40% positive, 30% edge cases, 20% negative, 10% adversarial
-                        </p>
+                  {/* Sample count input */}
+                  {!dataset && (
+                    <div>
+                      <Label htmlFor="sampleCount" className="text-slate-700 dark:text-slate-300">Number of Samples</Label>
+                      <Input
+                        id="sampleCount"
+                        type="number"
+                        value={sampleCount}
+                        onChange={(e) => setSampleCount(parseInt(e.target.value))}
+                        min="10"
+                        max="500"
+                        className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100"
+                        disabled={isGeneratingDataset}
+                      />
+                      <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+                        Default distribution: 40% positive, 30% edge cases, 20% negative, 10% adversarial
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Progress indicator during generation */}
+                  {isGeneratingDataset && (
+                    <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg p-4 space-y-3">
+                      <div className="flex items-center gap-3">
+                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-400"></div>
+                        <div className="flex-1">
+                          <h3 className="font-semibold text-blue-600 dark:text-blue-400">Generating Dataset...</h3>
+                          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+                            {datasetProgress.total_batches > 0
+                              ? `Processing batch ${datasetProgress.batch} of ${datasetProgress.total_batches}`
+                              : 'Initializing generation...'}
+                          </p>
+                        </div>
                       </div>
 
-                      {/* Progress indicator during generation */}
-                      {isGeneratingDataset && (
-                        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg p-4 space-y-3">
-                          <div className="flex items-center gap-3">
-                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-400"></div>
-                            <div className="flex-1">
-                              <h3 className="font-semibold text-blue-600 dark:text-blue-400">Generating Dataset...</h3>
-                              <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-                                {datasetProgress.total_batches > 0
-                                  ? `Processing batch ${datasetProgress.batch} of ${datasetProgress.total_batches}`
-                                  : 'Initializing generation...'}
-                              </p>
-                            </div>
-                          </div>
+                      {/* Progress bar */}
+                      <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2.5">
+                        <div
+                          className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.min(datasetProgress.progress, 100)}%` }}
+                        ></div>
+                      </div>
 
-                          {/* Progress bar */}
-                          <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2.5">
-                            <div
-                              className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-                              style={{ width: `${Math.min(datasetProgress.progress, 100)}%` }}
-                            ></div>
-                          </div>
+                      <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400">
+                        <span>{Math.round(datasetProgress.progress)}% complete</span>
+                        <span className="text-green-500">● Connected</span>
+                      </div>
+                    </div>
+                  )}
 
-                          <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400">
-                            <span>{Math.round(datasetProgress.progress)}% complete</span>
-                            <span className="text-green-500">● Connected</span>
-                          </div>
-                        </div>
-                      )}
+                  {/* Generate button (shown when no dataset and not generating) */}
+                  {!dataset && !isGeneratingDataset && (
+                    <Button onClick={handleGenerateDataset} className="w-full">
+                      Generate Dataset
+                    </Button>
+                  )}
 
-                      <Button onClick={handleGenerateDataset} disabled={isGeneratingDataset} className="w-full">
-                        {isGeneratingDataset ? (
-                          <>
-                            <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                            Generating... ({Math.round(datasetProgress.progress)}%)
-                          </>
-                        ) : (
-                          "Generate Dataset"
-                        )}
-                      </Button>
-                    </>
-                  ) : (
+                  {/* Dataset generated success message and preview */}
+                  {dataset && (
                     <>
                       <div className="bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg p-4">
                         <div className="flex justify-between items-start">

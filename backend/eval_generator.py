@@ -2,10 +2,10 @@
 Evaluation prompt generator - creates evaluation prompts to test system prompts
 Focuses on contextual relevance, groundedness, and answer relevance
 
-Uses official best practices from:
-- OpenAI GPT-5/4.1: https://cookbook.openai.com/examples/gpt-5/gpt-5_prompting_guide
-- Anthropic Claude 4: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-4-best-practices
-- Google Gemini: https://ai.google.dev/gemini-api/docs/prompting-strategies
+Uses official best practices from (2025 releases):
+- OpenAI GPT-5 & GPT-4.1: https://cookbook.openai.com/examples/gpt-5/gpt-5_prompting_guide
+- Anthropic Claude Sonnet 4.5: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-4-best-practices
+- Google Gemini 2.5: https://ai.google.dev/gemini-api/docs/prompting-strategies
 """
 from typing import List, Dict, Any, Optional
 import os
@@ -41,24 +41,22 @@ class EvalPromptGenerator:
 
         Returns:
             Dictionary with eval_prompt, rationale, and test_scenarios
+
+        Raises:
+            ValueError: If no API key is provided (LLM is required)
         """
-        # Use LLM-based generation if API key is provided
-        if api_key:
-            return await self._generate_with_llm(
-                system_prompt=system_prompt,
-                requirements=requirements,
-                additional_scenarios=additional_scenarios,
-                provider=provider,
-                api_key=api_key,
-                model_name=model_name
-            )
-        else:
-            # Fallback to template-based generation
-            return self._generate_template_based(
-                system_prompt=system_prompt,
-                requirements=requirements,
-                additional_scenarios=additional_scenarios
-            )
+        # LLM-based generation is required - no template fallback
+        if not api_key:
+            raise ValueError("API key is required. Please configure LLM settings first (click the gear icon).")
+
+        return await self._generate_with_llm(
+            system_prompt=system_prompt,
+            requirements=requirements,
+            additional_scenarios=additional_scenarios,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name
+        )
 
     async def _generate_with_llm(
         self,
@@ -71,6 +69,9 @@ class EvalPromptGenerator:
     ) -> Dict[str, Any]:
         """Generate evaluation prompt using LLM"""
 
+        # Detect system type for appropriate evaluation criteria
+        system_type = self._detect_system_type(system_prompt, requirements.use_case)
+
         # Build the generation prompt
         generation_prompt = self._build_llm_generation_prompt(
             system_prompt=system_prompt,
@@ -78,22 +79,209 @@ class EvalPromptGenerator:
             additional_scenarios=additional_scenarios
         )
 
-        try:
-            if provider == "openai":
-                result = await self._generate_eval_with_openai(generation_prompt, api_key, model_name)
-            elif provider == "claude":
-                result = await self._generate_eval_with_claude(generation_prompt, api_key, model_name)
-            elif provider == "gemini":
-                result = await self._generate_eval_with_gemini(generation_prompt, api_key, model_name)
+        # Always use LLM - no fallback to templates
+        if provider == "openai":
+            result = await self._generate_eval_with_openai(generation_prompt, api_key, model_name)
+        elif provider == "claude":
+            result = await self._generate_eval_with_claude(generation_prompt, api_key, model_name)
+        elif provider == "gemini":
+            result = await self._generate_eval_with_gemini(generation_prompt, api_key, model_name)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}. Supported providers: openai, claude, gemini")
+
+        return self._parse_eval_generation_response(result, requirements, system_type)
+
+    def _extract_template_variables(self, system_prompt: str) -> List[str]:
+        """
+        Extract template variables from the system prompt.
+        Template variables are in the format {{variable_name}} or {variable_name}
+        """
+        import re
+        # Match both {{var}} and {var} patterns, but not JSON-like structures
+        double_brace = re.findall(r'\{\{(\w+)\}\}', system_prompt)
+        # For single braces, be more careful to avoid JSON
+        single_brace = re.findall(r'(?<!\{)\{(\w+)\}(?!\})', system_prompt)
+
+        # Combine and deduplicate, preserving order
+        all_vars = []
+        seen = set()
+        for var in double_brace + single_brace:
+            if var not in seen and var.lower() not in ['score', 'json', 'object']:
+                all_vars.append(var)
+                seen.add(var)
+
+        return all_vars
+
+    def _get_template_variables_guidance(self, variables: List[str], system_prompt: str) -> str:
+        """Generate guidance for using template variables in the eval prompt"""
+        if not variables:
+            return ""
+
+        var_descriptions = []
+        for var in variables:
+            # Try to infer what the variable is for based on context
+            var_lower = var.lower()
+            if var_lower in ['input', 'user_input', 'query', 'user_query', 'question']:
+                desc = "The user's input/query to the system"
+            elif var_lower in ['output', 'response', 'result', 'answer']:
+                desc = "The AI's generated response"
+            elif var_lower in ['context', 'document', 'documents', 'knowledge', 'reference']:
+                desc = "Context or reference documents provided"
+            elif var_lower in ['custom_instructions', 'instructions', 'criteria', 'rules']:
+                desc = "Custom instructions or criteria from the user"
+            elif var_lower in ['history', 'conversation', 'chat_history']:
+                desc = "Previous conversation history"
             else:
-                # Fallback to template
-                return self._generate_template_based(system_prompt, requirements, additional_scenarios)
+                desc = "Dynamic content injected at runtime"
+            var_descriptions.append(f"  - `{{{{{var}}}}}`: {desc}")
 
-            return self._parse_eval_generation_response(result, requirements)
+        return f"""
+## TEMPLATE VARIABLES DETECTED IN SYSTEM PROMPT
 
-        except Exception as e:
-            print(f"LLM eval generation failed: {e}. Falling back to template.")
-            return self._generate_template_based(system_prompt, requirements, additional_scenarios)
+The system prompt contains the following template variables that get replaced with dynamic content at runtime:
+{chr(10).join(var_descriptions)}
+
+**CRITICAL**: Your evaluation prompt MUST:
+1. Use these EXACT variable names (with double braces {{{{}}}}) in the evaluation inputs section
+2. Reference these variables when defining what to evaluate
+3. The eval prompt should test how well the AI handles different values of these variables
+
+For example, if the system has `{{{{custom_instructions}}}}`, your eval should check if the AI follows those custom instructions.
+"""
+
+    def _detect_system_type(self, system_prompt: str, use_case: str) -> str:
+        """
+        Detect if the system is interactive (chatbot/copilot) or non-interactive (generator/extractor)
+
+        Returns: 'interactive' or 'non_interactive'
+        """
+        combined_text = f"{system_prompt} {use_case}".lower()
+
+        # Keywords indicating interactive/conversational systems
+        interactive_keywords = [
+            'chat', 'chatbot', 'conversation', 'conversational', 'assistant', 'copilot',
+            'dialogue', 'dialog', 'multi-turn', 'follow-up', 'user interaction',
+            'help desk', 'support agent', 'customer service', 'virtual assistant',
+            'ai assistant', 'personal assistant', 'talk to', 'speak with',
+            'interactive', 'respond to user', 'answer questions', 'q&a',
+            'helpdesk', 'live chat', 'messaging', 'real-time'
+        ]
+
+        # Keywords indicating non-interactive/batch processing systems
+        non_interactive_keywords = [
+            'generate', 'generator', 'summarize', 'summarizer', 'summary',
+            'extract', 'extraction', 'extractor', 'transform', 'convert',
+            'analyze text', 'process document', 'parse', 'classify', 'classification',
+            'translate', 'translation', 'rewrite', 'paraphrase',
+            'story', 'content creation', 'article', 'report generation',
+            'action items', 'key points', 'bullet points', 'tldr',
+            'sentiment analysis', 'entity extraction', 'ner', 'tagging',
+            'single input', 'batch', 'one-shot', 'stateless'
+        ]
+
+        interactive_score = sum(1 for kw in interactive_keywords if kw in combined_text)
+        non_interactive_score = sum(1 for kw in non_interactive_keywords if kw in combined_text)
+
+        # Default to non-interactive if unclear (simpler evaluation)
+        if interactive_score > non_interactive_score:
+            return 'interactive'
+        return 'non_interactive'
+
+    def _get_system_type_guidance(self, system_type: str) -> str:
+        """Get evaluation guidance specific to the system type"""
+
+        if system_type == 'interactive':
+            return """
+## SYSTEM TYPE: INTERACTIVE (Chatbot/Copilot/Assistant)
+
+This is an **interactive conversational system** where users engage in multi-turn dialogues.
+
+### Special Evaluation Considerations for Interactive Systems:
+
+1. **Conversation Context Handling**
+   - Does the response acknowledge and build upon previous turns?
+   - Is context from earlier messages properly retained?
+   - Are references to prior statements handled correctly?
+
+2. **Persona Consistency**
+   - Does the assistant maintain a consistent personality across turns?
+   - Is the tone appropriate for the conversation stage?
+   - Does it remember user preferences mentioned earlier?
+
+3. **Turn-by-Turn Coherence**
+   - Is each response appropriately scoped for the current turn?
+   - Does it avoid repeating information already provided?
+   - Are follow-up questions handled naturally?
+
+4. **Conversation Flow**
+   - Does the response move the conversation forward productively?
+   - Are clarifying questions asked when appropriate?
+   - Is the conversation kept on track without being rigid?
+
+5. **Context Switching**
+   - How well does it handle topic changes within conversation?
+   - Can it return to previous topics when referenced?
+
+### Input Format for Evaluation
+The `{input}` will contain conversation history in this format:
+```
+[Previous turns if any]
+User: [current user message]
+```
+
+### Additional Rating Criteria for Interactive Systems:
+- **Rating 5**: Perfect context retention, natural conversation flow, consistent persona
+- **Rating 4**: Good context handling with minor gaps
+- **Rating 3**: Basic context awareness but some inconsistencies
+- **Rating 2**: Poor context retention, persona drift
+- **Rating 1**: Ignores conversation history, incoherent responses
+"""
+        else:
+            return """
+## SYSTEM TYPE: NON-INTERACTIVE (Generator/Extractor/Transformer)
+
+This is a **non-interactive processing system** that takes a single input and produces a single output.
+
+### Special Evaluation Considerations for Non-Interactive Systems:
+
+1. **Output Completeness**
+   - Does the output fully address all aspects of the input?
+   - Is all required information extracted/generated?
+   - Are there any missing elements?
+
+2. **Format Compliance**
+   - Does the output match the expected format exactly?
+   - Are structural requirements (JSON, bullet points, etc.) met?
+   - Is the output properly formatted and parseable?
+
+3. **Accuracy & Faithfulness**
+   - Is the output grounded in the input content?
+   - Are there any hallucinations or fabricated information?
+   - Does it accurately represent the source material?
+
+4. **Transformation Quality**
+   - How well does the output serve its intended purpose?
+   - Is the transformation (summary, extraction, generation) effective?
+   - Does it add appropriate value beyond the raw input?
+
+5. **Standalone Validity**
+   - Can the output be used independently?
+   - Is it self-contained and complete?
+   - Does it make sense without the original input context?
+
+### Input Format for Evaluation
+The `{input}` will contain the source content to be processed:
+```
+[Document/text/data to be processed]
+```
+
+### Additional Rating Criteria for Non-Interactive Systems:
+- **Rating 5**: Perfect format, complete extraction, accurate transformation
+- **Rating 4**: Minor format issues or small omissions
+- **Rating 3**: Correct but incomplete or poorly formatted
+- **Rating 2**: Significant accuracy issues or missing key elements
+- **Rating 1**: Wrong format, hallucinations, or fundamentally incorrect output
+"""
 
     def _build_llm_generation_prompt(
         self,
@@ -113,6 +301,14 @@ class EvalPromptGenerator:
 
         # Build requirement-specific evaluation criteria
         requirement_criteria = self._build_requirement_criteria_for_llm(requirements)
+
+        # Detect system type and get specific guidance
+        system_type = self._detect_system_type(system_prompt, requirements.use_case)
+        system_type_guidance = self._get_system_type_guidance(system_type)
+
+        # Extract template variables from the system prompt
+        template_variables = self._extract_template_variables(system_prompt)
+        template_variables_guidance = self._get_template_variables_guidance(template_variables, system_prompt)
 
         return f"""You are an expert in LLM evaluation and quality assurance. Your task is to create a comprehensive evaluation prompt that will be used to assess responses generated by an AI assistant.
 
@@ -134,6 +330,8 @@ class EvalPromptGenerator:
 {requirements.target_provider}
 {scenarios_text}
 
+{system_type_guidance}
+{template_variables_guidance}
 ## OFFICIAL PROVIDER BEST PRACTICES
 
 When creating the evaluation prompt, follow these official guidelines for {requirements.target_provider}:
@@ -210,9 +408,10 @@ Specify exact JSON structure:
 
 The evaluation prompt you create MUST:
 
-1. **Use {{{{input}}}} and {{{{output}}}} placeholders** - These are the variables that will be injected:
+1. **Use the correct placeholders for evaluation inputs**:
    - `{{{{input}}}}`: The full input provided to the AI (user query + context)
    - `{{{{output}}}}`: The AI assistant's response to evaluate
+   - If the system prompt has OTHER template variables (like `{{{{custom_instructions}}}}`), include them in the eval inputs section as they may affect how the output should be judged
 
 2. **Follow the 5-section structure** exactly as shown above
 
@@ -269,23 +468,34 @@ Return your response in this EXACT format:
         api_key: str,
         model_name: Optional[str]
     ) -> str:
-        """Generate eval prompt using OpenAI"""
+        """Generate eval prompt using OpenAI with fallback to gpt-4o"""
+        import logging
         client = openai.AsyncOpenAI(api_key=api_key)
 
-        response = await client.chat.completions.create(
-            model=model_name or "gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert in creating evaluation prompts for LLM systems. Create detailed, specific evaluation criteria."
-                },
-                {"role": "user", "content": generation_prompt}
-            ],
-            temperature=0.7,
-            max_tokens=8000
-        )
+        async def try_model(model: str) -> str:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert in creating evaluation prompts for LLM systems. Create detailed, specific evaluation criteria."
+                    },
+                    {"role": "user", "content": generation_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=8000
+            )
+            return response.choices[0].message.content
 
-        return response.choices[0].message.content
+        # Try with specified model first
+        primary_model = model_name or "gpt-4o"
+        try:
+            return await try_model(primary_model)
+        except Exception as e:
+            if primary_model != "gpt-4o":
+                logging.warning(f"Model {primary_model} failed: {e}. Falling back to gpt-4o")
+                return await try_model("gpt-4o")
+            raise
 
     async def _generate_eval_with_claude(
         self,
@@ -323,7 +533,8 @@ Return your response in this EXACT format:
     def _parse_eval_generation_response(
         self,
         llm_response: str,
-        requirements: Requirements
+        requirements: Requirements,
+        system_type: str = "non_interactive"
     ) -> Dict[str, Any]:
         """Parse the LLM response to extract eval prompt, rationale, and scenarios"""
         eval_prompt = ""
@@ -363,6 +574,9 @@ Return your response in this EXACT format:
                     if line.strip().startswith("-") and line.strip("- ").strip()
                 ]
 
+        # Format system type for display
+        system_type_display = "Interactive (Chatbot/Copilot)" if system_type == "interactive" else "Non-Interactive (Generator/Processor)"
+
         # If parsing failed, use template fallback
         if not eval_prompt:
             return self._generate_template_based(
@@ -371,11 +585,17 @@ Return your response in this EXACT format:
                 additional_scenarios=None
             )
 
+        # Prepend system type info to rationale
+        system_type_note = f"**Detected System Type:** {system_type_display}\n\n"
+        full_rationale = system_type_note + (rationale or "LLM-generated evaluation prompt tailored to the specific use case and requirements.")
+
         return {
             "eval_prompt": eval_prompt,
-            "rationale": rationale or "LLM-generated evaluation prompt tailored to the specific use case and requirements.",
+            "rationale": full_rationale,
             "test_scenarios": test_scenarios or self._identify_test_scenarios(requirements, None),
-            "generation_method": "llm"
+            "generation_method": "llm",
+            "system_type": system_type,
+            "system_type_display": system_type_display
         }
 
     def _generate_template_based(
@@ -702,21 +922,33 @@ Ensure examples are:
             return self._get_default_calibration_examples(requirements)
 
     async def _generate_examples_openai(self, instruction: str, api_key: str, model_name: Optional[str]) -> List[Dict]:
-        """Generate examples using OpenAI"""
+        """Generate examples using OpenAI with fallback to gpt-4o"""
         import json
+        import logging
         client = openai.AsyncOpenAI(api_key=api_key)
 
-        response = await client.chat.completions.create(
-            model=model_name or "gpt-4o",
-            messages=[
-                {"role": "system", "content": "You generate calibration examples for LLM evaluation. Always respond with valid JSON."},
-                {"role": "user", "content": instruction}
-            ],
-            temperature=0.7,
-            max_tokens=4000
-        )
+        async def try_model(model: str) -> str:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You generate calibration examples for LLM evaluation. Always respond with valid JSON."},
+                    {"role": "user", "content": instruction}
+                ],
+                temperature=0.7,
+                max_tokens=4000
+            )
+            return response.choices[0].message.content
 
-        content = response.choices[0].message.content
+        primary_model = model_name or "gpt-4o"
+        try:
+            content = await try_model(primary_model)
+        except Exception as e:
+            if primary_model != "gpt-4o":
+                logging.warning(f"Model {primary_model} failed: {e}. Falling back to gpt-4o")
+                content = await try_model("gpt-4o")
+            else:
+                raise
+
         return self._parse_examples_json(content)
 
     async def _generate_examples_claude(self, instruction: str, api_key: str, model_name: Optional[str]) -> List[Dict]:
@@ -997,21 +1229,41 @@ Provide your response in the following format:
         return result
 
     async def _refine_with_openai(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
-        """Use OpenAI to refine the eval prompt"""
-        try:
-            client = openai.AsyncOpenAI(api_key=api_key)
+        """Use OpenAI to refine the eval prompt with fallback to gpt-4o"""
+        import logging
+
+        async def try_model(model: str, client) -> str:
             response = await client.chat.completions.create(
-                model=model_name or "gpt-4o",
+                model=model,
                 messages=[
-                    {"role": "system", "content": "You are an expert prompt engineer specializing in creating evaluation prompts for LLM systems."},
+                    {"role": "system", "content": "You are an expert prompt engineer specializing in creating evaluation prompts for LLM systems. When refining prompts, return the complete refined prompt."},
                     {"role": "user", "content": instruction}
                 ],
                 temperature=0.7,
                 max_tokens=8000
             )
-            content = response.choices[0].message.content
-            return self._parse_refine_response(content)
+            return response.choices[0].message.content
+
+        try:
+            client = openai.AsyncOpenAI(api_key=api_key)
+            primary_model = model_name or "gpt-4o"
+
+            try:
+                content = await try_model(primary_model, client)
+                logging.info(f"[EVAL REFINE] Successfully got response from {primary_model}, length: {len(content)}")
+            except Exception as e:
+                if primary_model != "gpt-4o":
+                    logging.warning(f"[EVAL REFINE] Model {primary_model} failed: {e}. Falling back to gpt-4o")
+                    content = await try_model("gpt-4o", client)
+                    logging.info(f"[EVAL REFINE] Successfully got response from gpt-4o, length: {len(content)}")
+                else:
+                    raise
+
+            result = self._parse_refine_response(content)
+            logging.info(f"[EVAL REFINE] Parsed result - refined_prompt length: {len(result.get('refined_prompt', ''))}, changes: {len(result.get('changes_made', []))}")
+            return result
         except Exception as e:
+            logging.error(f"[EVAL REFINE] Error: {str(e)}")
             return {
                 "refined_prompt": "",
                 "changes_made": [],
@@ -1055,34 +1307,92 @@ Provide your response in the following format:
 
     def _parse_refine_response(self, content: str) -> Dict[str, Any]:
         """Parse the LLM response to extract refined prompt, changes, and rationale"""
+        import logging
         refined_prompt = ""
         changes_made = []
         rationale = ""
 
-        # Split by sections
+        logging.info(f"[PARSE REFINE] Content length: {len(content)}")
+        logging.info(f"[PARSE REFINE] Content preview (first 500 chars): {content[:500]}")
+
+        # Split by sections (handle both ### and ** formatting)
         sections = content.split("###")
 
         for section in sections:
             section = section.strip()
-            if section.startswith("Refined Evaluation Prompt") or section.startswith(" Refined Evaluation Prompt"):
+            section_upper = section.upper()
+
+            # Look for refined prompt section with various formats
+            if (section_upper.startswith("REFINED EVALUATION PROMPT") or
+                section_upper.startswith(" REFINED EVALUATION PROMPT") or
+                section_upper.startswith("**REFINED EVALUATION PROMPT")):
                 lines = section.split("\n", 1)
                 if len(lines) > 1:
                     refined_prompt = lines[1].strip()
                     # Remove markdown code blocks if present
                     if refined_prompt.startswith("```"):
-                        refined_prompt = refined_prompt.split("```", 2)[1] if "```" in refined_prompt[3:] else refined_prompt[3:]
-                        refined_prompt = refined_prompt.strip()
+                        parts = refined_prompt.split("```")
+                        if len(parts) >= 2:
+                            refined_prompt = parts[1].strip()
+                            # Remove language identifier if present
+                            if refined_prompt.startswith(('markdown', 'text', '\n')):
+                                refined_prompt = refined_prompt.split('\n', 1)[-1].strip() if '\n' in refined_prompt else refined_prompt
                     if refined_prompt.endswith("```"):
                         refined_prompt = refined_prompt[:-3].strip()
 
-            elif section.startswith("Changes Made") or section.startswith(" Changes Made"):
+            elif (section_upper.startswith("CHANGES MADE") or
+                  section_upper.startswith(" CHANGES MADE") or
+                  section_upper.startswith("**CHANGES MADE")):
                 lines = section.split("\n")[1:]
-                changes_made = [line.strip("- ").strip() for line in lines if line.strip().startswith("-")]
+                changes_made = [line.strip("- *").strip() for line in lines if line.strip().startswith("-") or line.strip().startswith("*")]
 
-            elif section.startswith("Rationale") or section.startswith(" Rationale"):
+            elif (section_upper.startswith("RATIONALE") or
+                  section_upper.startswith(" RATIONALE") or
+                  section_upper.startswith("**RATIONALE")):
                 lines = section.split("\n", 1)
                 if len(lines) > 1:
                     rationale = lines[1].strip()
+
+        # If standard parsing failed, try to extract the largest code block as the refined prompt
+        if not refined_prompt and "```" in content:
+            import re
+            code_blocks = re.findall(r'```(?:markdown|text)?\n?(.*?)```', content, re.DOTALL)
+            if code_blocks:
+                # Find the longest code block (likely the full prompt)
+                refined_prompt = max(code_blocks, key=len).strip()
+
+        # If still no refined prompt, check if content itself might be the prompt
+        if not refined_prompt and len(content) > 100:
+            # If the response doesn't follow our format, use the entire content minus any meta-text
+            # Look for common prompt markers
+            if "**I. Evaluator" in content or "### **I." in content or "Evaluator's Role" in content:
+                # Try to extract just the prompt portion, removing any meta sections
+                prompt_start = content
+                # Remove any "Changes Made" or "Rationale" sections at the end
+                for marker in ["### Changes Made", "### Rationale", "**Changes Made", "**Rationale"]:
+                    if marker in prompt_start:
+                        prompt_start = prompt_start.split(marker)[0].strip()
+                refined_prompt = prompt_start
+                if not rationale:
+                    rationale = "Refined based on user feedback"
+                if not changes_made:
+                    changes_made = ["Incorporated user feedback into evaluation prompt"]
+
+        # Last resort: if we got changes_made but no prompt, the LLM may have returned the prompt
+        # without proper section markers - try to find it between code blocks
+        if not refined_prompt and "```" in content:
+            import re
+            # Look for content between triple backticks
+            all_blocks = re.findall(r'```(?:\w*\n)?(.*?)```', content, re.DOTALL)
+            logging.info(f"[PARSE REFINE] Found {len(all_blocks)} code blocks")
+            for i, block in enumerate(all_blocks):
+                logging.info(f"[PARSE REFINE] Block {i} length: {len(block.strip())}, preview: {block.strip()[:100]}")
+                if len(block.strip()) > 200 and ("Evaluator" in block or "Rating" in block or "INPUT" in block or "output" in block.lower()):
+                    refined_prompt = block.strip()
+                    logging.info(f"[PARSE REFINE] Using code block {i} as refined prompt")
+                    break
+
+        logging.info(f"[PARSE REFINE] Final result - refined_prompt: {len(refined_prompt)} chars, changes_made: {len(changes_made)}, rationale: {len(rationale)} chars")
 
         return {
             "refined_prompt": refined_prompt,

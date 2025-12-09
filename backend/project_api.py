@@ -278,7 +278,9 @@ async def rewrite_prompt(project_id: str, request: RewriteRequest):
         req_analysis["gaps"],
         bp_analysis["violations"],
         request.focus_areas,
-        requirements.target_provider
+        llm_provider,
+        api_key,
+        model_name
     )
 
     return RewriteResponse(**result)
@@ -811,6 +813,7 @@ async def iterative_rewrite(project_id: str, request: IterativeRewriteRequest):
     settings_doc = await db.settings.find_one()
     llm_provider = settings_doc.get("llm_provider", "openai") if settings_doc else "openai"
     api_key = settings_doc.get("api_key") if settings_doc else None
+    model_name = settings_doc.get("model_name") if settings_doc else None
 
     # Get or create refinement session
     session = project.get("refinement_session")
@@ -826,7 +829,9 @@ async def iterative_rewrite(project_id: str, request: IterativeRewriteRequest):
         requirements=requirements,
         previous_iterations=previous_iterations,
         iteration=request.iteration,
-        provider=llm_provider
+        provider=llm_provider,
+        api_key=api_key,
+        model_name=model_name
     )
 
     # Store iteration in session
@@ -924,6 +929,8 @@ async def compare_versions(project_id: str, request: ABCompareRequest):
     # Get LLM settings
     settings_doc = await db.settings.find_one()
     llm_provider = settings_doc.get("llm_provider", "openai") if settings_doc else "openai"
+    api_key = settings_doc.get("api_key") if settings_doc else None
+    model_name = settings_doc.get("model_name") if settings_doc else None
 
     # Perform comparison
     rewriter = get_prompt_rewriter()
@@ -931,7 +938,9 @@ async def compare_versions(project_id: str, request: ABCompareRequest):
         prompt_a=version_a["prompt_text"],
         prompt_b=version_b["prompt_text"],
         requirements=requirements,
-        provider=llm_provider
+        provider=llm_provider,
+        api_key=api_key,
+        model_name=model_name
     )
 
     # Build comparison object

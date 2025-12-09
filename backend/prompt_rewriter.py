@@ -7,7 +7,6 @@ Uses official best practices from:
 - Google Gemini: https://ai.google.dev/gemini-api/docs/prompting-strategies
 """
 from typing import List, Dict, Any, Optional
-import os
 from models import Requirements
 from official_best_practices import get_provider_guidance
 import openai
@@ -15,25 +14,20 @@ import anthropic
 import google.generativeai as genai
 
 
+# Default models for each provider
+DEFAULT_MODELS = {
+    "openai": "gpt-4o",
+    "claude": "claude-3-5-sonnet-20241022",
+    "gemini": "gemini-2.0-flash-exp"
+}
+
+
 class PromptRewriter:
     """Uses LLMs to rewrite and improve prompts"""
 
     def __init__(self):
-        # Initialize API clients
-        self.openai_client = None
-        self.anthropic_client = None
-        self.gemini_configured = False
-
-        # Try to initialize clients
-        if os.getenv("OPENAI_API_KEY"):
-            self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        if os.getenv("ANTHROPIC_API_KEY"):
-            self.anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-        if os.getenv("GEMINI_API_KEY"):
-            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            self.gemini_configured = True
+        # No initialization needed - clients are created per-request with provided API keys
+        pass
 
     async def rewrite_prompt(
         self,
@@ -42,7 +36,9 @@ class PromptRewriter:
         gaps: List[str],
         violations: List[Dict[str, str]],
         focus_areas: Optional[List[str]] = None,
-        provider: str = "openai"
+        provider: str = "openai",
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Rewrite a prompt to improve alignment with requirements and best practices
@@ -54,6 +50,8 @@ class PromptRewriter:
             violations: List of best practice violations
             focus_areas: Optional specific areas to focus on
             provider: LLM provider to use for rewriting
+            api_key: API key for the provider (from database settings)
+            model_name: Optional specific model to use
 
         Returns:
             Dictionary with improved_prompt, changes_made, and rationale
@@ -67,13 +65,13 @@ class PromptRewriter:
             focus_areas
         )
 
-        # Use the specified provider to rewrite
-        if provider == "openai" and self.openai_client:
-            result = await self._rewrite_with_openai(rewrite_instruction)
-        elif provider == "claude" and self.anthropic_client:
-            result = await self._rewrite_with_claude(rewrite_instruction)
-        elif provider == "gemini" and self.gemini_configured:
-            result = await self._rewrite_with_gemini(rewrite_instruction)
+        # Use the specified provider to rewrite (only if API key is provided)
+        if provider == "openai" and api_key:
+            result = await self._rewrite_with_openai(rewrite_instruction, api_key, model_name)
+        elif provider == "claude" and api_key:
+            result = await self._rewrite_with_claude(rewrite_instruction, api_key, model_name)
+        elif provider == "gemini" and api_key:
+            result = await self._rewrite_with_gemini(rewrite_instruction, api_key, model_name)
         else:
             # Fallback to rule-based rewrite
             result = self._rule_based_rewrite(current_prompt, gaps, violations)
@@ -183,11 +181,14 @@ Provide your response in this EXACT format:
 """
         return instruction
 
-    async def _rewrite_with_openai(self, instruction: str) -> Dict[str, Any]:
+    async def _rewrite_with_openai(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use OpenAI to rewrite the prompt"""
         try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+            client = openai.AsyncOpenAI(api_key=api_key)
+            model = model_name or DEFAULT_MODELS["openai"]
+
+            response = await client.chat.completions.create(
+                model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert prompt engineer specializing in optimizing system prompts."},
                     {"role": "user", "content": instruction}
@@ -206,11 +207,14 @@ Provide your response in this EXACT format:
                 "rationale": f"Error using OpenAI: {str(e)}"
             }
 
-    async def _rewrite_with_claude(self, instruction: str) -> Dict[str, Any]:
+    async def _rewrite_with_claude(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use Claude to rewrite the prompt"""
         try:
-            response = self.anthropic_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            model = model_name or DEFAULT_MODELS["claude"]
+
+            response = await client.messages.create(
+                model=model,
                 max_tokens=4000,
                 messages=[
                     {"role": "user", "content": instruction}
@@ -227,11 +231,14 @@ Provide your response in this EXACT format:
                 "rationale": f"Error using Claude: {str(e)}"
             }
 
-    async def _rewrite_with_gemini(self, instruction: str) -> Dict[str, Any]:
+    async def _rewrite_with_gemini(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use Gemini to rewrite the prompt"""
         try:
-            model = genai.GenerativeModel('gemini-1.5-pro')
-            response = model.generate_content(instruction)
+            genai.configure(api_key=api_key)
+            model_id = model_name or DEFAULT_MODELS["gemini"]
+            model = genai.GenerativeModel(model_id)
+
+            response = await model.generate_content_async(instruction)
 
             content = response.text
             return self._parse_rewrite_response(content)
@@ -333,7 +340,9 @@ Provide your response in this EXACT format:
         requirements: "Requirements",
         previous_iterations: List[Dict[str, Any]] = None,
         iteration: int = 1,
-        provider: str = "openai"
+        provider: str = "openai",
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Perform iterative refinement based on user feedback
@@ -345,6 +354,8 @@ Provide your response in this EXACT format:
             previous_iterations: History of previous iterations
             iteration: Current iteration number
             provider: LLM provider to use
+            api_key: API key for the provider (from database settings)
+            model_name: Optional specific model to use
 
         Returns:
             Dictionary with improved_prompt, changes_made, rationale, improvement_score, suggestions_for_next
@@ -424,24 +435,27 @@ Provide your response in this EXACT format:
 - [Suggestion 3 for further improvement]
 """
 
-        # Use the specified provider
-        if provider == "openai" and self.openai_client:
-            result = await self._iterative_rewrite_openai(instruction)
-        elif provider == "claude" and self.anthropic_client:
-            result = await self._iterative_rewrite_claude(instruction)
-        elif provider == "gemini" and self.gemini_configured:
-            result = await self._iterative_rewrite_gemini(instruction)
+        # Use the specified provider (only if API key is provided)
+        if provider == "openai" and api_key:
+            result = await self._iterative_rewrite_openai(instruction, api_key, model_name)
+        elif provider == "claude" and api_key:
+            result = await self._iterative_rewrite_claude(instruction, api_key, model_name)
+        elif provider == "gemini" and api_key:
+            result = await self._iterative_rewrite_gemini(instruction, api_key, model_name)
         else:
             result = self._basic_iterative_rewrite(current_prompt, user_feedback)
 
         result["iteration"] = iteration
         return result
 
-    async def _iterative_rewrite_openai(self, instruction: str) -> Dict[str, Any]:
+    async def _iterative_rewrite_openai(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use OpenAI for iterative rewrite"""
         try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+            client = openai.AsyncOpenAI(api_key=api_key)
+            model = model_name or DEFAULT_MODELS["openai"]
+
+            response = await client.chat.completions.create(
+                model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert prompt engineer specializing in iterative refinement."},
                     {"role": "user", "content": instruction}
@@ -460,11 +474,14 @@ Provide your response in this EXACT format:
                 "suggestions_for_next": []
             }
 
-    async def _iterative_rewrite_claude(self, instruction: str) -> Dict[str, Any]:
+    async def _iterative_rewrite_claude(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use Claude for iterative rewrite"""
         try:
-            response = self.anthropic_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            model = model_name or DEFAULT_MODELS["claude"]
+
+            response = await client.messages.create(
+                model=model,
                 max_tokens=4000,
                 messages=[{"role": "user", "content": instruction}]
             )
@@ -479,11 +496,14 @@ Provide your response in this EXACT format:
                 "suggestions_for_next": []
             }
 
-    async def _iterative_rewrite_gemini(self, instruction: str) -> Dict[str, Any]:
+    async def _iterative_rewrite_gemini(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use Gemini for iterative rewrite"""
         try:
-            model = genai.GenerativeModel('gemini-1.5-pro')
-            response = model.generate_content(instruction)
+            genai.configure(api_key=api_key)
+            model_id = model_name or DEFAULT_MODELS["gemini"]
+            model = genai.GenerativeModel(model_id)
+
+            response = await model.generate_content_async(instruction)
             content = response.text
             return self._parse_iterative_response(content)
         except Exception as e:
@@ -570,7 +590,9 @@ Provide your response in this EXACT format:
         prompt_a: str,
         prompt_b: str,
         requirements: "Requirements",
-        provider: str = "openai"
+        provider: str = "openai",
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Compare two prompt versions side-by-side using LLM analysis
@@ -580,6 +602,8 @@ Provide your response in this EXACT format:
             prompt_b: Second prompt version
             requirements: User requirements
             provider: LLM provider to use
+            api_key: API key for the provider (from database settings)
+            model_name: Optional specific model to use
 
         Returns:
             Dictionary with detailed comparison analysis
@@ -650,22 +674,25 @@ Confidence: [0-100]
 [3-5 sentences explaining the recommendation with specific examples from both prompts]
 """
 
-        if provider == "openai" and self.openai_client:
-            result = await self._compare_with_openai(instruction)
-        elif provider == "claude" and self.anthropic_client:
-            result = await self._compare_with_claude(instruction)
-        elif provider == "gemini" and self.gemini_configured:
-            result = await self._compare_with_gemini(instruction)
+        if provider == "openai" and api_key:
+            result = await self._compare_with_openai(instruction, api_key, model_name)
+        elif provider == "claude" and api_key:
+            result = await self._compare_with_claude(instruction, api_key, model_name)
+        elif provider == "gemini" and api_key:
+            result = await self._compare_with_gemini(instruction, api_key, model_name)
         else:
             result = self._basic_compare(prompt_a, prompt_b)
 
         return result
 
-    async def _compare_with_openai(self, instruction: str) -> Dict[str, Any]:
+    async def _compare_with_openai(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use OpenAI for comparison"""
         try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+            client = openai.AsyncOpenAI(api_key=api_key)
+            model = model_name or DEFAULT_MODELS["openai"]
+
+            response = await client.chat.completions.create(
+                model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert at comparing and evaluating system prompts."},
                     {"role": "user", "content": instruction}
@@ -678,11 +705,14 @@ Confidence: [0-100]
         except Exception as e:
             return {"error": str(e)}
 
-    async def _compare_with_claude(self, instruction: str) -> Dict[str, Any]:
+    async def _compare_with_claude(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use Claude for comparison"""
         try:
-            response = self.anthropic_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            model = model_name or DEFAULT_MODELS["claude"]
+
+            response = await client.messages.create(
+                model=model,
                 max_tokens=3000,
                 messages=[{"role": "user", "content": instruction}]
             )
@@ -691,11 +721,14 @@ Confidence: [0-100]
         except Exception as e:
             return {"error": str(e)}
 
-    async def _compare_with_gemini(self, instruction: str) -> Dict[str, Any]:
+    async def _compare_with_gemini(self, instruction: str, api_key: str, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Use Gemini for comparison"""
         try:
-            model = genai.GenerativeModel('gemini-1.5-pro')
-            response = model.generate_content(instruction)
+            genai.configure(api_key=api_key)
+            model_id = model_name or DEFAULT_MODELS["gemini"]
+            model = genai.GenerativeModel(model_id)
+
+            response = await model.generate_content_async(instruction)
             content = response.text
             return self._parse_comparison_response(content)
         except Exception as e:

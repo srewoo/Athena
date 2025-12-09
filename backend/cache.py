@@ -1,5 +1,5 @@
 """
-Redis Cache Manager for PromptCritic
+Redis Cache Manager for Athena
 Implements caching layer for prompt evaluations to reduce API costs and improve response times
 """
 

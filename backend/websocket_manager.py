@@ -1,5 +1,5 @@
 """
-WebSocket Manager for PromptCritic
+WebSocket Manager for Athena
 Handles real-time updates for evaluation progress
 """
 

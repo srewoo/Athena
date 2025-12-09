@@ -1,5 +1,5 @@
 """
-Weighted Scoring Engine for PromptCritic
+Weighted Scoring Engine for Athena
 Implements intelligent scoring with use-case profiles and weighted criteria
 """
 

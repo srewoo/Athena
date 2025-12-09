@@ -1,5 +1,5 @@
 """
-Data models for PromptCritic - System Prompt Optimization & Evaluation Tool
+Data models for Athena - System Prompt Optimization & Evaluation Tool
 """
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
