@@ -1069,12 +1069,17 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
             }
             for tc in test_cases[:10]
         ]
+        mock_count = len(test_run["results"])
         test_run["summary"] = {
-            "total": len(test_run["results"]),
-            "passed": len(test_run["results"]),
+            "total": mock_count,
+            "completed_items": mock_count,
+            "passed": mock_count,
             "failed": 0,
             "avg_score": 4.0,
-            "pass_rate": 100.0
+            "pass_rate": 100.0,
+            "score_distribution": {"1": 0, "2": 0, "3": 0, "4": mock_count, "5": 0},
+            "estimated_cost": round(mock_count * 0.0005, 4),
+            "total_latency_ms": mock_count * 100
         }
     else:
         # Run actual LLM tests
@@ -1106,12 +1111,36 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
         scores = [r.get("score", 0) for r in results if not r.get("error")]
         avg_score = sum(scores) / len(scores) if scores else 0
 
+        # Calculate score distribution
+        score_distribution = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+        for r in results:
+            score = r.get("score", 0)
+            if score >= 4.5:
+                score_distribution["5"] += 1
+            elif score >= 3.5:
+                score_distribution["4"] += 1
+            elif score >= 2.5:
+                score_distribution["3"] += 1
+            elif score >= 1.5:
+                score_distribution["2"] += 1
+            else:
+                score_distribution["1"] += 1
+
+        # Estimate cost (rough estimate based on tokens)
+        total_latency = sum(r.get("latency_ms", 0) for r in results)
+        # Rough cost estimate: $0.0001 per test case for simple models
+        estimated_cost = total * 0.0005
+
         test_run["summary"] = {
             "total": total,
+            "completed_items": total,
             "passed": passed,
             "failed": failed,
             "avg_score": round(avg_score, 2),
-            "pass_rate": round((passed / total * 100) if total > 0 else 0, 1)
+            "pass_rate": round((passed / total * 100) if total > 0 else 0, 1),
+            "score_distribution": score_distribution,
+            "estimated_cost": round(estimated_cost, 4),
+            "total_latency_ms": total_latency
         }
 
     # Persist test run to project file

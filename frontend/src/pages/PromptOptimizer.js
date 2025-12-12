@@ -3069,21 +3069,21 @@ const PromptOptimizer = () => {
 
       {/* Detail View Modal */}
       <Dialog open={detailViewOpen} onOpenChange={setDetailViewOpen}>
-        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              Test Result #{detailViewItem?.dataset_item_index + 1}
+            <DialogTitle className="flex items-center gap-2 text-slate-900 dark:text-slate-100">
+              Test Result #{(detailViewItem?.dataset_item_index ?? detailViewItem?.test_case_id ?? 0) + 1}
               {detailViewItem?.passed ? (
                 <span className="px-2 py-0.5 bg-green-600 text-white text-xs rounded">PASS</span>
               ) : (
                 <span className="px-2 py-0.5 bg-red-600 text-white text-xs rounded">FAIL</span>
               )}
               <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                detailViewItem?.eval_score >= 4 ? 'bg-green-600 text-white' :
-                detailViewItem?.eval_score >= 3 ? 'bg-yellow-600 text-white' :
+                (detailViewItem?.eval_score ?? detailViewItem?.score ?? 0) >= 4 ? 'bg-green-600 text-white' :
+                (detailViewItem?.eval_score ?? detailViewItem?.score ?? 0) >= 3 ? 'bg-yellow-600 text-white' :
                 'bg-red-600 text-white'
               }`}>
-                Score: {detailViewItem?.eval_score?.toFixed(1)}
+                Score: {(detailViewItem?.eval_score ?? detailViewItem?.score ?? 0).toFixed(1)}
               </span>
             </DialogTitle>
           </DialogHeader>
@@ -3091,39 +3091,39 @@ const PromptOptimizer = () => {
           {detailViewItem && (
             <div className="space-y-4">
               <div>
-                <Label className="text-slate-700 dark:text-slate-300 font-semibold">Input</Label>
-                <div className="mt-1 p-3 bg-slate-100 dark:bg-slate-800 rounded-lg whitespace-pre-wrap text-sm max-h-32 overflow-y-auto">
-                  {detailViewItem.input_data?.input || JSON.stringify(detailViewItem.input_data, null, 2)}
+                <Label className="text-amber-600 dark:text-amber-400 font-semibold">Input</Label>
+                <div className="mt-1 p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg whitespace-pre-wrap text-sm max-h-32 overflow-y-auto text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-600">
+                  {detailViewItem.input_data?.input || detailViewItem.input || JSON.stringify(detailViewItem.input_data || detailViewItem.input, null, 2) || 'N/A'}
                 </div>
               </div>
 
               <div>
-                <Label className="text-slate-700 dark:text-slate-300 font-semibold">Prompt Output</Label>
-                <div className="mt-1 p-3 bg-slate-100 dark:bg-slate-800 rounded-lg whitespace-pre-wrap text-sm max-h-48 overflow-y-auto">
-                  {detailViewItem.prompt_output}
+                <Label className="text-emerald-600 dark:text-emerald-400 font-semibold">Prompt Output</Label>
+                <div className="mt-1 p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg whitespace-pre-wrap text-sm max-h-48 overflow-y-auto text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-600">
+                  {detailViewItem.prompt_output || detailViewItem.output || 'N/A'}
                 </div>
               </div>
 
               <div>
-                <Label className="text-slate-700 dark:text-slate-300 font-semibold">Evaluation Feedback</Label>
-                <div className="mt-1 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg whitespace-pre-wrap text-sm max-h-48 overflow-y-auto">
-                  {detailViewItem.eval_feedback}
+                <Label className="text-blue-600 dark:text-blue-400 font-semibold">Evaluation Feedback</Label>
+                <div className="mt-1 p-3 bg-blue-50 dark:bg-blue-900/30 rounded-lg whitespace-pre-wrap text-sm max-h-48 overflow-y-auto text-slate-800 dark:text-slate-200 border border-blue-200 dark:border-blue-800">
+                  {detailViewItem.eval_feedback || detailViewItem.feedback || 'N/A'}
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4 pt-2 border-t">
+              <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-200 dark:border-slate-600">
                 <div>
-                  <Label className="text-slate-500 text-xs">Latency</Label>
-                  <div className="font-mono">{detailViewItem.latency_ms}ms</div>
+                  <Label className="text-slate-500 dark:text-slate-400 text-xs">Latency</Label>
+                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.latency_ms}ms</div>
                 </div>
                 <div>
-                  <Label className="text-slate-500 text-xs">Tokens Used</Label>
-                  <div className="font-mono">{detailViewItem.tokens_used || 'N/A'}</div>
+                  <Label className="text-slate-500 dark:text-slate-400 text-xs">Tokens Used</Label>
+                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.tokens_used || 'N/A'}</div>
                 </div>
                 <div>
-                  <Label className="text-slate-500 text-xs">Error</Label>
-                  <div className={detailViewItem.error ? 'text-red-600' : 'text-green-600'}>
-                    {detailViewItem.error || 'None'}
+                  <Label className="text-slate-500 dark:text-slate-400 text-xs">Error</Label>
+                  <div className={detailViewItem.error ? 'text-red-500' : 'text-green-500'}>
+                    {detailViewItem.error ? String(detailViewItem.error) : 'None'}
                   </div>
                 </div>
               </div>
