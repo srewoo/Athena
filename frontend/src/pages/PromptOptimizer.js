@@ -144,18 +144,42 @@ const PromptOptimizer = () => {
   // State for thinking mode
   const [useThinkingMode, setUseThinkingMode] = useState(false);
 
-  // Load existing settings on mount
+  // Load existing settings on mount - from localStorage first, then sync to backend
   useEffect(() => {
     const loadSettings = async () => {
       try {
+        // First, check localStorage for saved settings (persists across browser close/refresh)
+        const savedSettings = localStorage.getItem('athena_llm_settings');
+        if (savedSettings) {
+          const localData = JSON.parse(savedSettings);
+          setLlmProvider(localData.llm_provider || "openai");
+          setLlmModel(localData.model_name || "");
+          setApiKey(localData.api_key || "");
+          setSettingsLoaded(true);
+
+          // Sync localStorage settings to backend (in case server restarted)
+          if (localData.api_key) {
+            await fetch(`${API}/settings`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(localData)
+            });
+            console.log("Settings synced from localStorage to backend");
+          }
+          return;
+        }
+
+        // Fallback: Try to load from backend
         const response = await fetch(`${API}/settings`);
         if (response.ok) {
           const data = await response.json();
-          if (data) {
+          if (data && data.api_key) {
             setLlmProvider(data.llm_provider || "openai");
             setLlmModel(data.model_name || "");
             setApiKey(data.api_key || "");
             setSettingsLoaded(true);
+            // Save to localStorage for persistence
+            localStorage.setItem('athena_llm_settings', JSON.stringify(data));
           }
         }
       } catch (error) {
@@ -177,18 +201,23 @@ const PromptOptimizer = () => {
     }
 
     setIsSavingSettings(true);
+    const settingsData = {
+      llm_provider: llmProvider,
+      api_key: apiKey,
+      model_name: llmModel || modelOptions[llmProvider][0]
+    };
+
     try {
       const response = await fetch(`${API}/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          llm_provider: llmProvider,
-          api_key: apiKey,
-          model_name: llmModel || modelOptions[llmProvider][0]
-        })
+        body: JSON.stringify(settingsData)
       });
 
       if (response.ok) {
+        // Save to localStorage for persistence across browser close/refresh/server restart
+        localStorage.setItem('athena_llm_settings', JSON.stringify(settingsData));
+
         toast({
           title: "Settings Saved",
           description: `Using ${llmProvider.toUpperCase()} for AI operations`
@@ -254,10 +283,10 @@ const PromptOptimizer = () => {
 
       const project = await response.json();
 
-      // Set project data
+      // Set project data (backend uses project_name, not name)
       setProjectId(project.id);
-      setProjectName(project.name);
-      setUseCase(project.requirements.use_case);
+      setProjectName(project.project_name || project.name);
+      setUseCase(project.requirements?.use_case || project.use_case);
       setKeyRequirements(project.requirements.key_requirements.join("\n"));
       setTargetProvider(project.requirements.target_provider);
 
@@ -293,7 +322,7 @@ const PromptOptimizer = () => {
 
       toast({
         title: "Project Loaded",
-        description: `Loaded "${project.name}"`
+        description: `Loaded "${project.project_name || project.name}"`
       });
 
     } catch (error) {
@@ -339,7 +368,7 @@ const PromptOptimizer = () => {
 
     // Load the project into the form fields for editing
     setProjectId(project.id);
-    setProjectName(project.name);
+    setProjectName(project.project_name || project.name);
     setUseCase(project.requirements?.use_case || "");
     setKeyRequirements(project.requirements?.key_requirements?.join(", ") || "");
     setInitialPrompt(project.system_prompt_versions?.[0]?.prompt_text || "");
@@ -366,7 +395,7 @@ const PromptOptimizer = () => {
 
     toast({
       title: "Project Loaded for Editing",
-      description: `You can now edit "${project.name}" and save your changes`
+      description: `You can now edit "${project.project_name || project.name}" and save your changes`
     });
   };
 
@@ -818,11 +847,13 @@ const PromptOptimizer = () => {
 
     try {
       // Use streaming endpoint for large datasets with heartbeat
+      // Include current version number so test cases are relevant to selected prompt
       const response = await fetch(`${API}/projects/${projectId}/dataset/generate-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sample_count: countToGenerate
+          sample_count: countToGenerate,
+          version: currentVersion?.version
         })
       });
 
@@ -832,7 +863,8 @@ const PromptOptimizer = () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            sample_count: countToGenerate
+            sample_count: countToGenerate,
+            version: currentVersion?.version
           })
         });
 
@@ -1497,7 +1529,7 @@ const PromptOptimizer = () => {
                         >
                           <div className="flex justify-between items-start">
                             <div className="flex-1">
-                              <h4 className="font-medium text-slate-900 dark:text-slate-100">{project.name}</h4>
+                              <h4 className="font-medium text-slate-900 dark:text-slate-100">{project.project_name || project.name}</h4>
                               <p className="text-xs text-slate-600 dark:text-slate-600 dark:text-slate-400 mt-1 line-clamp-1">
                                 {project.requirements?.use_case || 'No description'}
                               </p>
@@ -1518,7 +1550,7 @@ const PromptOptimizer = () => {
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                onClick={(e) => handleDeleteProject(project.id, project.name, e)}
+                                onClick={(e) => handleDeleteProject(project.id, project.project_name || project.name, e)}
                                 className="h-6 w-6 p-0 text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/20"
                                 title="Delete project"
                               >
@@ -1866,7 +1898,7 @@ const PromptOptimizer = () => {
                       {analysisResults.requirements_gaps.length > 0 && (
                         <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg p-4">
                           <h3 className="font-semibold text-red-600 dark:text-red-400 mb-2">Missing Requirements:</h3>
-                          <ul className="list-disc list-inside space-y-1 text-sm text-slate-300">
+                          <ul className="list-disc list-inside space-y-1 text-sm text-red-700 dark:text-red-200">
                             {analysisResults.requirements_gaps.map((gap, idx) => (
                               <li key={idx}>{gap}</li>
                             ))}
@@ -1877,10 +1909,10 @@ const PromptOptimizer = () => {
                       {analysisResults.suggestions.length > 0 && (
                         <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg p-4">
                           <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-2">Top Suggestions:</h3>
-                          <ul className="list-disc list-inside space-y-1 text-sm text-slate-300">
+                          <ul className="list-disc list-inside space-y-1 text-sm text-blue-700 dark:text-blue-200">
                             {analysisResults.suggestions.slice(0, 5).map((sug, idx) => (
                               <li key={idx}>
-                                <span className="font-medium">[{sug.priority}]</span> {sug.suggestion}
+                                <span className="font-medium text-blue-800 dark:text-blue-300">[{sug.priority}]</span> {sug.suggestion}
                               </li>
                             ))}
                           </ul>
@@ -2300,7 +2332,7 @@ const PromptOptimizer = () => {
 
                   {/* Generate button (shown when no dataset and not generating) */}
                   {!dataset && !isGeneratingDataset && (
-                    <Button onClick={handleGenerateDataset} className="w-full">
+                    <Button onClick={() => handleGenerateDataset()} className="w-full">
                       Generate Dataset
                     </Button>
                   )}

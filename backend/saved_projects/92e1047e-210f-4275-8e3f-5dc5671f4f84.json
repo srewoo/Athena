@@ -1,0 +1,48 @@
+{
+  "id": "92e1047e-210f-4275-8e3f-5dc5671f4f84",
+  "project_name": "Bed time story bot",
+  "use_case": "Create bedtime stories for children",
+  "requirements": {
+    "use_case": "Create bedtime stories for children",
+    "key_requirements": [
+      "age-appropriate",
+      "engaging",
+      "educational"
+    ]
+  },
+  "key_requirements": [
+    "age-appropriate",
+    "engaging",
+    "educational"
+  ],
+  "initial_prompt": "Generate a bedtime story for kids of 5 year age in 300 word",
+  "optimized_prompt": null,
+  "optimization_score": null,
+  "eval_prompt": null,
+  "test_cases": null,
+  "test_results": null,
+  "final_report": null,
+  "system_prompt_versions": [
+    {
+      "version": 1,
+      "prompt_text": "Generate a bedtime story for kids of 5 year age in 300 word",
+      "created_at": "2025-12-12T11:53:40.668662",
+      "changes_made": "Initial prompt"
+    },
+    {
+      "version": 2,
+      "prompt_text": "Create a bedtime story for children aged 5 years, focusing on the theme of friendship and kindness. The story should feature two main characters: a brave little rabbit named Benny and a wise old turtle named Tilly. Set the story in a magical forest filled with colorful flowers and sparkling streams. The tone should be whimsical and calming, perfect for winding down before sleep. \n\nPlease structure the story to be approximately 300 words and include engaging dialogue between the characters. If possible, suggest illustrations for key moments, such as Benny and Tilly discovering a hidden meadow or helping a lost bird. \n\nFor reference, I find stories like \"The Giving Tree\" by Shel Silverstein and \"Goodnight Moon\" by Margaret Wise Brown appealing due to their gentle narratives and moral lessons. This will help ensure the story is both educational and entertaining for young children.",
+      "created_at": "2025-12-12T11:54:47.832643",
+      "changes_made": "Manual edit"
+    },
+    {
+      "version": 3,
+      "prompt_text": "Create a bedtime story for children aged 5 years that aims to foster the values of friendship and kindness, helping them feel safe and loved as they drift off to sleep. The story should feature two main characters: a brave little rabbit named Benny and a wise old turtle named Tilly. Set the story in a magical forest filled with colorful flowers and sparkling streams, where the two friends embark on a gentle adventure.\n\nThe tone should be whimsical and calming, perfect for winding down before sleep. Structure the story to be approximately 300 words, ensuring it uses simple vocabulary suitable for 5-year-olds and avoids complex themes that may not be appropriate for this age group.\n\nIncorporate engaging dialogue between Benny and Tilly to illustrate their friendship and kindness. For example, Benny might say, \"Tilly, look at that beautiful flower! Can we help the little bird find its way home?\" Tilly could respond, \"Of course, Benny! Together, we can do anything.\" \n\nSuggest illustrations for key moments to enhance the visual storytelling aspect, such as:\n1. Benny and Tilly discovering a hidden meadow filled with vibrant flowers.\n2. Benny gently lifting a lost bird with his tiny paws as Tilly offers wise advice.\n3. A cozy scene of Benny and Tilly sharing a snack under a big, friendly tree.\n\nThe desired moral lesson should emphasize that true friendship means helping others and being kind, reinforcing the importance of these values in everyday interactions. \n\nPlease ensure the story aligns with the gentle narratives and moral lessons found in beloved children's books like \"The Giving Tree\" by Shel Silverstein and \"Goodnight Moon\" by Margaret Wise Brown. This will help guarantee the story is both educational and entertaining for young children.",
+      "created_at": "2025-12-12T11:55:07.957565",
+      "changes_made": "Manual edit"
+    }
+  ],
+  "created_at": "2025-12-12T11:53:40.668662",
+  "updated_at": "2025-12-12T11:55:07.957616",
+  "version": 1
+}

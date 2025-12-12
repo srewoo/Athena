@@ -1,424 +1,365 @@
-# Athena 🏛️
+# Athena
+
 ## Your Strategic Prompt Architect
 
-An AI-powered prompt optimization platform that analyzes, refines, and evaluates prompts using a comprehensive **50-criteria rubric** based on the latest GPT-5, GPT-4.1, and Claude 3.7 best practices. Get actionable insights to improve your prompts with professional-grade evaluation powered by OpenAI, Claude, or Gemini.
+A comprehensive AI-powered platform for prompt engineering, optimization, testing, and evaluation. Athena provides a complete workflow for developing, refining, and validating system prompts with iterative feedback loops and AI-powered analysis.
 
-## 📋 Overview
+## Features
 
-Athena evaluates prompts across **50 expert criteria** organized into 7 categories:
+### Core Workflow (5-Step Process)
 
-**Core Fundamentals** - Clarity, context, task definition  
-**Modern Best Practices** - Delimiters, reasoning strategies, verbosity  
-**Provider Optimization** - OpenAI, Claude, Gemini-specific patterns  
-**Advanced Techniques** - Examples, hallucination prevention, style  
-**Agentic Patterns** - Workflow design, tool use, planning  
-**Context Management** - Long context, document formatting  
-**Safety & Reliability** - Ethics, error handling, validation
+**Step 1: Project Setup**
+- Create projects with name, use case, and requirements
+- Define initial system prompts
+- Auto-save projects to JSON storage
 
-Each prompt receives:
-- ✅ Total score out of **250 points** (50 criteria × 5)
-- 📊 **Category scores** across 7 dimensions
-- 🎯 **Provider-specific scores** (OpenAI, Claude, Gemini optimization)
-- ⚠️ **Contradiction detection** (GPT-5 best practice)
-- 📐 **Delimiter analysis** (XML, Markdown, structure)
-- 🔄 **Metaprompt generation** (self-improvement suggestions)
-- 💡 Strengths and improvement areas per criterion
-- 🎯 10-15 actionable refinement suggestions
-- 📄 Exportable reports (PDF/JSON)
-- ✨ **AI-powered prompt rewriting** with provider optimization
-- 💰 **Cost calculator** showing estimated API costs
-- 🎮 **Prompt playground** for live testing
-- 🌓 **Dark/Light theme** toggle
+**Step 2: Prompt Optimization**
+- AI-powered prompt analysis using heuristics + LLM
+- Hybrid scoring (word count, best practices, AI insights)
+- Actionable suggestions with priority levels (High/Medium/Low)
+- LLM-enhanced insights: strengths, issues, analysis summary
+- Manual feedback refinement with iteration tracking
+- AI Auto-Rewrite for autonomous improvement
 
-## 🏗️ Architecture
+**Step 3: Evaluation Prompt Generation**
+- Generate evaluation prompts with 5-section structure:
+  - Role & Goal definition
+  - Core Expectations
+  - Detailed 1-5 Rating Scale with failure modes
+  - Evaluation Task steps
+  - Output Format (JSON)
+- Iterative refinement with user feedback
 
-**Backend**: FastAPI + Python + MongoDB  
-**Frontend**: React 19 + shadcn/ui + Tailwind CSS  
-**LLM Integration**: OpenAI GPT-4, Claude Sonnet, Google Gemini
+**Step 4: Test Dataset Generation**
+- AI-generated test cases based on selected prompt version
+- Distribution-based generation:
+  - 60% positive/typical cases
+  - 20% edge cases/boundary conditions
+  - 10% negative/inappropriate inputs
+  - 10% adversarial/injection attempts
+- Customizable sample count
 
-## 🔧 Prerequisites
-
-Before you begin, ensure you have the following installed:
-
-- **Python 3.8+**
-- **Node.js 16+** and **Yarn**
-- **MongoDB** - See [MongoDB Setup](#mongodb-setup) section below
-- **API Key** for at least one LLM provider:
-  - [OpenAI API Key](https://platform.openai.com/api-keys)
-  - [Anthropic API Key](https://console.anthropic.com/)
-  - [Google AI Studio API Key](https://makersuite.google.com/app/apikey)
-
-## 🚀 Installation & Setup
-
-### Step 1: Clone the Repository
-
-```bash
-cd /Users/sharajrewoo/DemoReposQA/Athena
-```
-
-### Step 2: MongoDB Setup
-
-#### Option 1: Local MongoDB (Recommended for Development)
-
-**macOS (using Homebrew):**
-```bash
-# Install MongoDB
-brew tap mongodb/brew
-brew install mongodb-community@8.0
-
-# Start MongoDB service
-brew services start mongodb/brew/mongodb-community@8.0
-
-# Verify MongoDB is running
-brew services list | grep mongodb
-```
-
-**Windows:**
-1. Download MongoDB from [MongoDB Download Center](https://www.mongodb.com/try/download/community)
-2. Run the installer and follow the setup wizard
-3. MongoDB will start automatically as a Windows Service
-
-**Linux (Ubuntu/Debian):**
-```bash
-# Import MongoDB public key
-wget -qO - https://www.mongodb.org/static/pgp/server-8.0.asc | sudo apt-key add -
-
-# Add MongoDB repository
-echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
-
-# Install MongoDB
-sudo apt-get update
-sudo apt-get install -y mongodb-org
-
-# Start MongoDB service
-sudo systemctl start mongod
-sudo systemctl enable mongod
-```
-
-#### Option 2: MongoDB Atlas (Cloud)
-
-1. Create a free account at [MongoDB Atlas](https://www.mongodb.com/cloud/atlas)
-2. Create a new cluster (free tier available)
-3. Get your connection string
-4. Update `MONGO_URL` in `.env` with your Atlas connection string
-
-#### Option 3: Docker
-
-```bash
-# Run MongoDB in a Docker container
-docker run -d -p 27017:27017 --name mongodb mongo:8.0
-
-# Stop MongoDB
-docker stop mongodb
-
-# Start MongoDB again
-docker start mongodb
-```
-
-### Step 3: Backend Setup
-
-```bash
-# Navigate to backend directory
-cd backend
-
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On macOS/Linux
-# OR on Windows: venv\Scripts\activate
-
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Create .env file with your configuration
-cat > .env << EOF
-MONGO_URL=mongodb://localhost:27017
-DB_NAME=athena
-CORS_ORIGINS=http://localhost:3000
-EOF
-```
-
-**Important**: 
-- For local MongoDB: Use `MONGO_URL=mongodb://localhost:27017`
-- For MongoDB Atlas: Use your Atlas connection string (e.g., `mongodb+srv://username:password@cluster.mongodb.net/`)
-- For Docker: Use `MONGO_URL=mongodb://localhost:27017`
-
-### Step 4: Frontend Setup
-
-Open a **new terminal window** and run:
-
-```bash
-# Navigate to frontend directory
-cd frontend
-
-# Install dependencies
-yarn install
-```
-
-## ▶️ Running the Application
-
-### Start Backend Server
-
-In the **backend terminal**:
-
-```bash
-cd backend
-source venv/bin/activate  # Activate venv if not already active
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
-```
-
-✅ Backend will be available at: `http://localhost:8000`  
-✅ API docs available at: `http://localhost:8000/docs`
-
-### Start Frontend Server
-
-In a **separate terminal**:
-
-```bash
-cd frontend
-yarn start
-```
-
-✅ Frontend will open automatically at: `http://localhost:3000`
-
-## 🎮 Using the Application
-
-### First-Time Configuration
-
-1. **Open the app** in your browser at `http://localhost:3000`
-2. **Click the Settings button** (⚙️ icon in the top-right)
-3. **Configure your LLM provider**:
-   - Select provider (OpenAI, Claude, or Gemini)
-   - Enter your API key
-   - (Optional) Specify custom model name
-4. **Click "Save Configuration"**
-
-### Evaluating a Prompt
-
-1. **Enter your prompt** in the text area on the Dashboard
-2. **Click "Evaluate Prompt"** button
-3. **View results**:
-   - Total score out of 175
-   - Quality rating (Excellent/Good/Fair/Needs Improvement)
-   - Top 5 refinement suggestions
-4. **Click "View Full Details"** to see all 35 criteria scores
-5. **Export** results as PDF or JSON if needed
+**Step 5: Test Execution & Results**
+- Execute tests against system prompt
+- Evaluate outputs using generated eval prompt
+- Interactive results table with expandable rows
+- Summary statistics and pass rates
+- Export results as JSON
 
 ### Additional Features
 
-- **📜 History**: View all past evaluations
-- **🔄 Compare**: Compare multiple evaluations side-by-side
-- **📥 Export**: Download evaluation reports as PDF or JSON
+- **Version Management**: Track prompt iterations with full history
+- **Dark/Light Theme**: Toggle between themes
+- **Settings Persistence**: API keys saved in browser localStorage, auto-synced to backend
+- **Project Management**: Save, load, and manage multiple projects
+- **Multi-Provider Support**: OpenAI, Anthropic Claude, Google Gemini
 
-## 📁 Project Structure
+### Analysis Tools
+
+- **Prompt Analysis**: Hybrid heuristic + LLM analysis
+- **Contradiction Detection**: Identify conflicting instructions
+- **Delimiter Analysis**: Analyze XML/Markdown structure usage
+- **Metaprompt Generation**: AI-generated improvement suggestions
+
+## Tech Stack
+
+### Backend
+| Technology | Purpose |
+|------------|---------|
+| FastAPI | Python web framework |
+| Pydantic | Data validation |
+| OpenAI SDK | GPT-4/GPT-4o integration |
+| Anthropic SDK | Claude integration |
+| Google Generative AI | Gemini integration |
+| File-based Storage | JSON project storage |
+
+### Frontend
+| Technology | Purpose |
+|------------|---------|
+| React 18 | UI framework |
+| shadcn/ui | Component library |
+| Tailwind CSS | Utility-first styling |
+| Radix UI | Accessible primitives |
+| Lucide React | Icons |
+
+## Prerequisites
+
+- **Python 3.10+**
+- **Node.js 18+** and **npm/yarn**
+- **API Key** for at least one LLM provider:
+  - [OpenAI API Key](https://platform.openai.com/api-keys)
+  - [Anthropic API Key](https://console.anthropic.com/)
+  - [Google AI Studio API Key](https://aistudio.google.com/app/apikey)
+
+## Installation
+
+### Step 1: Clone/Navigate to Repository
+
+```bash
+cd /path/to/Athena
+```
+
+### Step 2: Backend Setup
+
+```bash
+# Navigate to backend
+cd backend
+
+# Create virtual environment
+python3 -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate  # macOS/Linux
+# OR
+venv\Scripts\activate     # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Step 3: Frontend Setup
+
+```bash
+# Navigate to frontend
+cd frontend
+
+# Install dependencies
+npm install
+# OR
+yarn install
+```
+
+## Running the Application
+
+### Start Backend Server
+
+```bash
+cd backend
+source venv/bin/activate
+python server.py
+```
+
+Backend available at: `http://localhost:8000`
+
+### Start Frontend Server
+
+In a separate terminal:
+
+```bash
+cd frontend
+npm start
+# OR
+yarn start
+```
+
+Frontend available at: `http://localhost:3000`
+
+## Quick Start Guide
+
+### 1. Configure API Settings
+
+1. Open `http://localhost:3000`
+2. Click Settings icon (gear) in top-right
+3. Select your LLM provider (OpenAI/Claude/Gemini)
+4. Enter your API key
+5. Click "Save Settings"
+
+Settings persist in browser localStorage and auto-sync to backend on page load.
+
+### 2. Create a Project
+
+1. Enter project name
+2. Define use case (e.g., "Customer support chatbot")
+3. Add key requirements
+4. Write initial system prompt
+5. Click "Next: Optimize Prompt"
+
+### 3. Optimize Your Prompt
+
+1. Click "Re-Analyze" to get AI-powered analysis
+2. Review scores and suggestions
+3. Use "Review & Refine" for manual feedback
+4. Use "AI Rewrite" for autonomous improvement
+5. Click "Continue to Eval Prompt" when satisfied
+
+### 4. Generate Evaluation Criteria
+
+1. Click "Generate Evaluation Prompt"
+2. Review the 5-section eval structure
+3. Provide feedback to refine criteria
+4. Proceed to test dataset generation
+
+### 5. Generate Test Dataset
+
+1. Set number of samples (default: 10)
+2. Click "Generate Dataset"
+3. Review generated test cases
+4. Test cases are generated based on selected prompt version
+
+### 6. Execute Tests
+
+1. Run tests against your system prompt
+2. Review results with pass/fail status
+3. Export results as needed
+
+## Project Structure
 
 ```
 Athena/
 ├── backend/
-│   ├── server.py              # FastAPI application & routes
+│   ├── server.py              # Main FastAPI server (1300+ lines)
+│   ├── project_api.py         # Project management API (900+ lines)
+│   ├── project_storage.py     # JSON file storage
+│   ├── llm_client.py          # Multi-provider LLM client
+│   ├── models.py              # Pydantic models
+│   ├── shared_settings.py     # Settings persistence module
 │   ├── requirements.txt       # Python dependencies
-│   └── .env                   # Environment configuration
+│   └── saved_projects/        # Project JSON files
 ├── frontend/
 │   ├── src/
+│   │   ├── App.js             # Main application
 │   │   ├── pages/
-│   │   │   ├── Dashboard.js      # Main evaluation interface
-│   │   │   ├── History.js        # Past evaluations
-│   │   │   ├── Compare.js        # Comparison view
-│   │   │   └── EvaluationDetail.js
-│   │   └── components/ui/        # shadcn/ui components
-│   ├── package.json           # Node dependencies
-│   └── tailwind.config.js     # Styling configuration
-└── README.md                  # This file
+│   │   │   ├── PromptOptimizer.js  # Main workflow UI
+│   │   │   ├── Dashboard.js        # Dashboard view
+│   │   │   ├── Playground.js       # Prompt testing
+│   │   │   └── ...
+│   │   └── components/        # UI components
+│   ├── package.json
+│   └── tailwind.config.js
+└── README.md
 ```
 
-## 🔑 Environment Variables
+## API Endpoints
 
-### Backend (.env)
+### Settings
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/settings` | Get LLM configuration |
+| POST | `/api/settings` | Save LLM configuration |
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `MONGO_URL` | MongoDB connection string | `mongodb://localhost:27017` |
-| `DB_NAME` | Database name | `athena` |
-| `CORS_ORIGINS` | Allowed frontend origins | `http://localhost:3000` |
+### Projects
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects` | List all projects |
+| POST | `/api/projects` | Create new project |
+| GET | `/api/projects/{id}` | Get project details |
+| PUT | `/api/projects/{id}` | Update project |
+| DELETE | `/api/projects/{id}` | Delete project |
 
-## 🛠️ Troubleshooting
+### Analysis & Optimization
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/projects/{id}/analyze` | Hybrid heuristic + LLM analysis |
+| POST | `/api/projects/{id}/rewrite` | AI-powered prompt rewrite |
+| POST | `/api/rewrite` | Global prompt rewrite |
 
-### MongoDB Connection Issues
+### Evaluation & Testing
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/projects/{id}/eval-prompt/generate` | Generate eval prompt |
+| POST | `/api/projects/{id}/eval-prompt/refine` | Refine eval with feedback |
+| POST | `/api/projects/{id}/dataset/generate` | Generate test dataset |
+| POST | `/api/projects/{id}/test-runs` | Create test run |
+| GET | `/api/projects/{id}/test-runs` | List test runs |
 
-**Check if MongoDB is running:**
-```bash
-# macOS (Homebrew)
-brew services list | grep mongodb
+### Tools
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/detect-contradictions` | Detect conflicting instructions |
+| POST | `/api/analyze-delimiters` | Analyze delimiter usage |
+| POST | `/api/generate-metaprompt` | Generate improvement suggestions |
+| POST | `/api/playground` | Test prompt with input |
+| POST | `/api/evaluate` | Evaluate prompt quality |
 
-# Linux
-sudo systemctl status mongod
+### Export
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/export/json/{id}` | Export as JSON |
+| GET | `/api/export/pdf/{id}` | Export as PDF |
 
-# Windows
-services.msc  # Look for "MongoDB Server"
-```
+## Default Models
 
-**Start MongoDB if not running:**
-```bash
-# macOS (Homebrew)
-brew services start mongodb/brew/mongodb-community@8.0
+| Provider | Default Model |
+|----------|---------------|
+| OpenAI | `gpt-4o-mini` |
+| Anthropic | `claude-3-sonnet-20240229` |
+| Google | `gemini-1.5-flash` |
 
-# Linux
-sudo systemctl start mongod
+Custom models can be specified in Settings.
 
-# Docker
-docker start mongodb
-```
-
-**Common issues:**
-- Verify `MONGO_URL` in `.env` is correct
-- For Atlas: Check connection string and whitelist your IP
-- For local: Ensure port 27017 is not in use by another process
-- Check MongoDB logs for errors:
-  - macOS: `/opt/homebrew/var/log/mongodb/mongo.log`
-  - Linux: `/var/log/mongodb/mongod.log`
+## Troubleshooting
 
 ### Backend Won't Start
-- Verify Python virtual environment is activated
-- Check all dependencies installed: `pip list`
-- Review logs for specific error messages
+```bash
+# Check if port 8000 is in use
+lsof -ti:8000
 
-### Frontend Issues
-- Clear node_modules and reinstall: `rm -rf node_modules && yarn install`
-- Check that backend is running and accessible
-- Verify API endpoint in `frontend/src/App.js`
+# Kill existing process
+lsof -ti:8000 | xargs kill -9
+
+# Restart backend
+cd backend && source venv/bin/activate && python server.py
+```
 
 ### API Key Issues
-- Ensure API key is valid and has sufficient credits
-- Check API key permissions for the selected model
-- Verify correct provider selected in settings
+- Settings persist in browser localStorage
+- After server restart, refresh the page to auto-sync settings
+- Check Settings modal to verify API key is saved
 
-## 📦 Tech Stack Details
+### Frontend Issues
+```bash
+# Clear cache and reinstall
+cd frontend
+rm -rf node_modules
+npm install
+npm start
+```
 
-### Backend
-- **FastAPI** - Modern Python web framework
-- **Motor** - Async MongoDB driver
-- **Pydantic** - Data validation
-- **ReportLab** - PDF generation
-- **OpenAI/Anthropic/Google SDKs** - LLM provider integration
+### LLM Calls Not Working
+1. Verify API key in Settings
+2. Check browser console for errors
+3. Ensure backend shows "Settings synced from localStorage"
 
-### Frontend
-- **React 19** - UI framework
-- **shadcn/ui** - Component library
-- **Tailwind CSS** - Utility-first CSS
-- **Axios** - HTTP client
-- **React Router** - Navigation
-- **Lucide React** - Icons
-
-## 🤝 Development
+## Development
 
 ### Backend Development
 ```bash
 cd backend
 source venv/bin/activate
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
+python server.py
+# Server auto-reloads on file changes
 ```
 
 ### Frontend Development
 ```bash
 cd frontend
-yarn start
+npm start
+# React hot-reloads on file changes
 ```
 
-## 🎮 New Features
-
-### AI-Powered Prompt Rewriting
-After evaluating a prompt, click the "AI Rewrite" button to get an improved version based on the evaluation feedback. The rewrite considers:
-- Low-scoring criteria
-- Refinement suggestions
-- Best practices for prompt engineering
-
-### Cost Calculator
-Every API call now displays:
-- Input/output token counts
-- Cost per token type
-- Total estimated cost in USD
-
-Track your spending and optimize prompt efficiency!
-
-### Prompt Playground
-Test your prompts with live input before evaluation:
-1. Navigate to Playground from the dashboard
-2. Enter your prompt template (use `{input}` as placeholder)
-3. Provide test data
-4. See immediate results with cost breakdown
-
-### Dark/Light Theme
-Toggle between dark and light themes using the theme switcher in the top navigation.
-
-## 🧪 Testing
-
-### Backend Tests
+### Running Tests
 ```bash
 cd backend
-source venv/bin/activate
-pytest tests/test_server.py -v
+pytest test_endpoints.py -v
 ```
 
-### Frontend Tests
-```bash
-cd frontend
-yarn test
-```
+## Architecture Highlights
 
-Tests follow strict guidelines:
-- ✅ No mock data or hardcoded responses
-- ✅ Actual service layer integration
-- ✅ Proper database cleanup
-- ✅ Positive, negative, and edge case scenarios
+### Settings Persistence
+- API keys saved to browser localStorage (`athena_llm_settings`)
+- Auto-synced to backend on page load
+- Survives browser refresh, close, and server restart
 
-## 📝 API Endpoints
+### Hybrid Analysis
+- Step 1: Fast heuristic analysis (word count, keyword checks)
+- Step 2: LLM-enhanced insights (strengths, issues, refined score)
+- Step 3: Combined suggestions with deduplication
 
-### Core Evaluation
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/evaluate` | **Enhanced** - 50-criteria evaluation with categories |
-| GET | `/api/evaluations` | Get all evaluations |
-| GET | `/api/evaluations/{id}` | Get specific evaluation |
-| DELETE | `/api/evaluations/{id}` | Delete evaluation |
-| POST | `/api/compare` | Compare evaluations |
+### Version Management
+- All prompt versions stored in `system_prompt_versions` array
+- Each version tracked with timestamp and version number
+- Test datasets generated against specific versions
 
-### Advanced Analysis (Phase 1 🆕)
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/detect-contradictions` | **NEW** - Detect conflicting instructions |
-| POST | `/api/analyze-delimiters` | **NEW** - Analyze delimiter strategy |
-| POST | `/api/generate-metaprompt` | **NEW** - Generate improvement suggestions |
-
-### Prompt Tools
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/rewrite` | **Enhanced** - AI rewrite with provider optimization |
-| POST | `/api/playground` | Test prompt with live input |
-
-### Configuration & Export
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/settings` | Get LLM configuration |
-| POST | `/api/settings` | Save LLM configuration |
-| GET | `/api/export/json/{id}` | Export as JSON |
-| GET | `/api/export/pdf/{id}` | Export as PDF |
-
-## 🎯 Default Models
-
-| Provider | Default Model |
-|----------|---------------|
-| OpenAI | `gpt-4o` |
-| Claude | `claude-3-7-sonnet-20250219` |
-| Gemini | `gemini-2.0-flash-exp` |
-
-You can override these by specifying a custom model name in Settings.
-
-## 📄 License
+## License
 
 This project is for educational and development purposes.
-
-## 🙋‍♂️ Support
-
-For issues or questions:
-1. Check the Troubleshooting section above
-2. Review API documentation at `http://localhost:8000/docs`
-3. Check console logs for detailed error messages

@@ -155,3 +155,4 @@ backend/.env
 backend/*.db
 backend/uploads/
 backend/logs/
+BKP/
