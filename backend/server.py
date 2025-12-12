@@ -173,7 +173,7 @@ Return the improved prompt directly, without explanations."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.7,
-        max_tokens=2000
+        max_tokens=8000
     )
 
     if response.get("error"):
@@ -266,7 +266,7 @@ Transform this into a high-quality system prompt that addresses all requirements
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.7,
-        max_tokens=4000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -326,7 +326,7 @@ Please incorporate this feedback and provide an improved version."""
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.7,
-        max_tokens=4000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -397,7 +397,7 @@ Provide an enhanced version that addresses these areas."""
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.7,
-        max_tokens=4000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -477,7 +477,7 @@ Create a comprehensive evaluation prompt that will assess whether outputs from t
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.5,
-        max_tokens=3000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -533,7 +533,7 @@ Please incorporate this feedback and provide an improved evaluation prompt."""
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.5,
-        max_tokens=3000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -593,7 +593,7 @@ Critically review and enhance this evaluation prompt."""
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.5,
-        max_tokens=3000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -658,7 +658,7 @@ Generate {num_cases} diverse, realistic INPUT cases following the distribution g
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.8,
-        max_tokens=4000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -722,7 +722,7 @@ Generate {num_cases} improved test cases incorporating this feedback."""
         api_key=project.api_key,
         model_name=project.model_name,
         temperature=0.8,
-        max_tokens=4000
+        max_tokens=8000
     )
 
     if result["error"]:
@@ -766,7 +766,7 @@ async def execute_tests(project: ProjectInput, optimized_prompt: str, eval_promp
             api_key=project.api_key,
             model_name=project.model_name,
             temperature=0.7,
-            max_tokens=2000
+            max_tokens=8000
         )
 
         if prompt_result["error"]:
@@ -782,7 +782,7 @@ async def execute_tests(project: ProjectInput, optimized_prompt: str, eval_promp
             api_key=project.api_key,
             model_name=project.model_name,
             temperature=0.3,
-            max_tokens=1000
+            max_tokens=8000
         )
 
         if eval_result["error"]:
@@ -919,7 +919,7 @@ Return ONLY valid JSON, no other text."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.3,
-        max_tokens=1500
+        max_tokens=8000
     )
 
     if result.get("error"):
@@ -1063,7 +1063,7 @@ async def playground_test(data: dict):
         api_key=api_key,
         model_name=model_name,
         temperature=0.7,
-        max_tokens=1000
+        max_tokens=8000
     )
 
     if result.get("error"):
@@ -1114,7 +1114,7 @@ async def ab_test(data: dict):
             api_key=api_key,
             model_name=model_name,
             temperature=0.7,
-            max_tokens=500
+            max_tokens=8000
         )
         results_a.append({
             "input": test_input,
@@ -1130,7 +1130,7 @@ async def ab_test(data: dict):
             api_key=api_key,
             model_name=model_name,
             temperature=0.7,
-            max_tokens=500
+            max_tokens=8000
         )
         results_b.append({
             "input": test_input,
@@ -1237,7 +1237,7 @@ Return ONLY valid JSON."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.3,
-        max_tokens=1500
+        max_tokens=8000
     )
 
     if result.get("error"):
@@ -1306,7 +1306,7 @@ Return the improved prompt directly."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.7,
-        max_tokens=2000
+        max_tokens=8000
     )
 
     if result.get("error"):

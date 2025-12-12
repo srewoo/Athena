@@ -3,17 +3,166 @@ Project management API - Simple file-based storage
 """
 from fastapi import APIRouter, HTTPException, Body
 from fastapi.responses import JSONResponse
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from typing import List, Optional, Dict, Any, Literal
+from pydantic import BaseModel, Field, validator
 from datetime import datetime
 import uuid
 import json
+import re
+import logging
 
 import project_storage
 from models import SavedProject, ProjectListItem
 from llm_client import get_llm_client
 
+# Setup logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+# ============================================================================
+# PYDANTIC MODELS FOR EVAL VALIDATION
+# ============================================================================
+
+class EvalScoreBreakdown(BaseModel):
+    """Per-criterion scores for detailed evaluation"""
+    task_completion: Optional[float] = Field(None, ge=1, le=5)
+    requirement_adherence: Optional[float] = Field(None, ge=1, le=5)
+    quality_coherence: Optional[float] = Field(None, ge=1, le=5)
+    accuracy_safety: Optional[float] = Field(None, ge=1, le=5)
+    completeness: Optional[float] = Field(None, ge=1, le=5)
+
+
+class EvalResult(BaseModel):
+    """Validated evaluation result from judge LLM"""
+    score: float = Field(..., ge=1, le=5, description="Overall score 1-5")
+    reasoning: str = Field(..., min_length=10, max_length=2000, description="Brief justification with evidence")
+    breakdown: Optional[EvalScoreBreakdown] = None
+    violations: Optional[List[str]] = None
+    evidence: Optional[List[str]] = None
+
+    @validator('score')
+    def validate_score(cls, v):
+        if v < 1 or v > 5:
+            raise ValueError('Score must be between 1 and 5')
+        return round(v, 1)
+
+
+class PromptAnalysisCategory(BaseModel):
+    """Individual category in prompt analysis"""
+    score: float = Field(..., ge=0, le=100)
+    weight: float = Field(..., ge=0, le=1)
+    notes: List[str] = []
+    issues: List[str] = []
+
+
+class PromptAnalysisResult(BaseModel):
+    """Structured prompt analysis result"""
+    overall_score: float = Field(..., ge=0, le=100)
+    categories: Dict[str, PromptAnalysisCategory]
+    suggestions: List[Dict[str, Any]]
+    strengths: List[str]
+    issues: List[str]
+    analysis_method: Literal["heuristic", "llm", "hybrid"]
+    error: Optional[str] = None
+
+
+def sanitize_for_eval(text: str, max_length: int = 10000) -> str:
+    """
+    Sanitize text before inserting into evaluation prompt to prevent prompt injection.
+
+    This helps prevent:
+    1. Attempts to override evaluation instructions
+    2. Fake JSON injection to manipulate scores
+    3. XML tag injection to break delimiters
+    4. Excessive length that could cause issues
+    """
+    if not text:
+        return ""
+
+    # Truncate to prevent excessive length
+    if len(text) > max_length:
+        text = text[:max_length] + "... [truncated]"
+
+    # Escape XML-like tags that could break delimiters
+    # Replace < and > with escaped versions in content
+    text = text.replace("</", "⟨/")  # Using Unicode look-alike for safety
+    text = text.replace("<", "⟨")
+    text = text.replace(">", "⟩")
+
+    # Detect and flag potential injection attempts (for logging)
+    injection_patterns = [
+        "ignore previous",
+        "ignore the above",
+        "disregard instructions",
+        "new instructions",
+        "override",
+        "forget everything",
+        "score: 5",  # Attempting to inject score
+        '"score": 5',
+        "```json",  # Attempting to inject JSON
+        "IMPORTANT:",
+        "SYSTEM:",
+    ]
+
+    has_injection_attempt = any(pattern.lower() in text.lower() for pattern in injection_patterns)
+    if has_injection_attempt:
+        # Log but don't block - the model should still evaluate fairly
+        logger.warning(f"Potential prompt injection attempt detected in eval input")
+
+    return text
+
+
+def parse_eval_json_strict(text: str) -> Optional[EvalResult]:
+    """
+    Strictly parse evaluation JSON with validation.
+    Returns None if parsing fails - caller must handle as failure.
+    """
+    if not text:
+        return None
+
+    # Try to find JSON object in response
+    # First, try the whole text as JSON
+    try:
+        data = json.loads(text.strip())
+        return EvalResult(**data)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Try to extract JSON from markdown code blocks
+    code_block_pattern = r'```(?:json)?\s*(\{[\s\S]*?\})\s*```'
+    match = re.search(code_block_pattern, text)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            return EvalResult(**data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try to find a JSON object with required fields
+    json_pattern = r'\{[^{}]*"score"\s*:\s*[\d.]+[^{}]*"reasoning"\s*:\s*"[^"]*"[^{}]*\}'
+    match = re.search(json_pattern, text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group())
+            return EvalResult(**data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Last resort: try to extract score and reasoning separately
+    score_match = re.search(r'"score"\s*:\s*([\d.]+)', text)
+    reasoning_match = re.search(r'"reasoning"\s*:\s*"([^"]*)"', text)
+
+    if score_match and reasoning_match:
+        try:
+            score = float(score_match.group(1))
+            reasoning = reasoning_match.group(1)
+            return EvalResult(score=score, reasoning=reasoning)
+        except (ValueError, TypeError):
+            pass
+
+    return None
 
 # Initialize LLM client
 llm_client = get_llm_client()
@@ -98,78 +247,238 @@ class AnalyzeRequest(BaseModel):
     prompt_text: str
 
 
+def analyze_prompt_semantic(prompt_text: str) -> Dict[str, Any]:
+    """
+    Perform semantic analysis of a prompt with weighted scoring.
+
+    Returns detailed analysis with:
+    - Category scores (0-100) with weights
+    - Specific findings with line-level detail
+    - Actionable suggestions
+    """
+    word_count = len(prompt_text.split())
+    lines = prompt_text.split('\n')
+    prompt_lower = prompt_text.lower()
+
+    # =========================================================================
+    # CATEGORY 1: STRUCTURE (Weight: 25%)
+    # =========================================================================
+    structure_checks = {
+        "has_role": any(p in prompt_lower for p in ["you are", "act as", "role:", "persona:", "as a"]),
+        "has_sections": bool(re.search(r'(##|###|\*\*|<[a-z]+>|[A-Z][a-z]+:)', prompt_text)),
+        "has_delimiters": any(d in prompt_text for d in ["```", "---", "===", "<", ">"]),
+        "uses_xml_tags": bool(re.search(r'<[a-z_]+>.*</[a-z_]+>', prompt_text, re.DOTALL | re.IGNORECASE)),
+        "has_numbered_steps": bool(re.search(r'(\d+\.|step \d|first|second|third)', prompt_lower)),
+        "clear_hierarchy": bool(re.search(r'(task|objective|instructions|output|format)', prompt_lower))
+    }
+    structure_score = (sum(structure_checks.values()) / len(structure_checks)) * 100
+
+    # =========================================================================
+    # CATEGORY 2: CLARITY (Weight: 25%)
+    # =========================================================================
+    clarity_checks = {
+        "has_specific_task": any(w in prompt_lower for w in ["generate", "create", "write", "analyze", "summarize", "translate", "explain", "evaluate"]),
+        "has_context": any(w in prompt_lower for w in ["context", "background", "purpose", "goal", "objective"]),
+        "avoids_ambiguity": not any(w in prompt_lower for w in ["maybe", "perhaps", "might want to", "could possibly"]),
+        "has_examples": any(w in prompt_lower for w in ["example", "e.g.", "for instance", "such as", "like this"]),
+        "uses_precise_verbs": any(w in prompt_lower for w in ["must", "should", "always", "ensure", "verify"]),
+        "defines_scope": any(w in prompt_lower for w in ["scope", "boundary", "limit", "focus on", "only"])
+    }
+    clarity_score = (sum(clarity_checks.values()) / len(clarity_checks)) * 100
+
+    # =========================================================================
+    # CATEGORY 3: OUTPUT SPECIFICATION (Weight: 20%)
+    # =========================================================================
+    output_checks = {
+        "has_format_spec": any(w in prompt_lower for w in ["format", "structure", "output", "return", "respond"]),
+        "specifies_length": any(w in prompt_lower for w in ["word", "sentence", "paragraph", "length", "brief", "detailed", "concise"]),
+        "has_json_spec": "json" in prompt_lower or "```" in prompt_text,
+        "has_tone": any(w in prompt_lower for w in ["tone", "style", "voice", "professional", "casual", "formal"]),
+        "defines_what_not_to_include": any(w in prompt_lower for w in ["don't include", "avoid", "do not", "never", "exclude"])
+    }
+    output_score = (sum(output_checks.values()) / len(output_checks)) * 100
+
+    # =========================================================================
+    # CATEGORY 4: SAFETY & ROBUSTNESS (Weight: 15%)
+    # =========================================================================
+    safety_checks = {
+        "has_constraints": any(w in prompt_lower for w in ["don't", "avoid", "never", "must not", "should not", "do not"]),
+        "handles_edge_cases": any(w in prompt_lower for w in ["if", "when", "edge case", "fallback", "otherwise", "in case"]),
+        "has_error_handling": any(w in prompt_lower for w in ["error", "invalid", "unknown", "unclear", "if unable"]),
+        "prevents_hallucination": any(w in prompt_lower for w in ["only use", "based on", "from the", "given information", "do not make up"]),
+        "has_guardrails": any(w in prompt_lower for w in ["appropriate", "safe", "ethical", "respectful", "harmful"])
+    }
+    safety_score = (sum(safety_checks.values()) / len(safety_checks)) * 100
+
+    # =========================================================================
+    # CATEGORY 5: COMPLETENESS (Weight: 15%)
+    # =========================================================================
+    completeness_checks = {
+        "sufficient_length": word_count >= 50,
+        "has_multiple_instructions": bool(re.search(r'(\d+\.|•|-\s|\*\s)', prompt_text)),
+        "covers_input_handling": any(w in prompt_lower for w in ["input", "given", "provided", "user", "request"]),
+        "covers_output_handling": any(w in prompt_lower for w in ["output", "response", "return", "provide", "generate"]),
+        "addresses_audience": any(w in prompt_lower for w in ["user", "reader", "audience", "recipient", "customer"])
+    }
+    completeness_score = (sum(completeness_checks.values()) / len(completeness_checks)) * 100
+
+    # =========================================================================
+    # CALCULATE WEIGHTED OVERALL SCORE
+    # =========================================================================
+    weights = {
+        "structure": 0.25,
+        "clarity": 0.25,
+        "output_specification": 0.20,
+        "safety_robustness": 0.15,
+        "completeness": 0.15
+    }
+
+    overall_score = (
+        structure_score * weights["structure"] +
+        clarity_score * weights["clarity"] +
+        output_score * weights["output_specification"] +
+        safety_score * weights["safety_robustness"] +
+        completeness_score * weights["completeness"]
+    )
+
+    # =========================================================================
+    # GENERATE DETAILED FINDINGS
+    # =========================================================================
+    categories = {
+        "structure": {
+            "score": round(structure_score, 1),
+            "weight": weights["structure"],
+            "checks": structure_checks,
+            "notes": [],
+            "issues": []
+        },
+        "clarity": {
+            "score": round(clarity_score, 1),
+            "weight": weights["clarity"],
+            "checks": clarity_checks,
+            "notes": [],
+            "issues": []
+        },
+        "output_specification": {
+            "score": round(output_score, 1),
+            "weight": weights["output_specification"],
+            "checks": output_checks,
+            "notes": [],
+            "issues": []
+        },
+        "safety_robustness": {
+            "score": round(safety_score, 1),
+            "weight": weights["safety_robustness"],
+            "checks": safety_checks,
+            "notes": [],
+            "issues": []
+        },
+        "completeness": {
+            "score": round(completeness_score, 1),
+            "weight": weights["completeness"],
+            "checks": completeness_checks,
+            "notes": [],
+            "issues": []
+        }
+    }
+
+    # Add notes based on checks
+    if structure_checks["uses_xml_tags"]:
+        categories["structure"]["notes"].append("Good use of XML tags for structure")
+    if not structure_checks["has_role"]:
+        categories["structure"]["issues"].append("Consider defining a role/persona")
+
+    if clarity_checks["avoids_ambiguity"]:
+        categories["clarity"]["notes"].append("Language is clear and unambiguous")
+    if not clarity_checks["has_examples"]:
+        categories["clarity"]["issues"].append("Add examples to clarify expected output")
+
+    if safety_checks["prevents_hallucination"]:
+        categories["safety_robustness"]["notes"].append("Good guardrails against hallucination")
+    if not safety_checks["has_guardrails"]:
+        categories["safety_robustness"]["issues"].append("Consider adding safety guardrails")
+
+    return {
+        "overall_score": round(overall_score, 1),
+        "word_count": word_count,
+        "categories": categories,
+        "weights": weights
+    }
+
+
 @router.post("/{project_id}/analyze")
 async def analyze_prompt(project_id: str, request: AnalyzeRequest):
-    """Analyze a prompt using heuristics + LLM for deep insights"""
+    """Analyze a prompt using semantic heuristics + LLM for deep insights"""
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     prompt_text = request.prompt_text
-    word_count = len(prompt_text.split())
 
     # =========================================================================
-    # STEP 1: Heuristic Analysis (fast, no API needed)
+    # STEP 1: Semantic Heuristic Analysis (fast, no API needed)
     # =========================================================================
+    semantic_analysis = analyze_prompt_semantic(prompt_text)
+    word_count = semantic_analysis["word_count"]
+    categories = semantic_analysis["categories"]
+
+    # Calculate legacy scores for backwards compatibility
     requirements_alignment_score = min(100, word_count * 1.5)
+    best_practices_score = semantic_analysis["overall_score"]
 
-    best_practices_checks = {
-        "has_context": any(word in prompt_text.lower() for word in ["context", "background", "purpose", "goal"]),
-        "has_examples": "example" in prompt_text.lower() or "e.g." in prompt_text.lower(),
-        "has_constraints": any(word in prompt_text.lower() for word in ["don't", "avoid", "never", "must not", "should not"]),
-        "has_format": any(word in prompt_text.lower() for word in ["format", "structure", "output", "return"]),
-        "has_tone": any(word in prompt_text.lower() for word in ["tone", "style", "voice", "professional", "casual"]),
-        "has_length": any(word in prompt_text.lower() for word in ["word", "sentence", "paragraph", "length", "brief", "detailed"])
-    }
-
-    checks_passed = sum(best_practices_checks.values())
-    best_practices_score = (checks_passed / len(best_practices_checks)) * 100
-
-    # Generate heuristic-based suggestions
+    # Generate heuristic-based suggestions from semantic analysis
     heuristic_suggestions = []
     requirements_gaps = []
 
-    if word_count < 30:
+    # Generate suggestions based on category scores
+    if categories["structure"]["score"] < 50:
         heuristic_suggestions.append({
             "priority": "High",
-            "suggestion": "Add more detail to make your prompt more specific and actionable"
+            "suggestion": "Add clear structure with sections, delimiters, or XML tags",
+            "category": "structure"
         })
-        requirements_gaps.append("Prompt lacks sufficient detail and context")
+        requirements_gaps.append("Prompt lacks clear structure")
 
-    if not best_practices_checks["has_context"]:
+    if categories["clarity"]["score"] < 50:
         heuristic_suggestions.append({
             "priority": "High",
-            "suggestion": "Provide context about the task purpose or background"
+            "suggestion": "Make the task more specific with examples and precise verbs",
+            "category": "clarity"
         })
-        requirements_gaps.append("Missing context or purpose statement")
+        requirements_gaps.append("Task description is unclear or ambiguous")
 
-    if not best_practices_checks["has_examples"]:
-        heuristic_suggestions.append({
-            "priority": "Medium",
-            "suggestion": "Include examples to demonstrate expected output format"
-        })
-        requirements_gaps.append("No examples provided in the prompt")
-
-    if not best_practices_checks["has_constraints"]:
-        heuristic_suggestions.append({
-            "priority": "Medium",
-            "suggestion": "Specify constraints or things to avoid"
-        })
-        requirements_gaps.append("No explicit constraints or guardrails defined")
-
-    if not best_practices_checks["has_format"]:
+    if categories["output_specification"]["score"] < 50:
         heuristic_suggestions.append({
             "priority": "High",
-            "suggestion": "Define the expected output format clearly"
+            "suggestion": "Define the expected output format, length, and style",
+            "category": "output"
         })
         requirements_gaps.append("Output format not specified")
 
-    if not best_practices_checks["has_tone"]:
+    if categories["safety_robustness"]["score"] < 40:
         heuristic_suggestions.append({
-            "priority": "Low",
-            "suggestion": "Specify the desired tone or style"
+            "priority": "Medium",
+            "suggestion": "Add constraints, edge case handling, and safety guardrails",
+            "category": "safety"
         })
-        requirements_gaps.append("Tone or style preferences not mentioned")
+        requirements_gaps.append("Missing safety constraints and edge case handling")
+
+    if categories["completeness"]["score"] < 50:
+        heuristic_suggestions.append({
+            "priority": "Medium",
+            "suggestion": "Add more detail covering input handling and audience",
+            "category": "completeness"
+        })
+        requirements_gaps.append("Prompt is incomplete or too brief")
+
+    # Add specific suggestions from category issues
+    for cat_name, cat_data in categories.items():
+        for issue in cat_data.get("issues", [])[:2]:  # Limit to 2 per category
+            heuristic_suggestions.append({
+                "priority": "Medium" if cat_data["score"] >= 40 else "High",
+                "suggestion": issue,
+                "category": cat_name
+            })
 
     # =========================================================================
     # STEP 2: LLM Analysis (deep insights using AI)
@@ -228,7 +537,7 @@ Provide expert analysis and actionable improvements."""
                 api_key=api_key,
                 model_name=model_name,
                 temperature=0.3,
-                max_tokens=1500
+                max_tokens=8000
             )
             if not result.get("error"):
                 output = result.get("output", "{}")
@@ -275,7 +584,20 @@ Provide expert analysis and actionable improvements."""
         "overall_score": round(overall_score, 1),
         "suggestions": suggestions,
         "requirements_gaps": requirements_gaps[:5],
-        "analysis_method": "llm_enhanced" if llm_insights else "heuristic_only"
+        "analysis_method": "llm_enhanced" if llm_insights else "semantic_heuristic",
+        # New: detailed semantic analysis by category
+        "semantic_analysis": {
+            "categories": {
+                name: {
+                    "score": data["score"],
+                    "weight": data["weight"],
+                    "notes": data["notes"],
+                    "issues": data["issues"]
+                }
+                for name, data in categories.items()
+            },
+            "word_count": word_count
+        }
     }
 
     if llm_insights:
@@ -286,7 +608,7 @@ Provide expert analysis and actionable improvements."""
 
 @router.post("/{project_id}/eval-prompt/generate")
 async def generate_eval_prompt(project_id: str):
-    """Generate an evaluation prompt using LLM"""
+    """Generate an evaluation prompt using LLM with best practices"""
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -303,35 +625,84 @@ async def generate_eval_prompt(project_id: str):
     api_key = settings.get("api_key", "")
     model_name = settings.get("model_name")
 
-    # If no API key, return template-based eval prompt
+    # Build requirements string
+    requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
+
+    # Template-based eval prompt with {{INPUT}} and {{OUTPUT}} placeholders
+    # Following best practices: clear structure, rubrics, chain-of-thought, JSON output
     if not api_key:
-        eval_prompt = f"""Evaluate the following AI-generated response based on these criteria:
+        eval_prompt = f"""<role>
+You are an expert evaluator assessing AI-generated responses. Your task is to evaluate how well the response meets the specified requirements.
+</role>
 
-**Task Context:**
+<context>
 Use Case: {project.use_case}
-Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
+Requirements: {requirements_str}
+</context>
 
-**Original Prompt:**
+<system_prompt_being_evaluated>
 {current_prompt}
+</system_prompt_being_evaluated>
 
-**Evaluation Criteria:**
-1. Relevance - Does the response address the task?
-2. Quality - Is the response well-structured and coherent?
-3. Completeness - Does it cover all required aspects?
-4. Accuracy - Is the information correct?
-5. Tone - Is the tone appropriate for the use case?
+<input>
+{{{{INPUT}}}}
+</input>
 
-**Rating Scale:**
-- 5: Excellent - Exceeds all expectations
-- 4: Good - Meets all requirements well
-- 3: Acceptable - Meets basic requirements
-- 2: Poor - Has significant issues
-- 1: Unacceptable - Fails to meet requirements
+<output_to_evaluate>
+{{{{OUTPUT}}}}
+</output_to_evaluate>
 
-**Instructions:**
-Rate the response on a scale of 1-5 and provide specific feedback."""
+<evaluation_criteria>
+Evaluate the response against these criteria:
 
-        rationale = "Template-based evaluation prompt. Configure API key for AI-generated eval prompts."
+1. **Task Completion** (Weight: 30%)
+   - Does the response fully address the user's input?
+   - Are all requested elements present?
+
+2. **Requirement Adherence** (Weight: 25%)
+   - Does it follow all specified requirements: {requirements_str}?
+   - Are there any violations of the guidelines?
+
+3. **Quality & Coherence** (Weight: 20%)
+   - Is the response well-structured and easy to understand?
+   - Is the language appropriate for the use case?
+
+4. **Accuracy & Safety** (Weight: 15%)
+   - Is the information factually correct?
+   - Are there any harmful, biased, or inappropriate elements?
+
+5. **Completeness** (Weight: 10%)
+   - Is the response comprehensive without being unnecessarily verbose?
+   - Are edge cases handled appropriately?
+</evaluation_criteria>
+
+<rubric>
+Score 5 (Excellent): Exceeds all expectations. Perfectly addresses the input, follows all requirements, high quality, accurate, and complete.
+Score 4 (Good): Meets all requirements well. Minor issues that don't significantly impact quality.
+Score 3 (Acceptable): Meets basic requirements. Some noticeable issues but still functional.
+Score 2 (Poor): Significant issues. Missing requirements, quality problems, or inaccuracies.
+Score 1 (Fail): Does not meet requirements. Major failures, harmful content, or completely off-topic.
+</rubric>
+
+<instructions>
+Think step-by-step:
+1. First, identify what the user asked for in the INPUT
+2. Review what the system was supposed to do (system prompt)
+3. Evaluate the OUTPUT against each criterion
+4. Calculate a weighted score
+5. Provide specific, actionable feedback
+
+Return your evaluation in this exact JSON format:
+</instructions>
+
+<output_format>
+{{
+    "score": <number from 1-5>,
+    "reasoning": "<2-3 sentences explaining the score with specific examples>"
+}}
+</output_format>"""
+
+        rationale = "Template-based evaluation prompt with {{INPUT}}/{{OUTPUT}} placeholders. Configure API key for AI-customized eval prompts."
 
         # Persist eval prompt to project
         project.eval_prompt = eval_prompt
@@ -344,24 +715,54 @@ Rate the response on a scale of 1-5 and provide specific feedback."""
             "rationale": rationale
         }
 
-    # Use LLM to generate sophisticated eval prompt
-    system_prompt = """You are an expert at creating evaluation prompts for AI systems. Generate a comprehensive evaluation prompt that will be used to assess AI responses.
+    # Use LLM to generate sophisticated eval prompt with best practices
+    system_prompt = """You are an expert prompt engineer specializing in LLM-as-Judge evaluation systems.
 
-The evaluation prompt should include:
-1. Clear role definition for the evaluator
-2. Specific criteria tailored to the use case
-3. A detailed 1-5 rating scale with specific failure modes for each level
-4. Clear output format (JSON with score and reasoning)
+Your task is to create a comprehensive evaluation prompt following these best practices:
 
-Return ONLY the evaluation prompt text, no explanations."""
+## Structure Requirements:
+1. Use XML tags to clearly delimit sections (<role>, <context>, <input>, <output_to_evaluate>, <evaluation_criteria>, <rubric>, <instructions>, <output_format>)
+2. Include {{INPUT}} and {{OUTPUT}} placeholders that will be replaced with actual test data
+3. Define a clear evaluator role with specific expertise
+4. Create evaluation criteria weighted by importance (must sum to 100%)
 
-    user_message = f"""Create an evaluation prompt for:
+## Rubric Requirements:
+5. Create a detailed 1-5 scoring rubric with:
+   - Score 5: Specific excellence indicators
+   - Score 4: What "good" looks like with minor issues
+   - Score 3: Baseline acceptable behavior
+   - Score 2: Clear failure modes
+   - Score 1: Critical failures and deal-breakers
 
-Use Case: {project.use_case}
-Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
+## Chain-of-Thought:
+6. Include step-by-step evaluation instructions that encourage careful reasoning
+7. Ask the evaluator to identify specific examples before scoring
 
-System Prompt Being Evaluated:
-{current_prompt}"""
+## Output Format:
+8. Require JSON output with "score" (1-5 number) and "reasoning" (specific explanation)
+
+Return ONLY the evaluation prompt text with all XML tags and placeholders. No explanations."""
+
+    user_message = f"""Create an evaluation prompt for this use case:
+
+<use_case>
+{project.use_case}
+</use_case>
+
+<requirements>
+{requirements_str}
+</requirements>
+
+<system_prompt_to_evaluate>
+{current_prompt}
+</system_prompt_to_evaluate>
+
+Generate a comprehensive evaluation prompt that:
+- Uses {{{{INPUT}}}} placeholder for the user's test input
+- Uses {{{{OUTPUT}}}} placeholder for the AI's response to evaluate
+- Has criteria specifically tailored to the use case and requirements
+- Includes domain-specific failure modes in the rubric
+- Encourages chain-of-thought evaluation before scoring"""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -370,14 +771,21 @@ System Prompt Being Evaluated:
         api_key=api_key,
         model_name=model_name,
         temperature=0.5,
-        max_tokens=2000
+        max_tokens=8000
     )
 
     if result.get("error"):
         raise HTTPException(status_code=500, detail=result["error"])
 
     eval_prompt = result.get("output", "").strip()
-    rationale = f"AI-generated evaluation prompt tailored for {project.use_case} with focus on {', '.join(project.key_requirements[:3]) if project.key_requirements else 'quality and relevance'}."
+
+    # Ensure the eval prompt has the required placeholders
+    if "{{INPUT}}" not in eval_prompt:
+        eval_prompt = eval_prompt.replace("{INPUT}", "{{INPUT}}")
+    if "{{OUTPUT}}" not in eval_prompt:
+        eval_prompt = eval_prompt.replace("{OUTPUT}", "{{OUTPUT}}")
+
+    rationale = f"AI-generated evaluation prompt with {{{{INPUT}}}}/{{{{OUTPUT}}}} placeholders, weighted criteria, detailed rubric, and chain-of-thought instructions. Tailored for: {project.use_case[:50]}..."
 
     # Persist eval prompt to project
     project.eval_prompt = eval_prompt
@@ -495,32 +903,64 @@ async def rewrite_project_prompt(project_id: str, request: RewriteRequest):
     # Build improvement context
     focus_list = "\n".join(f"- {area}" for area in (request.focus_areas or []))
     feedback_text = request.feedback or "Improve clarity and effectiveness"
+    requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
 
-    system_prompt = f"""You are an expert prompt engineer. Improve the given prompt based on the feedback and focus areas.
+    # Use best practices from OpenAI, Anthropic, and Google
+    system_prompt = f"""You are an expert prompt engineer. Your task is to improve prompts following industry best practices.
 
+## Best Practices to Apply:
+
+### Structure (GPT-4.1 Guide):
+- Use clear hierarchy: Role → Objective → Instructions → Output Format → Examples → Context
+- Use XML tags or Markdown headers to delimit sections
+- Be explicit and specific - models follow instructions literally
+
+### Clarity (Anthropic Best Practices):
+- Define a clear role and persona
+- Use delimiters to separate different parts of the prompt
+- Include explicit output format specifications
+- Provide examples when helpful (few-shot prompting)
+
+### Effectiveness (Google Prompting Strategies):
+- Give clear and specific instructions
+- Consider adding positive examples rather than negative ones
+- Use chain-of-thought reasoning where appropriate
+- Specify constraints and edge cases
+
+## Context for This Prompt:
 Use Case: {project.use_case}
-Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
+Requirements: {requirements_str}
 
-User Feedback: {feedback_text}
+## User Feedback to Address:
+{feedback_text}
 
-Focus Areas:
+## Focus Areas:
 {focus_list if focus_list else '- General improvement'}
 
-Instructions:
-1. Address all feedback and focus areas
-2. Maintain the core intent
-3. Make it more specific and actionable
-4. Return ONLY the improved prompt, no explanations"""
+## Your Task:
+1. Analyze the original prompt for weaknesses
+2. Apply the best practices above
+3. Address all user feedback and focus areas
+4. Maintain the core intent and functionality
+5. Add structure with clear sections if missing
+6. Include output format specifications if not present
+7. Preserve any {{{{variable}}}} placeholders exactly as they appear
+
+Return ONLY the improved prompt. Do not include explanations or meta-commentary."""
 
     # Call LLM
     result = await llm_client.chat(
         system_prompt=system_prompt,
-        user_message=f"Original prompt:\n{current_prompt}",
+        user_message=f"""<original_prompt>
+{current_prompt}
+</original_prompt>
+
+Improve this prompt following the best practices. Return only the improved prompt.""",
         provider=provider,
         api_key=api_key,
         model_name=model_name,
         temperature=0.7,
-        max_tokens=2000
+        max_tokens=8000
     )
 
     if result.get("error"):
@@ -621,7 +1061,7 @@ Create an improved evaluation prompt that addresses the feedback."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.5,
-        max_tokens=2000
+        max_tokens=8000
     )
 
     if result.get("error"):
@@ -749,7 +1189,7 @@ Generate {num_examples} diverse test inputs."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.8,
-        max_tokens=3000
+        max_tokens=8000
     )
 
     if result.get("error"):
@@ -866,7 +1306,13 @@ async def run_single_test_case(
     eval_api_key: str,
     pass_threshold: float
 ) -> Dict[str, Any]:
-    """Run a single test case through LLM and evaluate the response"""
+    """
+    Run a single test case through LLM and evaluate the response.
+
+    FAIL-CLOSED PRINCIPLE: If evaluation fails or JSON cannot be parsed,
+    we set passed=False and surface evaluation_error=True. We never auto-pass
+    with a default score when something goes wrong.
+    """
     import time
     start_time = time.time()
     ttfb_ms = 0
@@ -875,6 +1321,14 @@ async def run_single_test_case(
     test_input = test_case.get("input", "")
     if isinstance(test_input, dict):
         test_input = json.dumps(test_input)
+
+    # Judge metadata to track evaluation details
+    judge_metadata = {
+        "eval_provider": eval_provider,
+        "eval_model": eval_model_name,
+        "parsing_status": "not_attempted",
+        "raw_eval_output": None
+    }
 
     # Step 1: Get LLM response using the system prompt
     try:
@@ -891,56 +1345,95 @@ async def run_single_test_case(
         tokens_used += response_result.get("tokens_used", 0)
 
         if response_result.get("error"):
+            # Response generation failed - fail closed
             return {
                 "test_case_id": test_case.get("id"),
                 "input": test_input,
                 "output": "",
-                "score": 0,
+                "score": None,
                 "passed": False,
                 "feedback": f"Error generating response: {response_result.get('error')}",
                 "error": True,
+                "evaluation_error": False,
+                "generation_error": True,
                 "latency_ms": int((time.time() - start_time) * 1000),
                 "ttfb_ms": ttfb_ms,
-                "tokens_used": tokens_used
+                "tokens_used": tokens_used,
+                "judge_metadata": judge_metadata
             }
 
         llm_output = response_result.get("output", "")
 
     except Exception as e:
+        # Response generation exception - fail closed
+        logger.error(f"Exception during LLM call for test case {test_case.get('id')}: {str(e)}")
         return {
             "test_case_id": test_case.get("id"),
             "input": test_input,
             "output": "",
-            "score": 0,
+            "score": None,
             "passed": False,
             "feedback": f"Exception during LLM call: {str(e)}",
             "error": True,
+            "evaluation_error": False,
+            "generation_error": True,
             "latency_ms": int((time.time() - start_time) * 1000),
             "ttfb_ms": 0,
-            "tokens_used": 0
+            "tokens_used": 0,
+            "judge_metadata": judge_metadata
         }
 
     # Step 2: Evaluate the response using the eval prompt
     try:
-        eval_user_prompt = f"""Please evaluate the following response based on the evaluation criteria.
+        # Sanitize inputs before injecting into eval prompt to prevent prompt injection
+        sanitized_input = sanitize_for_eval(test_input, max_length=5000)
+        sanitized_output = sanitize_for_eval(llm_output, max_length=10000)
 
-**User Input:**
-{test_input}
+        # Replace {{INPUT}} and {{OUTPUT}} placeholders in the eval prompt
+        # This follows best practices for LLM-as-Judge evaluation
+        processed_eval_prompt = eval_prompt
+        if "{{INPUT}}" in processed_eval_prompt:
+            processed_eval_prompt = processed_eval_prompt.replace("{{INPUT}}", sanitized_input)
+        if "{{OUTPUT}}" in processed_eval_prompt:
+            processed_eval_prompt = processed_eval_prompt.replace("{{OUTPUT}}", sanitized_output)
 
-**System Response:**
-{llm_output}
+        # If placeholders were used, the eval prompt is self-contained
+        # Otherwise, construct a user message with the input/output
+        if "{{INPUT}}" in eval_prompt or "{{OUTPUT}}" in eval_prompt:
+            # Placeholders were replaced - send as user message with instruction to evaluate
+            eval_user_prompt = f"""{processed_eval_prompt}
 
-Provide your evaluation in the following JSON format:
+Now evaluate the response and return ONLY the JSON output as specified."""
+            eval_system = "You are an expert evaluator. Follow the evaluation instructions precisely and return only valid JSON."
+        else:
+            # Legacy format - construct user message manually with sanitized inputs
+            eval_user_prompt = f"""Please evaluate the following response based on the evaluation criteria.
+
+<input>
+{sanitized_input}
+</input>
+
+<output_to_evaluate>
+{sanitized_output}
+</output_to_evaluate>
+
+Briefly evaluate:
+1. What was requested?
+2. How well was it addressed?
+3. Key issues or strengths?
+
+Provide your evaluation in this exact JSON format:
 {{
     "score": <number from 1-5>,
-    "reasoning": "<brief explanation of the score>"
+    "reasoning": "<2-3 sentences explaining the score with specific examples>"
 }}
 
-Only return the JSON, no other text."""
+Return ONLY the JSON, no other text."""
+            eval_system = eval_prompt
 
         # Use separate evaluation model (thinking model) for better evaluation
         eval_result = await llm_client.chat(
-            system_prompt=eval_prompt,
+            system_prompt=eval_system,
             user_message=eval_user_prompt,
             provider=eval_provider,
             api_key=eval_api_key,
@@ -951,43 +1444,60 @@ Only return the JSON, no other text."""
         tokens_used += eval_result.get("tokens_used", 0)
 
         if eval_result.get("error"):
-            # If evaluation fails, still return the output but with default score
+            # Evaluation call failed - FAIL CLOSED (don't auto-pass)
+            logger.warning(f"Evaluation API error for test case {test_case.get('id')}: {eval_result.get('error')}")
+            judge_metadata["parsing_status"] = "api_error"
+            judge_metadata["error_message"] = eval_result.get("error")
             return {
                 "test_case_id": test_case.get("id"),
                 "input": test_input,
                 "output": llm_output,
-                "score": 3.0,
-                "passed": True,
-                "feedback": f"Evaluation error: {eval_result.get('error')}. Response generated successfully.",
+                "score": None,
+                "passed": False,
+                "feedback": f"Evaluation failed: {eval_result.get('error')}. Cannot determine pass/fail - marking as failed.",
                 "error": False,
+                "evaluation_error": True,
+                "generation_error": False,
                 "latency_ms": int((time.time() - start_time) * 1000),
                 "ttfb_ms": ttfb_ms,
-                "tokens_used": tokens_used
+                "tokens_used": tokens_used,
+                "judge_metadata": judge_metadata
             }
 
         eval_output = eval_result.get("output", "")
+        judge_metadata["raw_eval_output"] = eval_output[:500] if eval_output else None
 
-        # Parse the evaluation result
-        try:
-            # Try to extract JSON from the response
-            import re
-            json_match = re.search(r'\{[^}]+\}', eval_output, re.DOTALL)
-            if json_match:
-                eval_json = json.loads(json_match.group())
-                score = float(eval_json.get("score", 3))
-                reasoning = eval_json.get("reasoning", "No reasoning provided")
-            else:
-                # Try to extract just a number
-                score_match = re.search(r'\b([1-5](?:\.\d)?)\b', eval_output)
-                score = float(score_match.group(1)) if score_match else 3.0
-                reasoning = eval_output[:200]
-        except:
-            score = 3.0
-            reasoning = eval_output[:200] if eval_output else "Could not parse evaluation"
+        # Parse the evaluation result using strict Pydantic validation
+        parsed_eval = parse_eval_json_strict(eval_output)
 
+        if parsed_eval is None:
+            # JSON parsing failed - FAIL CLOSED (don't auto-pass with default score)
+            logger.warning(f"Failed to parse eval JSON for test case {test_case.get('id')}: {eval_output[:200]}")
+            judge_metadata["parsing_status"] = "parse_failed"
+            return {
+                "test_case_id": test_case.get("id"),
+                "input": test_input,
+                "output": llm_output,
+                "score": None,
+                "passed": False,
+                "feedback": f"Evaluation response could not be parsed. Raw response: {eval_output[:200]}...",
+                "error": False,
+                "evaluation_error": True,
+                "generation_error": False,
+                "latency_ms": int((time.time() - start_time) * 1000),
+                "ttfb_ms": ttfb_ms,
+                "tokens_used": tokens_used,
+                "judge_metadata": judge_metadata
+            }
+
+        # Successfully parsed - use validated score and reasoning
+        judge_metadata["parsing_status"] = "success"
+        score = parsed_eval.score
+        reasoning = parsed_eval.reasoning
         passed = score >= pass_threshold
 
-        return {
+        # Build response with optional breakdown
+        result = {
             "test_case_id": test_case.get("id"),
             "input": test_input,
             "output": llm_output,
@@ -995,23 +1505,45 @@ Only return the JSON, no other text."""
             "passed": passed,
             "feedback": reasoning,
             "error": False,
+            "evaluation_error": False,
+            "generation_error": False,
             "latency_ms": int((time.time() - start_time) * 1000),
             "ttfb_ms": ttfb_ms,
-            "tokens_used": tokens_used
+            "tokens_used": tokens_used,
+            "judge_metadata": judge_metadata
         }
 
+        # Add per-criterion breakdown if available
+        if parsed_eval.breakdown:
+            result["score_breakdown"] = parsed_eval.breakdown.model_dump(exclude_none=True)
+
+        # Add violations and evidence if available
+        if parsed_eval.violations:
+            result["violations"] = parsed_eval.violations
+        if parsed_eval.evidence:
+            result["evidence"] = parsed_eval.evidence
+
+        return result
+
     except Exception as e:
+        # Evaluation exception - FAIL CLOSED (don't auto-pass)
+        logger.error(f"Exception during evaluation for test case {test_case.get('id')}: {str(e)}")
+        judge_metadata["parsing_status"] = "exception"
+        judge_metadata["error_message"] = str(e)
         return {
             "test_case_id": test_case.get("id"),
             "input": test_input,
             "output": llm_output,
-            "score": 3.0,
-            "passed": True,
-            "feedback": f"Evaluation exception: {str(e)}. Response was generated.",
+            "score": None,
+            "passed": False,
+            "feedback": f"Evaluation exception: {str(e)}. Cannot determine pass/fail - marking as failed.",
             "error": False,
+            "evaluation_error": True,
+            "generation_error": False,
             "latency_ms": int((time.time() - start_time) * 1000),
             "ttfb_ms": ttfb_ms,
-            "tokens_used": tokens_used
+            "tokens_used": tokens_used,
+            "judge_metadata": judge_metadata
         }
 
 
@@ -1044,8 +1576,9 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
     if not system_prompt:
         system_prompt = project.initial_prompt
 
-    # Get eval prompt
-    eval_prompt = project.eval_prompt or "You are an evaluator. Rate responses from 1-5 based on quality, relevance, and accuracy."
+    # Get eval prompt and inject calibration examples if available
+    base_eval_prompt = project.eval_prompt or "You are an evaluator. Rate responses from 1-5 based on quality, relevance, and accuracy."
+    eval_prompt = build_eval_prompt_with_calibration(base_eval_prompt, project.calibration_examples or [])
 
     # Get LLM settings
     settings = get_settings()
@@ -1158,18 +1691,29 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
         test_run["status"] = "completed"
         test_run["results"] = results
 
-        # Calculate summary
+        # Calculate summary with proper handling of None scores and error tracking
         total = len(results)
         passed = sum(1 for r in results if r.get("passed"))
         failed = total - passed
-        scores = [r.get("score", 0) for r in results if not r.get("error")]
-        avg_score = sum(scores) / len(scores) if scores else 0
 
-        # Calculate score distribution
-        score_distribution = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+        # Count different error types
+        generation_errors = sum(1 for r in results if r.get("generation_error"))
+        evaluation_errors = sum(1 for r in results if r.get("evaluation_error"))
+
+        # Only include valid scores (not None, not from errors)
+        valid_scores = [
+            r.get("score") for r in results
+            if r.get("score") is not None and not r.get("error") and not r.get("evaluation_error")
+        ]
+        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
+
+        # Calculate score distribution - only count valid scores
+        score_distribution = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "error": 0}
         for r in results:
-            score = r.get("score", 0)
-            if score >= 4.5:
+            score = r.get("score")
+            if score is None or r.get("evaluation_error") or r.get("generation_error"):
+                score_distribution["error"] += 1
+            elif score >= 4.5:
                 score_distribution["5"] += 1
             elif score >= 3.5:
                 score_distribution["4"] += 1
@@ -1200,7 +1744,10 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
             "completed_items": total,
             "passed": passed,
             "failed": failed,
-            "avg_score": round(avg_score, 2),
+            "generation_errors": generation_errors,
+            "evaluation_errors": evaluation_errors,
+            "valid_scores_count": len(valid_scores),
+            "avg_score": round(avg_score, 2) if valid_scores else None,
             "pass_rate": round((passed / total * 100) if total > 0 else 0, 1),
             "score_distribution": score_distribution,
             "estimated_cost": round(estimated_cost, 4),
@@ -1428,3 +1975,724 @@ async def rerun_failed_tests(project_id: str, data: dict):
     project_storage.save_project(project)
 
     return new_run
+
+
+# ============================================================================
+# FEW-SHOT CALIBRATION EXAMPLES
+# ============================================================================
+
+class CalibrationExampleRequest(BaseModel):
+    input: str
+    output: str
+    score: float = Field(..., ge=1, le=5)
+    reasoning: str
+    category: str = "general"  # excellent, acceptable, poor
+
+
+@router.get("/{project_id}/calibration-examples")
+async def get_calibration_examples(project_id: str):
+    """Get all calibration examples for a project"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {
+        "examples": project.calibration_examples or [],
+        "count": len(project.calibration_examples) if project.calibration_examples else 0
+    }
+
+
+@router.post("/{project_id}/calibration-examples")
+async def add_calibration_example(project_id: str, request: CalibrationExampleRequest):
+    """Add a calibration example for few-shot learning in eval prompts"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    example = {
+        "id": str(uuid.uuid4()),
+        "input": request.input,
+        "output": request.output,
+        "score": request.score,
+        "reasoning": request.reasoning,
+        "category": request.category,
+        "created_at": datetime.now().isoformat()
+    }
+
+    if project.calibration_examples is None:
+        project.calibration_examples = []
+    project.calibration_examples.append(example)
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return example
+
+
+@router.delete("/{project_id}/calibration-examples/{example_id}")
+async def delete_calibration_example(project_id: str, example_id: str):
+    """Delete a calibration example"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.calibration_examples:
+        raise HTTPException(status_code=404, detail="No calibration examples found")
+
+    original_len = len(project.calibration_examples)
+    project.calibration_examples = [e for e in project.calibration_examples if e.get("id") != example_id]
+
+    if len(project.calibration_examples) == original_len:
+        raise HTTPException(status_code=404, detail="Calibration example not found")
+
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+    return {"message": "Calibration example deleted"}
+
+
+@router.post("/{project_id}/calibration-examples/generate")
+async def generate_calibration_examples(project_id: str):
+    """Auto-generate calibration examples using LLM based on use case"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    settings = get_settings()
+    provider = settings.get("provider", "openai")
+    api_key = settings.get("api_key", "")
+    model_name = settings.get("model_name")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key required to generate calibration examples")
+
+    current_prompt = ""
+    if project.system_prompt_versions:
+        current_prompt = project.system_prompt_versions[-1].get("prompt_text", "")
+
+    requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
+
+    system_prompt = """You are an expert at creating calibration examples for LLM evaluation.
+Generate 3 diverse calibration examples showing what excellent (score 5), acceptable (score 3), and poor (score 1) responses look like.
+
+Return a JSON array with exactly 3 examples:
+[
+  {
+    "input": "example user input",
+    "output": "example AI response",
+    "score": 5,
+    "reasoning": "Why this deserves a 5: specific reasons",
+    "category": "excellent"
+  },
+  {
+    "input": "example user input",
+    "output": "example AI response",
+    "score": 3,
+    "reasoning": "Why this deserves a 3: specific reasons",
+    "category": "acceptable"
+  },
+  {
+    "input": "example user input",
+    "output": "example AI response",
+    "score": 1,
+    "reasoning": "Why this deserves a 1: specific reasons",
+    "category": "poor"
+  }
+]
+
+Return ONLY valid JSON array."""
+
+    user_message = f"""Generate calibration examples for:
+
+Use Case: {project.use_case}
+Requirements: {requirements_str}
+
+System Prompt Being Evaluated:
+{current_prompt[:2000]}
+
+Create realistic examples showing score 5 (excellent), 3 (acceptable), and 1 (poor) responses."""
+
+    result = await llm_client.chat(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name,
+        temperature=0.7,
+        max_tokens=4000
+    )
+
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    try:
+        output = result.get("output", "[]").strip()
+        if "```json" in output:
+            output = output.split("```json")[1].split("```")[0]
+        elif "```" in output:
+            output = output.split("```")[1].split("```")[0]
+
+        examples = json.loads(output)
+
+        # Add IDs and timestamps
+        for ex in examples:
+            ex["id"] = str(uuid.uuid4())
+            ex["created_at"] = datetime.now().isoformat()
+
+        if project.calibration_examples is None:
+            project.calibration_examples = []
+        project.calibration_examples.extend(examples)
+        project.updated_at = datetime.now()
+        project_storage.save_project(project)
+
+        return {"examples": examples, "count": len(examples)}
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse generated examples")
+
+
+def build_eval_prompt_with_calibration(base_eval_prompt: str, calibration_examples: List[Dict]) -> str:
+    """Inject few-shot calibration examples into eval prompt"""
+    if not calibration_examples:
+        return base_eval_prompt
+
+    # Build examples section
+    examples_section = "\n<calibration_examples>\nHere are examples showing how to score responses:\n\n"
+
+    for i, ex in enumerate(calibration_examples[:5], 1):  # Limit to 5 examples
+        examples_section += f"""Example {i} (Score: {ex.get('score', 'N/A')} - {ex.get('category', 'general')}):
+Input: {ex.get('input', '')[:200]}
+Output: {ex.get('output', '')[:300]}
+Correct Score: {ex.get('score', 'N/A')}
+Reasoning: {ex.get('reasoning', '')}
+
+"""
+
+    examples_section += "</calibration_examples>\n"
+
+    # Insert before output_format section if it exists
+    if "<output_format>" in base_eval_prompt:
+        return base_eval_prompt.replace("<output_format>", examples_section + "<output_format>")
+    elif "<instructions>" in base_eval_prompt:
+        return base_eval_prompt.replace("<instructions>", examples_section + "<instructions>")
+    else:
+        # Append at the end before any closing tags
+        return base_eval_prompt + "\n" + examples_section
+
+
+# ============================================================================
+# HUMAN-IN-THE-LOOP VALIDATION
+# ============================================================================
+
+class HumanValidationRequest(BaseModel):
+    result_id: str
+    run_id: str
+    human_score: float = Field(..., ge=1, le=5)
+    human_feedback: str
+    validator_id: Optional[str] = None
+
+
+@router.get("/{project_id}/human-validations")
+async def get_human_validations(project_id: str):
+    """Get all human validations for a project"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    validations = project.human_validations or []
+
+    # Calculate agreement metrics
+    if validations:
+        agreements = sum(1 for v in validations if v.get("agrees_with_llm", False))
+        avg_diff = sum(abs(v.get("score_difference", 0)) for v in validations) / len(validations)
+    else:
+        agreements = 0
+        avg_diff = 0
+
+    return {
+        "validations": validations,
+        "count": len(validations),
+        "agreement_rate": round((agreements / len(validations) * 100) if validations else 0, 1),
+        "avg_score_difference": round(avg_diff, 2)
+    }
+
+
+@router.post("/{project_id}/human-validations")
+async def add_human_validation(project_id: str, request: HumanValidationRequest):
+    """Add a human validation for a test result"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Find the test run and result
+    test_run = get_test_run_from_project(project, request.run_id)
+    if not test_run:
+        raise HTTPException(status_code=404, detail="Test run not found")
+
+    # Find the specific result
+    result = None
+    for r in test_run.get("results", []):
+        if r.get("test_case_id") == request.result_id:
+            result = r
+            break
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Test result not found")
+
+    llm_score = result.get("score") or 0
+    score_diff = request.human_score - llm_score
+    agrees = abs(score_diff) <= 1.0  # Within 1 point = agreement
+
+    validation = {
+        "id": str(uuid.uuid4()),
+        "result_id": request.result_id,
+        "run_id": request.run_id,
+        "human_score": request.human_score,
+        "human_feedback": request.human_feedback,
+        "validator_id": request.validator_id,
+        "validated_at": datetime.now().isoformat(),
+        "llm_score": llm_score,
+        "agrees_with_llm": agrees,
+        "score_difference": round(score_diff, 1)
+    }
+
+    if project.human_validations is None:
+        project.human_validations = []
+    project.human_validations.append(validation)
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return validation
+
+
+@router.get("/{project_id}/human-validations/pending")
+async def get_pending_validations(project_id: str, run_id: Optional[str] = None):
+    """Get test results that haven't been human-validated yet"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    validated_ids = set()
+    if project.human_validations:
+        validated_ids = {v.get("result_id") for v in project.human_validations}
+
+    pending = []
+    runs_to_check = []
+
+    if run_id:
+        run = get_test_run_from_project(project, run_id)
+        if run:
+            runs_to_check = [run]
+    else:
+        runs_to_check = project.test_runs or []
+
+    for run in runs_to_check:
+        for result in run.get("results", []):
+            result_id = result.get("test_case_id")
+            if result_id and result_id not in validated_ids:
+                pending.append({
+                    "run_id": run.get("id"),
+                    "result_id": result_id,
+                    "input": result.get("input", "")[:200],
+                    "output": result.get("output", "")[:300],
+                    "llm_score": result.get("score"),
+                    "llm_feedback": result.get("feedback", "")[:200]
+                })
+
+    return {
+        "pending": pending[:20],  # Limit to 20
+        "total_pending": len(pending)
+    }
+
+
+@router.post("/{project_id}/human-validations/convert-to-calibration")
+async def convert_validation_to_calibration(project_id: str, data: dict):
+    """Convert a human validation into a calibration example"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    validation_id = data.get("validation_id")
+    if not validation_id:
+        raise HTTPException(status_code=400, detail="validation_id required")
+
+    # Find the validation
+    validation = None
+    if project.human_validations:
+        for v in project.human_validations:
+            if v.get("id") == validation_id:
+                validation = v
+                break
+
+    if not validation:
+        raise HTTPException(status_code=404, detail="Validation not found")
+
+    # Find the original result to get input/output
+    test_run = get_test_run_from_project(project, validation.get("run_id"))
+    if not test_run:
+        raise HTTPException(status_code=404, detail="Test run not found")
+
+    result = None
+    for r in test_run.get("results", []):
+        if r.get("test_case_id") == validation.get("result_id"):
+            result = r
+            break
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Original result not found")
+
+    # Determine category based on score
+    score = validation.get("human_score", 3)
+    if score >= 4.5:
+        category = "excellent"
+    elif score >= 3:
+        category = "acceptable"
+    else:
+        category = "poor"
+
+    calibration_example = {
+        "id": str(uuid.uuid4()),
+        "input": result.get("input", ""),
+        "output": result.get("output", ""),
+        "score": score,
+        "reasoning": validation.get("human_feedback", ""),
+        "category": category,
+        "created_at": datetime.now().isoformat(),
+        "source": "human_validation"
+    }
+
+    if project.calibration_examples is None:
+        project.calibration_examples = []
+    project.calibration_examples.append(calibration_example)
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return calibration_example
+
+
+# ============================================================================
+# A/B TESTING WITH STATISTICAL SIGNIFICANCE
+# ============================================================================
+
+class CreateABTestRequest(BaseModel):
+    name: str
+    version_a: int  # Control version
+    version_b: int  # Treatment version
+    sample_size: int = 30
+    confidence_level: float = 0.95
+
+
+@router.get("/{project_id}/ab-tests")
+async def get_ab_tests(project_id: str):
+    """Get all A/B tests for a project"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {
+        "tests": project.ab_tests or [],
+        "count": len(project.ab_tests) if project.ab_tests else 0
+    }
+
+
+@router.post("/{project_id}/ab-tests")
+async def create_ab_test(project_id: str, request: CreateABTestRequest):
+    """Create a new A/B test between two prompt versions"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Verify both versions exist
+    version_nums = {v.get("version") for v in (project.system_prompt_versions or [])}
+    if request.version_a not in version_nums or request.version_b not in version_nums:
+        raise HTTPException(status_code=400, detail="One or both versions not found")
+
+    ab_test = {
+        "id": str(uuid.uuid4()),
+        "name": request.name,
+        "version_a": request.version_a,
+        "version_b": request.version_b,
+        "sample_size": request.sample_size,
+        "confidence_level": request.confidence_level,
+        "status": "created",
+        "created_at": datetime.now().isoformat(),
+        "completed_at": None,
+        "results_a": [],
+        "results_b": []
+    }
+
+    if project.ab_tests is None:
+        project.ab_tests = []
+    project.ab_tests.append(ab_test)
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return ab_test
+
+
+def calculate_statistics(scores_a: List[float], scores_b: List[float], confidence_level: float = 0.95) -> Dict[str, Any]:
+    """Calculate statistical significance between two groups using Welch's t-test"""
+    import math
+
+    if len(scores_a) < 2 or len(scores_b) < 2:
+        return {
+            "p_value": 1.0,
+            "is_significant": False,
+            "effect_size": 0,
+            "confidence_interval": {"lower": 0, "upper": 0},
+            "recommendation": "Insufficient data for statistical analysis"
+        }
+
+    # Calculate means and standard deviations
+    mean_a = sum(scores_a) / len(scores_a)
+    mean_b = sum(scores_b) / len(scores_b)
+
+    var_a = sum((x - mean_a) ** 2 for x in scores_a) / (len(scores_a) - 1)
+    var_b = sum((x - mean_b) ** 2 for x in scores_b) / (len(scores_b) - 1)
+
+    std_a = math.sqrt(var_a) if var_a > 0 else 0.001
+    std_b = math.sqrt(var_b) if var_b > 0 else 0.001
+
+    n_a = len(scores_a)
+    n_b = len(scores_b)
+
+    # Welch's t-test
+    se = math.sqrt((var_a / n_a) + (var_b / n_b))
+    if se == 0:
+        se = 0.001
+
+    t_stat = (mean_b - mean_a) / se
+
+    # Degrees of freedom (Welch-Satterthwaite)
+    num = ((var_a / n_a) + (var_b / n_b)) ** 2
+    denom = ((var_a / n_a) ** 2 / (n_a - 1)) + ((var_b / n_b) ** 2 / (n_b - 1))
+    df = num / denom if denom > 0 else 1
+
+    # Approximate p-value using normal distribution (simplified)
+    # For more accurate results, use scipy.stats.t.sf
+    z = abs(t_stat)
+    # Approximation of two-tailed p-value
+    p_value = 2 * (1 - (0.5 * (1 + math.erf(z / math.sqrt(2)))))
+
+    # Effect size (Cohen's d)
+    pooled_std = math.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b) / (n_a + n_b - 2))
+    effect_size = (mean_b - mean_a) / pooled_std if pooled_std > 0 else 0
+
+    # Confidence interval for difference
+    alpha = 1 - confidence_level
+    # Approximate critical value (z for large samples)
+    z_crit = 1.96 if confidence_level == 0.95 else 2.576 if confidence_level == 0.99 else 1.645
+    margin = z_crit * se
+    diff = mean_b - mean_a
+
+    is_significant = p_value < (1 - confidence_level)
+
+    # Generate recommendation
+    if not is_significant:
+        recommendation = "No statistically significant difference. Consider collecting more data or the versions perform similarly."
+    elif diff > 0:
+        recommendation = f"Version B performs significantly better (effect size: {effect_size:.2f}). Consider adopting Version B."
+    else:
+        recommendation = f"Version A performs significantly better (effect size: {abs(effect_size):.2f}). Keep Version A."
+
+    return {
+        "p_value": round(p_value, 4),
+        "is_significant": is_significant,
+        "effect_size": round(effect_size, 3),
+        "confidence_interval": {
+            "lower": round(diff - margin, 3),
+            "upper": round(diff + margin, 3)
+        },
+        "t_statistic": round(t_stat, 3),
+        "degrees_of_freedom": round(df, 1),
+        "recommendation": recommendation
+    }
+
+
+@router.post("/{project_id}/ab-tests/{test_id}/run")
+async def run_ab_test(project_id: str, test_id: str):
+    """Execute an A/B test by running test cases against both versions"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Find the A/B test
+    ab_test = None
+    test_index = -1
+    if project.ab_tests:
+        for i, t in enumerate(project.ab_tests):
+            if t.get("id") == test_id:
+                ab_test = t
+                test_index = i
+                break
+
+    if not ab_test:
+        raise HTTPException(status_code=404, detail="A/B test not found")
+
+    # Get test cases
+    test_cases = project.test_cases or []
+    if not test_cases:
+        raise HTTPException(status_code=400, detail="No test cases available")
+
+    # Get prompts for both versions
+    prompt_a = None
+    prompt_b = None
+    for v in (project.system_prompt_versions or []):
+        if v.get("version") == ab_test["version_a"]:
+            prompt_a = v.get("prompt_text")
+        if v.get("version") == ab_test["version_b"]:
+            prompt_b = v.get("prompt_text")
+
+    if not prompt_a or not prompt_b:
+        raise HTTPException(status_code=400, detail="Could not find prompt versions")
+
+    # Get settings
+    settings = get_settings()
+    provider = settings.get("provider", "openai")
+    api_key = settings.get("api_key", "")
+    model_name = settings.get("model_name")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key required")
+
+    eval_prompt = project.eval_prompt or "Rate the response from 1-5."
+
+    # Run tests for both versions
+    sample_size = min(ab_test.get("sample_size", 30), len(test_cases))
+    test_subset = test_cases[:sample_size]
+
+    results_a = []
+    results_b = []
+
+    ab_test["status"] = "running"
+    project.ab_tests[test_index] = ab_test
+    project_storage.save_project(project)
+
+    for tc in test_subset:
+        # Run Version A
+        result_a = await run_single_test_case(
+            test_case=tc,
+            system_prompt=prompt_a,
+            eval_prompt=eval_prompt,
+            llm_provider=provider,
+            model_name=model_name,
+            api_key=api_key,
+            eval_provider=provider,
+            eval_model_name=model_name,
+            eval_api_key=api_key,
+            pass_threshold=3.5
+        )
+        results_a.append(result_a)
+
+        # Run Version B
+        result_b = await run_single_test_case(
+            test_case=tc,
+            system_prompt=prompt_b,
+            eval_prompt=eval_prompt,
+            llm_provider=provider,
+            model_name=model_name,
+            api_key=api_key,
+            eval_provider=provider,
+            eval_model_name=model_name,
+            eval_api_key=api_key,
+            pass_threshold=3.5
+        )
+        results_b.append(result_b)
+
+    # Calculate statistics
+    scores_a = [r.get("score") for r in results_a if r.get("score") is not None]
+    scores_b = [r.get("score") for r in results_b if r.get("score") is not None]
+
+    stats = calculate_statistics(scores_a, scores_b, ab_test.get("confidence_level", 0.95))
+
+    # Calculate summary stats for each version
+    def calc_summary(results, scores):
+        return {
+            "total": len(results),
+            "valid_scores": len(scores),
+            "mean_score": round(sum(scores) / len(scores), 2) if scores else 0,
+            "min_score": round(min(scores), 1) if scores else 0,
+            "max_score": round(max(scores), 1) if scores else 0,
+            "std_dev": round((sum((x - (sum(scores)/len(scores)))**2 for x in scores) / len(scores))**0.5, 2) if len(scores) > 1 else 0,
+            "pass_rate": round(sum(1 for r in results if r.get("passed")) / len(results) * 100, 1) if results else 0
+        }
+
+    summary_a = calc_summary(results_a, scores_a)
+    summary_b = calc_summary(results_b, scores_b)
+
+    # Determine winner
+    winner = None
+    if stats["is_significant"]:
+        if summary_b["mean_score"] > summary_a["mean_score"]:
+            winner = "B"
+        else:
+            winner = "A"
+
+    # Update A/B test
+    ab_test["status"] = "completed"
+    ab_test["completed_at"] = datetime.now().isoformat()
+    ab_test["results_a"] = results_a
+    ab_test["results_b"] = results_b
+    ab_test["summary_a"] = summary_a
+    ab_test["summary_b"] = summary_b
+    ab_test["statistics"] = stats
+    ab_test["winner"] = winner
+
+    project.ab_tests[test_index] = ab_test
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return {
+        "test_id": test_id,
+        "status": "completed",
+        "version_a": {
+            "version_number": ab_test["version_a"],
+            **summary_a
+        },
+        "version_b": {
+            "version_number": ab_test["version_b"],
+            **summary_b
+        },
+        "statistics": stats,
+        "winner": winner,
+        "recommendation": stats["recommendation"]
+    }
+
+
+@router.get("/{project_id}/ab-tests/{test_id}/results")
+async def get_ab_test_results(project_id: str, test_id: str):
+    """Get detailed results of an A/B test"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    ab_test = None
+    if project.ab_tests:
+        for t in project.ab_tests:
+            if t.get("id") == test_id:
+                ab_test = t
+                break
+
+    if not ab_test:
+        raise HTTPException(status_code=404, detail="A/B test not found")
+
+    return ab_test
+
+
+@router.delete("/{project_id}/ab-tests/{test_id}")
+async def delete_ab_test(project_id: str, test_id: str):
+    """Delete an A/B test"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.ab_tests:
+        raise HTTPException(status_code=404, detail="No A/B tests found")
+
+    original_len = len(project.ab_tests)
+    project.ab_tests = [t for t in project.ab_tests if t.get("id") != test_id]
+
+    if len(project.ab_tests) == original_len:
+        raise HTTPException(status_code=404, detail="A/B test not found")
+
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+    return {"message": "A/B test deleted"}

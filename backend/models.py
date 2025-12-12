@@ -76,6 +76,52 @@ class FinalReport(BaseModel):
 
 # ============= Project Management =============
 
+class CalibrationExample(BaseModel):
+    """Few-shot calibration example for eval prompt"""
+    input: str
+    output: str
+    score: float  # 1-5
+    reasoning: str
+    category: str = "general"  # e.g., "excellent", "acceptable", "poor"
+
+
+class HumanValidation(BaseModel):
+    """Human validation record for a test result"""
+    result_id: str
+    human_score: float  # 1-5
+    human_feedback: str
+    validator_id: Optional[str] = None
+    validated_at: datetime
+    agrees_with_llm: bool
+    score_difference: float
+
+
+class ABTestConfig(BaseModel):
+    """Configuration for A/B testing between prompt versions"""
+    id: str
+    name: str
+    version_a: int  # Prompt version number (control)
+    version_b: int  # Prompt version number (treatment)
+    sample_size: int = 30  # Minimum samples per variant
+    confidence_level: float = 0.95  # Statistical confidence level
+    status: str = "running"  # running, completed, stopped
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class ABTestResult(BaseModel):
+    """Results from an A/B test"""
+    test_id: str
+    version_a_stats: Dict[str, Any]
+    version_b_stats: Dict[str, Any]
+    winner: Optional[str] = None  # "A", "B", or None if inconclusive
+    p_value: float
+    is_significant: bool
+    confidence_interval: Dict[str, float]
+    effect_size: float
+    recommendation: str
+
+
 class SavedProject(BaseModel):
     """Saved project with all workflow data"""
     id: str
@@ -88,6 +134,9 @@ class SavedProject(BaseModel):
     optimization_score: Optional[float] = None
     eval_prompt: Optional[str] = None
     eval_rationale: Optional[str] = None
+    calibration_examples: Optional[List[CalibrationExample]] = None  # Few-shot examples
+    human_validations: Optional[List[HumanValidation]] = None  # Human validation records
+    ab_tests: Optional[List[ABTestConfig]] = None  # A/B test configurations
     dataset: Optional[Dict[str, Any]] = None  # Generated test dataset
     test_cases: Optional[List[Dict[str, Any]]] = None
     test_results: Optional[List[Dict[str, Any]]] = None  # Flexible format for test results

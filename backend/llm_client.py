@@ -19,7 +19,7 @@ class LLMClient:
         api_key: str,
         model_name: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4000
+        max_tokens: int = 8000
     ) -> dict:
         """Execute chat completion"""
         start_time = time.time()
@@ -29,17 +29,35 @@ class LLMClient:
                 from openai import AsyncOpenAI
                 client = AsyncOpenAI(api_key=api_key)
                 model = model_name or "gpt-4o"
-                
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ],
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                
+
+                # Check if this is a reasoning model (o1, o3 series)
+                # These models don't support temperature, max_tokens, or system messages
+                is_reasoning_model = model.startswith("o1") or model.startswith("o3")
+
+                if is_reasoning_model:
+                    # Reasoning models: combine system + user into single user message
+                    # Use max_completion_tokens instead of max_tokens
+                    # Don't set temperature (not supported)
+                    combined_message = f"{system_prompt}\n\n{user_message}"
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "user", "content": combined_message}
+                        ],
+                        max_completion_tokens=max_tokens
+                    )
+                else:
+                    # Standard models: use system message, temperature, max_tokens
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message}
+                        ],
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+
                 return {
                     "output": response.choices[0].message.content,
                     "error": None,

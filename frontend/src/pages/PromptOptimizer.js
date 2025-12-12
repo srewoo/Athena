@@ -105,6 +105,12 @@ const PromptOptimizer = () => {
   const [regenerateDialogOpen, setRegenerateDialogOpen] = useState(false);
   const [regenerateSampleCount, setRegenerateSampleCount] = useState(100);
 
+  // Regenerate states for each step
+  const [isRegeneratingAnalysis, setIsRegeneratingAnalysis] = useState(false);
+  const [isRegeneratingPrompt, setIsRegeneratingPrompt] = useState(false);
+  const [isRegeneratingEval, setIsRegeneratingEval] = useState(false);
+  const [isRegeneratingDataset, setIsRegeneratingDataset] = useState(false);
+
   // Settings Modal
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [llmProvider, setLlmProvider] = useState("openai");
@@ -1075,6 +1081,201 @@ const PromptOptimizer = () => {
         description: error.message,
         variant: "destructive"
       });
+    }
+  };
+
+  // ============= Regenerate Handlers =============
+
+  // Regenerate analysis with existing prompt - sends to LLM for fresh analysis
+  const handleRegenerateAnalysis = async () => {
+    if (!projectId || !currentVersion?.prompt_text) {
+      toast({
+        title: "No Prompt",
+        description: "Please create a prompt first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsRegeneratingAnalysis(true);
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt_text: currentVersion.prompt_text,
+          regenerate: true // Signal to backend this is a regeneration
+        })
+      });
+
+      if (!response.ok) throw new Error("Failed to regenerate analysis");
+
+      const result = await response.json();
+      setAnalysisResults(result);
+
+      toast({
+        title: "Analysis Regenerated",
+        description: "Fresh analysis has been generated"
+      });
+    } catch (error) {
+      toast({
+        title: "Regeneration Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsRegeneratingAnalysis(false);
+    }
+  };
+
+  // Regenerate/improve the system prompt using existing prompt and analysis
+  const handleRegeneratePrompt = async () => {
+    if (!projectId || !currentVersion?.prompt_text) {
+      toast({
+        title: "No Prompt",
+        description: "Please create a prompt first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsRegeneratingPrompt(true);
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/rewrite`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt_text: currentVersion.prompt_text,
+          feedback: "Improve this prompt based on the analysis. Make it more effective, clearer, and better structured.",
+          focus_areas: analysisResults?.suggestions?.map(s => s.suggestion) || []
+        })
+      });
+
+      if (!response.ok) throw new Error("Failed to regenerate prompt");
+
+      const result = await response.json();
+
+      // Add as new version
+      const addVersionResponse = await fetch(`${API}/projects/${projectId}/versions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt_text: result.rewritten_prompt,
+          changes_made: "Regenerated with AI improvements"
+        })
+      });
+
+      if (!addVersionResponse.ok) throw new Error("Failed to save regenerated version");
+
+      const newVersion = await addVersionResponse.json();
+      setVersionHistory(prev => [...prev, newVersion]);
+      setCurrentVersion(newVersion);
+      setPromptChanges(result.changes_made || ["AI-improved version"]);
+
+      toast({
+        title: "Prompt Regenerated",
+        description: `Version ${newVersion.version} created with improvements`
+      });
+    } catch (error) {
+      toast({
+        title: "Regeneration Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsRegeneratingPrompt(false);
+    }
+  };
+
+  // Regenerate eval prompt using existing context
+  const handleRegenerateEvalPrompt = async () => {
+    if (!projectId) {
+      toast({
+        title: "No Project",
+        description: "Please create a project first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsRegeneratingEval(true);
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          regenerate: true // Signal this is a regeneration
+        })
+      });
+
+      if (!response.ok) throw new Error("Failed to regenerate eval prompt");
+
+      const result = await response.json();
+      setEvalPrompt(result.eval_prompt);
+      setEvalRationale(result.rationale);
+
+      toast({
+        title: "Eval Prompt Regenerated",
+        description: "Fresh evaluation prompt has been generated"
+      });
+    } catch (error) {
+      toast({
+        title: "Regeneration Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsRegeneratingEval(false);
+    }
+  };
+
+  // Regenerate dataset with same parameters (new version)
+  const handleRegenerateDatasetNew = async () => {
+    if (!projectId) {
+      toast({
+        title: "No Project",
+        description: "Please create a project first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const countToGenerate = dataset?.sample_count || sampleCount;
+
+    setIsRegeneratingDataset(true);
+    setDatasetProgress({ progress: 0, batch: 0, total_batches: 0, status: 'regenerating' });
+
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/dataset/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sample_count: countToGenerate,
+          version: currentVersion?.version,
+          regenerate: true // Signal this is a regeneration
+        })
+      });
+
+      if (!response.ok) throw new Error("Failed to regenerate dataset");
+
+      const result = await response.json();
+      setDataset(result);
+      setIsCurrentSessionDataset(true);
+      setDatasetProgress({ progress: 100, batch: 0, total_batches: 0, status: 'completed' });
+
+      toast({
+        title: "Dataset Regenerated",
+        description: `${result.sample_count} new test cases created`
+      });
+    } catch (error) {
+      toast({
+        title: "Regeneration Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+      setDatasetProgress({ progress: 0, batch: 0, total_batches: 0, status: 'error' });
+    } finally {
+      setIsRegeneratingDataset(false);
     }
   };
 
@@ -2326,6 +2527,24 @@ const PromptOptimizer = () => {
                       <div className="flex gap-4 flex-wrap">
                         <Button
                           variant="outline"
+                          onClick={handleRegenerateEvalPrompt}
+                          disabled={isRegeneratingEval || isGeneratingEval}
+                          className="border-green-600 text-green-600 dark:text-green-400 hover:bg-green-900/20"
+                        >
+                          {isRegeneratingEval ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                              Regenerating...
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-4 h-4 mr-2" />
+                              Regenerate
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          variant="outline"
                           onClick={() => setShowEvalFeedback(true)}
                           className="border-blue-600 text-blue-600 dark:text-blue-400 hover:bg-blue-900/20"
                         >
@@ -2495,9 +2714,27 @@ const PromptOptimizer = () => {
                       </div>
 
                       <div className="flex gap-2">
-                        <Button onClick={handleDownloadDataset} variant="outline" className="flex-1">
+                        <Button onClick={handleDownloadDataset} variant="outline" className="flex-1 border-slate-400 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
                           <Download className="w-4 h-4 mr-2" />
                           Download CSV
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRegenerateDatasetNew}
+                          disabled={isRegeneratingDataset || isGeneratingDataset}
+                          className="flex-1 border-green-600 text-green-600 dark:text-green-400 hover:bg-green-900/20"
+                        >
+                          {isRegeneratingDataset ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                              Regenerating...
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-4 h-4 mr-2" />
+                              Regenerate
+                            </>
+                          )}
                         </Button>
                         {evalPrompt && (
                           <Button
