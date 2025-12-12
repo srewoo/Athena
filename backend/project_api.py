@@ -861,6 +861,8 @@ async def run_single_test_case(
     """Run a single test case through LLM and evaluate the response"""
     import time
     start_time = time.time()
+    ttfb_ms = 0
+    tokens_used = 0
 
     test_input = test_case.get("input", "")
     if isinstance(test_input, dict):
@@ -876,6 +878,10 @@ async def run_single_test_case(
             model_name=model_name
         )
 
+        # Track TTFB (time to first response from LLM)
+        ttfb_ms = response_result.get("latency_ms", 0)
+        tokens_used += response_result.get("tokens_used", 0)
+
         if response_result.get("error"):
             return {
                 "test_case_id": test_case.get("id"),
@@ -885,7 +891,9 @@ async def run_single_test_case(
                 "passed": False,
                 "feedback": f"Error generating response: {response_result.get('error')}",
                 "error": True,
-                "latency_ms": int((time.time() - start_time) * 1000)
+                "latency_ms": int((time.time() - start_time) * 1000),
+                "ttfb_ms": ttfb_ms,
+                "tokens_used": tokens_used
             }
 
         llm_output = response_result.get("output", "")
@@ -899,7 +907,9 @@ async def run_single_test_case(
             "passed": False,
             "feedback": f"Exception during LLM call: {str(e)}",
             "error": True,
-            "latency_ms": int((time.time() - start_time) * 1000)
+            "latency_ms": int((time.time() - start_time) * 1000),
+            "ttfb_ms": 0,
+            "tokens_used": 0
         }
 
     # Step 2: Evaluate the response using the eval prompt
@@ -928,6 +938,9 @@ Only return the JSON, no other text."""
             model_name=model_name
         )
 
+        # Add eval tokens to total
+        tokens_used += eval_result.get("tokens_used", 0)
+
         if eval_result.get("error"):
             # If evaluation fails, still return the output but with default score
             return {
@@ -938,7 +951,9 @@ Only return the JSON, no other text."""
                 "passed": True,
                 "feedback": f"Evaluation error: {eval_result.get('error')}. Response generated successfully.",
                 "error": False,
-                "latency_ms": int((time.time() - start_time) * 1000)
+                "latency_ms": int((time.time() - start_time) * 1000),
+                "ttfb_ms": ttfb_ms,
+                "tokens_used": tokens_used
             }
 
         eval_output = eval_result.get("output", "")
@@ -971,7 +986,9 @@ Only return the JSON, no other text."""
             "passed": passed,
             "feedback": reasoning,
             "error": False,
-            "latency_ms": int((time.time() - start_time) * 1000)
+            "latency_ms": int((time.time() - start_time) * 1000),
+            "ttfb_ms": ttfb_ms,
+            "tokens_used": tokens_used
         }
 
     except Exception as e:
@@ -983,7 +1000,9 @@ Only return the JSON, no other text."""
             "passed": True,
             "feedback": f"Evaluation exception: {str(e)}. Response was generated.",
             "error": False,
-            "latency_ms": int((time.time() - start_time) * 1000)
+            "latency_ms": int((time.time() - start_time) * 1000),
+            "ttfb_ms": ttfb_ms,
+            "tokens_used": tokens_used
         }
 
 
@@ -1065,7 +1084,9 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
                 "passed": True,
                 "feedback": "Mock response - Configure API key for real LLM testing",
                 "error": False,
-                "latency_ms": 100
+                "latency_ms": 100,
+                "ttfb_ms": 50,
+                "tokens_used": 150
             }
             for tc in test_cases[:10]
         ]
@@ -1079,7 +1100,12 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
             "pass_rate": 100.0,
             "score_distribution": {"1": 0, "2": 0, "3": 0, "4": mock_count, "5": 0},
             "estimated_cost": round(mock_count * 0.0005, 4),
-            "total_latency_ms": mock_count * 100
+            "total_latency_ms": mock_count * 100,
+            "min_latency_ms": 100,
+            "max_latency_ms": 100,
+            "avg_latency_ms": 100,
+            "avg_ttfb_ms": 50,
+            "total_tokens": mock_count * 150
         }
     else:
         # Run actual LLM tests
@@ -1126,10 +1152,20 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
             else:
                 score_distribution["1"] += 1
 
-        # Estimate cost (rough estimate based on tokens)
-        total_latency = sum(r.get("latency_ms", 0) for r in results)
-        # Rough cost estimate: $0.0001 per test case for simple models
-        estimated_cost = total * 0.0005
+        # Calculate latency metrics
+        latencies = [r.get("latency_ms", 0) for r in results if r.get("latency_ms", 0) > 0]
+        ttfbs = [r.get("ttfb_ms", 0) for r in results if r.get("ttfb_ms", 0) > 0]
+        total_latency = sum(latencies)
+        min_latency = min(latencies) if latencies else 0
+        max_latency = max(latencies) if latencies else 0
+        avg_latency = total_latency / len(latencies) if latencies else 0
+        avg_ttfb = sum(ttfbs) / len(ttfbs) if ttfbs else 0
+
+        # Calculate total tokens
+        total_tokens = sum(r.get("tokens_used", 0) for r in results)
+
+        # Estimate cost based on tokens (rough estimate: $0.002 per 1K tokens for GPT-4)
+        estimated_cost = (total_tokens / 1000) * 0.002 if total_tokens > 0 else total * 0.0005
 
         test_run["summary"] = {
             "total": total,
@@ -1140,7 +1176,12 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
             "pass_rate": round((passed / total * 100) if total > 0 else 0, 1),
             "score_distribution": score_distribution,
             "estimated_cost": round(estimated_cost, 4),
-            "total_latency_ms": total_latency
+            "total_latency_ms": total_latency,
+            "min_latency_ms": min_latency,
+            "max_latency_ms": max_latency,
+            "avg_latency_ms": round(avg_latency, 0),
+            "avg_ttfb_ms": round(avg_ttfb, 0),
+            "total_tokens": total_tokens
         }
 
     # Persist test run to project file

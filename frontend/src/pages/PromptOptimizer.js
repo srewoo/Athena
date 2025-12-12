@@ -1838,7 +1838,7 @@ const PromptOptimizer = () => {
             {expandedSections.requirements && (
               <CardContent className="p-6 space-y-4">
                 <div>
-                  <Label htmlFor="projectName">Project Name *</Label>
+                  <Label htmlFor="projectName" className="text-slate-700 dark:text-slate-300 font-medium">Project Name *</Label>
                   <Input
                     id="projectName"
                     value={projectName}
@@ -1849,7 +1849,7 @@ const PromptOptimizer = () => {
                 </div>
 
                 <div>
-                  <Label htmlFor="useCase">Use Case *</Label>
+                  <Label htmlFor="useCase" className="text-slate-700 dark:text-slate-300 font-medium">Use Case *</Label>
                   <Textarea
                     id="useCase"
                     value={useCase}
@@ -1860,7 +1860,7 @@ const PromptOptimizer = () => {
                 </div>
 
                 <div>
-                  <Label htmlFor="requirements">Key Requirements * (one per line or comma-separated)</Label>
+                  <Label htmlFor="requirements" className="text-slate-700 dark:text-slate-300 font-medium">Key Requirements * (one per line or comma-separated)</Label>
                   <Textarea
                     id="requirements"
                     value={keyRequirements}
@@ -1871,22 +1871,22 @@ const PromptOptimizer = () => {
                 </div>
 
                 <div>
-                  <Label htmlFor="provider">Target LLM Provider *</Label>
+                  <Label htmlFor="provider" className="text-slate-700 dark:text-slate-300 font-medium">Target LLM Provider *</Label>
                   <Select value={targetProvider} onValueChange={setTargetProvider}>
                     <SelectTrigger className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                       <SelectValue />
                     </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="openai">OpenAI (GPT)</SelectItem>
-                      <SelectItem value="claude">Anthropic (Claude)</SelectItem>
-                      <SelectItem value="gemini">Google (Gemini)</SelectItem>
-                      <SelectItem value="multi">Multi-provider</SelectItem>
+                    <SelectContent className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600">
+                      <SelectItem value="openai" className="text-slate-900 dark:text-slate-100">OpenAI (GPT)</SelectItem>
+                      <SelectItem value="claude" className="text-slate-900 dark:text-slate-100">Anthropic (Claude)</SelectItem>
+                      <SelectItem value="gemini" className="text-slate-900 dark:text-slate-100">Google (Gemini)</SelectItem>
+                      <SelectItem value="multi" className="text-slate-900 dark:text-slate-100">Multi-provider</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
 
                 <div>
-                  <Label htmlFor="initialPrompt">Initial System Prompt *</Label>
+                  <Label htmlFor="initialPrompt" className="text-slate-700 dark:text-slate-300 font-medium">Initial System Prompt *</Label>
                   <Textarea
                     id="initialPrompt"
                     value={initialPrompt}
@@ -2675,9 +2675,43 @@ const PromptOptimizer = () => {
                         </div>
                         <div className="text-center p-3 bg-white dark:bg-slate-800 rounded-lg">
                           <div className="text-2xl font-bold text-purple-600">
-                            ${testRunResults.summary.estimated_cost?.toFixed(4)}
+                            {testRunResults.summary.total_tokens?.toLocaleString() || 0}
                           </div>
-                          <div className="text-sm text-slate-600 dark:text-slate-400">Est. Cost</div>
+                          <div className="text-sm text-slate-600 dark:text-slate-400">Total Tokens</div>
+                        </div>
+                      </div>
+
+                      {/* Latency Metrics */}
+                      <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-3">
+                        <div className="text-center p-2 bg-white dark:bg-slate-800 rounded-lg">
+                          <div className="text-lg font-semibold text-amber-600">
+                            {testRunResults.summary.avg_ttfb_ms || 0}ms
+                          </div>
+                          <div className="text-xs text-slate-600 dark:text-slate-400">Avg TTFB</div>
+                        </div>
+                        <div className="text-center p-2 bg-white dark:bg-slate-800 rounded-lg">
+                          <div className="text-lg font-semibold text-cyan-600">
+                            {testRunResults.summary.min_latency_ms || 0}ms
+                          </div>
+                          <div className="text-xs text-slate-600 dark:text-slate-400">Min Latency</div>
+                        </div>
+                        <div className="text-center p-2 bg-white dark:bg-slate-800 rounded-lg">
+                          <div className="text-lg font-semibold text-indigo-600">
+                            {testRunResults.summary.avg_latency_ms || 0}ms
+                          </div>
+                          <div className="text-xs text-slate-600 dark:text-slate-400">Avg Latency</div>
+                        </div>
+                        <div className="text-center p-2 bg-white dark:bg-slate-800 rounded-lg">
+                          <div className="text-lg font-semibold text-rose-600">
+                            {testRunResults.summary.max_latency_ms || 0}ms
+                          </div>
+                          <div className="text-xs text-slate-600 dark:text-slate-400">Max Latency</div>
+                        </div>
+                        <div className="text-center p-2 bg-white dark:bg-slate-800 rounded-lg">
+                          <div className="text-lg font-semibold text-emerald-600">
+                            ${testRunResults.summary.estimated_cost?.toFixed(4) || '0.0000'}
+                          </div>
+                          <div className="text-xs text-slate-600 dark:text-slate-400">Est. Cost</div>
                         </div>
                       </div>
 
@@ -3111,14 +3145,18 @@ const PromptOptimizer = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-200 dark:border-slate-600">
+              <div className="grid grid-cols-4 gap-4 pt-4 border-t border-slate-200 dark:border-slate-600">
                 <div>
-                  <Label className="text-slate-500 dark:text-slate-400 text-xs">Latency</Label>
-                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.latency_ms}ms</div>
+                  <Label className="text-slate-500 dark:text-slate-400 text-xs">TTFB</Label>
+                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.ttfb_ms || 0}ms</div>
+                </div>
+                <div>
+                  <Label className="text-slate-500 dark:text-slate-400 text-xs">Total Latency</Label>
+                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.latency_ms || 0}ms</div>
                 </div>
                 <div>
                   <Label className="text-slate-500 dark:text-slate-400 text-xs">Tokens Used</Label>
-                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.tokens_used || 'N/A'}</div>
+                  <div className="font-mono text-slate-800 dark:text-slate-200">{detailViewItem.tokens_used?.toLocaleString() || 0}</div>
                 </div>
                 <div>
                   <Label className="text-slate-500 dark:text-slate-400 text-xs">Error</Label>
