@@ -144,6 +144,18 @@ const PromptOptimizer = () => {
   // State for thinking mode
   const [useThinkingMode, setUseThinkingMode] = useState(false);
 
+  // State for separate evaluation model
+  const [evalProvider, setEvalProvider] = useState("openai");
+  const [evalModel, setEvalModel] = useState("o1-mini");  // Default to thinking model
+  const [useSeparateEvalModel, setUseSeparateEvalModel] = useState(true);  // Enable by default
+
+  // Thinking/Reasoning models for evaluation
+  const thinkingModels = {
+    openai: ["o1", "o1-preview", "o1-mini", "o3", "o3-mini"],
+    claude: ["claude-sonnet-4-5-20250929", "claude-3-7-sonnet-20250219"],
+    gemini: ["gemini-2.5-pro", "gemini-2.5-flash"]
+  };
+
   // Load existing settings on mount - from localStorage first, then sync to backend
   useEffect(() => {
     const loadSettings = async () => {
@@ -1118,6 +1130,9 @@ const PromptOptimizer = () => {
           prompt_version: versionToTest,
           llm_provider: llmProvider,
           model_name: llmModel || null,
+          // Evaluation model settings
+          eval_provider: useSeparateEvalModel ? evalProvider : llmProvider,
+          eval_model: useSeparateEvalModel ? evalModel : (llmModel || null),
           pass_threshold: testRunPassThreshold,
           batch_size: 5,
           max_concurrent: 3
@@ -2551,44 +2566,132 @@ const PromptOptimizer = () => {
                   )}
 
                   {/* Configuration */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <Label className="text-slate-700 dark:text-slate-300">Prompt Version</Label>
-                      <Select
-                        value={String(selectedTestRunVersion || currentVersion?.version || 1)}
-                        onValueChange={(v) => setSelectedTestRunVersion(parseInt(v))}
-                      >
-                        <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
-                          <SelectValue placeholder="Select version" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {versionHistory.map((v) => (
-                            <SelectItem key={v.version} value={String(v.version)}>
-                              Version {v.version} {v.is_final ? "(Final)" : ""}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                  <div className="space-y-4">
+                    {/* Row 1: Prompt Version and Pass Threshold */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <Label className="text-slate-700 dark:text-slate-300">Prompt Version</Label>
+                        <Select
+                          value={String(selectedTestRunVersion || currentVersion?.version || 1)}
+                          onValueChange={(v) => setSelectedTestRunVersion(parseInt(v))}
+                        >
+                          <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
+                            <SelectValue placeholder="Select version" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-white dark:bg-slate-800">
+                            {versionHistory.map((v) => (
+                              <SelectItem key={v.version} value={String(v.version)} className="text-slate-900 dark:text-slate-100">
+                                Version {v.version} {v.is_final ? "(Final)" : ""}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <div>
+                        <Label className="text-slate-700 dark:text-slate-300">Pass Threshold</Label>
+                        <Select
+                          value={String(testRunPassThreshold)}
+                          onValueChange={(v) => setTestRunPassThreshold(parseFloat(v))}
+                        >
+                          <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="bg-white dark:bg-slate-800">
+                            <SelectItem value="3.0" className="text-slate-900 dark:text-slate-100">3.0 (Lenient)</SelectItem>
+                            <SelectItem value="3.5" className="text-slate-900 dark:text-slate-100">3.5 (Standard)</SelectItem>
+                            <SelectItem value="4.0" className="text-slate-900 dark:text-slate-100">4.0 (Strict)</SelectItem>
+                            <SelectItem value="4.5" className="text-slate-900 dark:text-slate-100">4.5 (Very Strict)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <div>
+                        <Label className="text-slate-700 dark:text-slate-300">Response Model</Label>
+                        <Select value={llmModel || modelOptions[llmProvider]?.[0] || ""} onValueChange={setLlmModel}>
+                          <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
+                            <SelectValue placeholder="Select model" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-white dark:bg-slate-800">
+                            {modelOptions[llmProvider]?.map((model, index) => {
+                              if (typeof model === 'object' && model.disabled) {
+                                return (
+                                  <SelectItem key={index} value={`disabled-${index}`} disabled className="text-slate-500 dark:text-slate-400 font-semibold">
+                                    {model.label}
+                                  </SelectItem>
+                                );
+                              }
+                              return (
+                                <SelectItem key={model} value={model} className="text-slate-900 dark:text-slate-100">
+                                  {model}
+                                </SelectItem>
+                              );
+                            })}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
 
-                    <div>
-                      <Label className="text-slate-700 dark:text-slate-300">Pass Threshold</Label>
-                      <Select
-                        value={String(testRunPassThreshold)}
-                        onValueChange={(v) => setTestRunPassThreshold(parseFloat(v))}
-                      >
-                        <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="3.0">3.0 (Lenient)</SelectItem>
-                          <SelectItem value="3.5">3.5 (Standard)</SelectItem>
-                          <SelectItem value="4.0">4.0 (Strict)</SelectItem>
-                          <SelectItem value="4.5">4.5 (Very Strict)</SelectItem>
-                        </SelectContent>
-                      </Select>
+                    {/* Row 2: Evaluation Model Configuration */}
+                    <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Label className="text-slate-700 dark:text-slate-300 font-medium">Use Separate Evaluation Model</Label>
+                          <span className="text-xs text-slate-500 dark:text-slate-400">(Recommended: Use thinking model for better evaluation)</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setUseSeparateEvalModel(!useSeparateEvalModel)}
+                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                            useSeparateEvalModel ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-600'
+                          }`}
+                        >
+                          <span
+                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                              useSeparateEvalModel ? 'translate-x-6' : 'translate-x-1'
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {useSeparateEvalModel && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <Label className="text-slate-600 dark:text-slate-400 text-sm">Eval Provider</Label>
+                            <Select value={evalProvider} onValueChange={(v) => {
+                              setEvalProvider(v);
+                              setEvalModel(thinkingModels[v]?.[0] || "");
+                            }}>
+                              <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent className="bg-white dark:bg-slate-800">
+                                <SelectItem value="openai" className="text-slate-900 dark:text-slate-100">OpenAI</SelectItem>
+                                <SelectItem value="claude" className="text-slate-900 dark:text-slate-100">Anthropic</SelectItem>
+                                <SelectItem value="gemini" className="text-slate-900 dark:text-slate-100">Google</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <Label className="text-slate-600 dark:text-slate-400 text-sm">Eval Model (Thinking/Reasoning)</Label>
+                            <Select value={evalModel} onValueChange={setEvalModel}>
+                              <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
+                                <SelectValue placeholder="Select thinking model" />
+                              </SelectTrigger>
+                              <SelectContent className="bg-white dark:bg-slate-800">
+                                {thinkingModels[evalProvider]?.map((model) => (
+                                  <SelectItem key={model} value={model} className="text-slate-900 dark:text-slate-100">
+                                    {model}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
+                    {/* Row 3: Start Button */}
                     <div className="flex items-end">
                       {testRunStatus?.status === "running" ? (
                         <Button

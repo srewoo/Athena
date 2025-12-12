@@ -843,6 +843,9 @@ class CreateTestRunRequest(BaseModel):
     version_number: int = None  # Alias for prompt_version
     llm_provider: str = None
     model_name: str = None
+    # Separate evaluation model settings
+    eval_provider: str = None  # Provider for evaluation (e.g., openai for o1)
+    eval_model: str = None  # Model for evaluation (e.g., o1-mini, o1)
     pass_threshold: float = 3.5
     batch_size: int = 5
     max_concurrent: int = 3
@@ -853,9 +856,14 @@ async def run_single_test_case(
     test_case: Dict[str, Any],
     system_prompt: str,
     eval_prompt: str,
+    # Response generation settings
     llm_provider: str,
     model_name: str,
     api_key: str,
+    # Evaluation settings (can be different model)
+    eval_provider: str,
+    eval_model_name: str,
+    eval_api_key: str,
     pass_threshold: float
 ) -> Dict[str, Any]:
     """Run a single test case through LLM and evaluate the response"""
@@ -930,12 +938,13 @@ Provide your evaluation in the following JSON format:
 
 Only return the JSON, no other text."""
 
+        # Use separate evaluation model (thinking model) for better evaluation
         eval_result = await llm_client.chat(
             system_prompt=eval_prompt,
             user_message=eval_user_prompt,
-            provider=llm_provider,
-            api_key=api_key,
-            model_name=model_name
+            provider=eval_provider,
+            api_key=eval_api_key,
+            model_name=eval_model_name
         )
 
         # Add eval tokens to total
@@ -1044,15 +1053,26 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
     model_name = request.model_name or settings.get("model")
     pass_threshold = request.pass_threshold or 3.5
 
-    # Get API key based on provider
-    api_key = settings.get("api_key", "")
-    if not api_key:
-        if llm_provider == "openai":
-            api_key = settings.get("openai_api_key", "")
-        elif llm_provider == "claude":
-            api_key = settings.get("anthropic_api_key", "")
-        elif llm_provider == "gemini":
-            api_key = settings.get("google_api_key", "")
+    # Get evaluation model settings (can be different from response model)
+    eval_provider = request.eval_provider or llm_provider
+    eval_model = request.eval_model or model_name
+
+    # Helper function to get API key for a provider
+    def get_api_key_for_provider(provider: str) -> str:
+        key = settings.get("api_key", "")
+        if key:
+            return key
+        if provider == "openai":
+            return settings.get("openai_api_key", "")
+        elif provider == "claude":
+            return settings.get("anthropic_api_key", "")
+        elif provider == "gemini":
+            return settings.get("google_api_key", "")
+        return ""
+
+    # Get API keys for both providers
+    api_key = get_api_key_for_provider(llm_provider)
+    eval_api_key = get_api_key_for_provider(eval_provider)
 
     # Create initial test run record
     test_run = {
@@ -1063,14 +1083,17 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
         "created_at": datetime.now().isoformat(),
         "llm_provider": llm_provider,
         "model_name": model_name,
+        "eval_provider": eval_provider,
+        "eval_model": eval_model,
         "pass_threshold": pass_threshold,
         "test_cases": test_cases,
         "results": [],
         "summary": None
     }
 
-    # Check if we have API key configured
+    # Check if we have API keys configured
     has_api_key = bool(api_key)
+    has_eval_api_key = bool(eval_api_key)
 
     if not has_api_key:
         # Fall back to mock data if no API key
@@ -1120,9 +1143,14 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
                 test_case=tc,
                 system_prompt=system_prompt,
                 eval_prompt=eval_prompt,
+                # Response generation settings
                 llm_provider=llm_provider,
                 model_name=model_name,
                 api_key=api_key,
+                # Evaluation settings (can use different model)
+                eval_provider=eval_provider,
+                eval_model_name=eval_model,
+                eval_api_key=eval_api_key if has_eval_api_key else api_key,
                 pass_threshold=pass_threshold
             )
             results.append(result)
