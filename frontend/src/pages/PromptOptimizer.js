@@ -882,6 +882,23 @@ const PromptOptimizer = () => {
         return;
       }
 
+      // Check if response is SSE or regular JSON
+      const contentType = response.headers.get('content-type') || '';
+
+      if (contentType.includes('application/json')) {
+        // Regular JSON response (streaming not implemented on backend)
+        const result = await response.json();
+        setDataset(result);
+        setIsCurrentSessionDataset(true);
+        setDatasetProgress({ progress: 100, batch: 0, total_batches: 0, status: 'completed' });
+
+        toast({
+          title: "Dataset Generated",
+          description: `${result.sample_count} test cases created`
+        });
+        return;
+      }
+
       // Process SSE stream
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -2390,7 +2407,7 @@ const PromptOptimizer = () => {
                             <tbody>
                               {dataset.preview?.map((test, idx) => (
                                 <tr key={idx} className="border-t border-slate-300 dark:border-slate-700">
-                                  <td className="p-2 text-slate-900 dark:text-slate-100">{test.input.substring(0, 100)}...</td>
+                                  <td className="p-2 text-slate-900 dark:text-slate-100">{(typeof test.input === 'string' ? test.input : JSON.stringify(test.input)).substring(0, 100)}...</td>
                                   <td className="p-2">
                                     <span className={`px-2 py-1 rounded text-xs text-white ${
                                       test.category === 'positive' ? 'bg-green-600' :
