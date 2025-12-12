@@ -3065,10 +3065,10 @@ const PromptOptimizer = () => {
                   {testRunHistory.length > 0 && (
                     <div>
                       <h3 className="font-semibold mb-2 text-slate-900 dark:text-slate-100">
-                        Previous Test Runs
+                        Previous Test Runs ({testRunHistory.length})
                       </h3>
                       <div className="space-y-2">
-                        {testRunHistory.map((run) => (
+                        {testRunHistory.map((run, index) => (
                           <div
                             key={run.run_id}
                             className={`p-3 rounded-lg border cursor-pointer transition-colors ${
@@ -3079,11 +3079,19 @@ const PromptOptimizer = () => {
                             onClick={() => handleViewPastRun(run.run_id)}
                           >
                             <div className="flex justify-between items-center">
-                              <div>
-                                <span className="font-medium text-slate-900 dark:text-slate-100">
-                                  Version {run.prompt_version}
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-white bg-slate-500 dark:bg-slate-600 px-2 py-0.5 rounded">
+                                  #{testRunHistory.length - index}
                                 </span>
-                                <span className={`ml-2 px-2 py-0.5 rounded text-xs ${
+                                <span className="font-medium text-slate-900 dark:text-slate-100">
+                                  Prompt v{run.prompt_version || run.version_number || '?'}
+                                </span>
+                                {run.model_name && (
+                                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                                    ({run.model_name})
+                                  </span>
+                                )}
+                                <span className={`px-2 py-0.5 rounded text-xs ${
                                   run.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
                                   run.status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
                                   'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'
@@ -3091,13 +3099,15 @@ const PromptOptimizer = () => {
                                   {run.status}
                                 </span>
                               </div>
-                              <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+                              <div className="flex items-center gap-3 text-sm text-slate-600 dark:text-slate-400">
                                 {run.summary && (
-                                  <span>
+                                  <span className="font-medium">
                                     Pass: {run.summary.pass_rate}%
                                   </span>
                                 )}
-                                <span>{new Date(run.created_at).toLocaleDateString()}</span>
+                                <span className="text-xs">
+                                  {new Date(run.created_at).toLocaleDateString()} {new Date(run.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                </span>
                                 <Button
                                   variant="ghost"
                                   size="sm"
