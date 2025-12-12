@@ -895,7 +895,12 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
     project.updated_at = datetime.now()
     project_storage.save_project(project)
 
-    return test_run
+    # Return with fields frontend expects
+    return {
+        **test_run,
+        "run_id": run_id,  # Frontend expects run_id
+        "total_items": len(test_cases)  # Frontend expects total_items
+    }
 
 
 @router.get("/{project_id}/test-runs")
@@ -906,9 +911,10 @@ async def list_test_runs(project_id: str, limit: int = 10):
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Get test runs from project file
-    run_list = project.test_runs or []
+    run_list = list(project.test_runs) if project.test_runs else []
 
-    run_list.sort(key=lambda x: x["created_at"], reverse=True)
+    if run_list:
+        run_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
     return run_list[:limit]
 

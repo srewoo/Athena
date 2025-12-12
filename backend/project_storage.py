@@ -60,10 +60,13 @@ def load_project(project_id: str) -> Optional[SavedProject]:
     if not os.path.exists(file_path):
         return None
 
-    with open(file_path, 'r') as f:
-        data = json.load(f)
-
-    return SavedProject(**data)
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return SavedProject(**data)
+    except Exception as e:
+        logger.error(f"Error loading project file {project_id}: {e}")
+        return None
 
 
 def list_projects() -> List[ProjectListItem]:
@@ -74,19 +77,23 @@ def list_projects() -> List[ProjectListItem]:
     for filename in os.listdir(PROJECTS_DIR):
         if filename.endswith('.json'):
             project_id = filename[:-5]  # Remove .json
-            project = load_project(project_id)
-            if project:
-                projects.append(ProjectListItem(
-                    id=project.id,
-                    project_name=project.project_name,
-                    use_case=project.use_case,
-                    requirements=project.requirements,
-                    system_prompt_versions=project.system_prompt_versions,
-                    created_at=project.created_at,
-                    updated_at=project.updated_at,
-                    version=project.version,
-                    has_results=project.test_results is not None and len(project.test_results) > 0
-                ))
+            try:
+                project = load_project(project_id)
+                if project:
+                    projects.append(ProjectListItem(
+                        id=project.id,
+                        project_name=project.project_name,
+                        use_case=project.use_case,
+                        requirements=project.requirements,
+                        system_prompt_versions=project.system_prompt_versions,
+                        created_at=project.created_at,
+                        updated_at=project.updated_at,
+                        version=project.version,
+                        has_results=project.test_results is not None and len(project.test_results) > 0
+                    ))
+            except Exception as e:
+                logger.error(f"Error loading project {project_id}: {e}")
+                continue
 
     # Sort by updated_at descending (most recent first)
     projects.sort(key=lambda x: x.updated_at, reverse=True)

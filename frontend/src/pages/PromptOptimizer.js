@@ -298,16 +298,16 @@ const PromptOptimizer = () => {
         setInitialPrompt(project.system_prompt_versions[0].prompt_text);
       }
 
-      // Set eval prompt if exists (handle both old and new formats)
+      // Set eval prompt if exists (handle multiple formats)
       if (project.eval_prompt) {
-        // New format: eval_prompt is a string, eval_rationale is separate
         if (typeof project.eval_prompt === 'string') {
+          // String format - could be plain text or JSON string
           setEvalPrompt(project.eval_prompt);
           setEvalRationale(project.eval_rationale || '');
-        } else {
-          // Old format: eval_prompt is an object with prompt_text and rationale
+        } else if (project.eval_prompt.prompt_text) {
+          // Object format with prompt_text field
           setEvalPrompt(project.eval_prompt.prompt_text);
-          setEvalRationale(project.eval_prompt.rationale);
+          setEvalRationale(project.eval_prompt.rationale || '');
         }
       }
 
@@ -1131,20 +1131,45 @@ const PromptOptimizer = () => {
 
       const data = await response.json();
       setTestRunId(data.run_id);
-      setTestRunStatus({
-        status: "running",
-        progress: 0,
-        completed_items: 0,
-        total_items: data.total_items
-      });
 
-      toast({
-        title: "Test Run Started",
-        description: `Running ${data.total_items} test cases...`
-      });
+      // Check if test run completed immediately (sync execution)
+      if (data.status === "completed") {
+        setTestRunStatus({
+          status: "completed",
+          progress: 100,
+          completed_items: data.total_items,
+          total_items: data.total_items,
+          summary: data.summary
+        });
 
-      // Start polling for status
-      pollTestRunStatus(data.run_id);
+        // Set results directly from response
+        setTestRunResults({
+          results: data.results,
+          summary: data.summary
+        });
+
+        loadTestRunHistory();
+
+        toast({
+          title: "Test Run Complete",
+          description: `${data.summary?.passed || 0} of ${data.summary?.total || 0} tests passed`
+        });
+      } else {
+        // Async execution - start polling
+        setTestRunStatus({
+          status: "running",
+          progress: 0,
+          completed_items: 0,
+          total_items: data.total_items
+        });
+
+        toast({
+          title: "Test Run Started",
+          description: `Running ${data.total_items} test cases...`
+        });
+
+        pollTestRunStatus(data.run_id);
+      }
 
     } catch (error) {
       toast({
@@ -1212,7 +1237,12 @@ const PromptOptimizer = () => {
       if (!response.ok) return;
 
       const data = await response.json();
-      setTestRunHistory(data);
+      // Transform to ensure consistent format with run_id
+      const formattedRuns = data.map(run => ({
+        ...run,
+        run_id: run.run_id || run.id  // Ensure run_id exists
+      }));
+      setTestRunHistory(formattedRuns);
     } catch (error) {
       console.error("Failed to load test run history:", error);
     }
@@ -1256,12 +1286,17 @@ const PromptOptimizer = () => {
   const handleDeleteTestRun = async (runId, e) => {
     e.stopPropagation(); // Prevent triggering the view action
 
+    if (!runId) {
+      console.error("Cannot delete: run_id is undefined");
+      return;
+    }
+
     if (!window.confirm("Are you sure you want to delete this test run? This action cannot be undone.")) {
       return;
     }
 
     try {
-      const response = await fetch(`${API}/projects/${projectId}/test-runs/${runId}/delete`, {
+      const response = await fetch(`${API}/projects/${projectId}/test-runs/${runId}`, {
         method: "DELETE"
       });
 
@@ -2523,7 +2558,7 @@ const PromptOptimizer = () => {
                         value={String(selectedTestRunVersion || currentVersion?.version || 1)}
                         onValueChange={(v) => setSelectedTestRunVersion(parseInt(v))}
                       >
-                        <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600">
+                        <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                           <SelectValue placeholder="Select version" />
                         </SelectTrigger>
                         <SelectContent>
@@ -2542,7 +2577,7 @@ const PromptOptimizer = () => {
                         value={String(testRunPassThreshold)}
                         onValueChange={(v) => setTestRunPassThreshold(parseFloat(v))}
                       >
-                        <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600">
+                        <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -2681,6 +2716,7 @@ const PromptOptimizer = () => {
                         variant="outline"
                         size="sm"
                         onClick={() => handleExportResults("csv")}
+                        className="text-slate-700 dark:text-slate-300"
                       >
                         <Download className="w-4 h-4 mr-1" />
                         Export CSV
@@ -2689,6 +2725,7 @@ const PromptOptimizer = () => {
                         variant="outline"
                         size="sm"
                         onClick={() => handleExportResults("json")}
+                        className="text-slate-700 dark:text-slate-300"
                       >
                         <FileText className="w-4 h-4 mr-1" />
                         Export JSON
@@ -2697,6 +2734,7 @@ const PromptOptimizer = () => {
                         variant="outline"
                         size="sm"
                         onClick={() => setSingleTestOpen(true)}
+                        className="text-slate-700 dark:text-slate-300"
                       >
                         <Play className="w-4 h-4 mr-1" />
                         Single Test
@@ -2707,6 +2745,7 @@ const PromptOptimizer = () => {
                           size="sm"
                           onClick={handleRerunFailed}
                           disabled={isRerunningFailed}
+                          className="text-slate-700 dark:text-slate-300"
                         >
                           {isRerunningFailed ? (
                             <RefreshCw className="w-4 h-4 mr-1 animate-spin" />
@@ -2720,7 +2759,7 @@ const PromptOptimizer = () => {
                         variant="outline"
                         size="sm"
                         onClick={() => setCompareMode(!compareMode)}
-                        className={compareMode ? 'bg-blue-100 dark:bg-blue-900/30' : ''}
+                        className={`text-slate-700 dark:text-slate-300 ${compareMode ? 'bg-blue-100 dark:bg-blue-900/30' : ''}`}
                       >
                         <ArrowUpDown className="w-4 h-4 mr-1" />
                         Compare Runs
@@ -2839,21 +2878,21 @@ const PromptOptimizer = () => {
                                 }`}
                               >
                                 <td className="p-2 text-slate-600 dark:text-slate-400">
-                                  {result.dataset_item_index + 1}
+                                  {(result.dataset_item_index ?? result.index ?? 0) + 1}
                                 </td>
                                 <td className="p-2 text-slate-900 dark:text-slate-100 max-w-xs truncate">
-                                  {result.input_data?.input?.substring(0, 80) || JSON.stringify(result.input_data).substring(0, 80)}...
+                                  {String(result.input_data?.input || result.input || result.test_case_id || '').substring(0, 80)}...
                                 </td>
                                 <td className="p-2 text-slate-900 dark:text-slate-100 max-w-xs truncate">
-                                  {result.prompt_output?.substring(0, 100)}...
+                                  {String(result.prompt_output || result.output || '').substring(0, 100)}...
                                 </td>
                                 <td className="p-2">
                                   <span className={`px-2 py-1 rounded text-xs font-bold ${
-                                    result.eval_score >= 4 ? 'bg-green-600 text-white' :
-                                    result.eval_score >= 3 ? 'bg-yellow-600 text-white' :
+                                    (result.eval_score ?? result.score ?? 0) >= 4 ? 'bg-green-600 text-white' :
+                                    (result.eval_score ?? result.score ?? 0) >= 3 ? 'bg-yellow-600 text-white' :
                                     'bg-red-600 text-white'
                                   }`}>
-                                    {result.eval_score?.toFixed(1)}
+                                    {(result.eval_score ?? result.score ?? 0).toFixed(1)}
                                   </span>
                                 </td>
                                 <td className="p-2">
@@ -2875,7 +2914,7 @@ const PromptOptimizer = () => {
                                   )}
                                 </td>
                                 <td className="p-2 text-slate-600 dark:text-slate-400 max-w-md truncate">
-                                  {result.eval_feedback?.substring(0, 150)}...
+                                  {String(result.eval_feedback || result.feedback || '').substring(0, 150)}...
                                 </td>
                               </tr>
                             ))}

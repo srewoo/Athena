@@ -90,7 +90,7 @@ class SavedProject(BaseModel):
     eval_rationale: Optional[str] = None
     dataset: Optional[Dict[str, Any]] = None  # Generated test dataset
     test_cases: Optional[List[Dict[str, Any]]] = None
-    test_results: Optional[List[TestExecutionResult]] = None
+    test_results: Optional[List[Dict[str, Any]]] = None  # Flexible format for test results
     test_runs: Optional[List[Dict[str, Any]]] = None  # All test run history
     final_report: Optional[FinalReport] = None
     system_prompt_versions: Optional[List[Dict[str, Any]]] = None
