@@ -206,6 +206,9 @@ Settings persist in browser localStorage and auto-sync to backend on page load.
 
 ```
 Athena/
+├── .env.example               # Environment template (copy to .env)
+├── .env                       # Your configuration (create from example)
+├── README.md
 ├── backend/
 │   ├── server.py              # Main FastAPI server (1300+ lines)
 │   ├── project_api.py         # Project management API (900+ lines)
@@ -215,18 +218,17 @@ Athena/
 │   ├── shared_settings.py     # Settings persistence module
 │   ├── requirements.txt       # Python dependencies
 │   └── saved_projects/        # Project JSON files
-├── frontend/
-│   ├── src/
-│   │   ├── App.js             # Main application
-│   │   ├── pages/
-│   │   │   ├── PromptOptimizer.js  # Main workflow UI
-│   │   │   ├── Dashboard.js        # Dashboard view
-│   │   │   ├── Playground.js       # Prompt testing
-│   │   │   └── ...
-│   │   └── components/        # UI components
-│   ├── package.json
-│   └── tailwind.config.js
-└── README.md
+└── frontend/
+    ├── src/
+    │   ├── App.js             # Main application (exports API, BASE_URL)
+    │   ├── pages/
+    │   │   ├── PromptOptimizer.js  # Main workflow UI
+    │   │   ├── Dashboard.js        # Dashboard view
+    │   │   ├── Playground.js       # Prompt testing
+    │   │   └── ...
+    │   └── components/        # UI components
+    ├── package.json           # Uses dotenv-cli to load ../.env
+    └── tailwind.config.js
 ```
 
 ## API Endpoints
@@ -276,6 +278,32 @@ Athena/
 |--------|----------|-------------|
 | GET | `/api/export/json/{id}` | Export as JSON |
 | GET | `/api/export/pdf/{id}` | Export as PDF |
+
+## Environment Variables
+
+All configuration is in a single `.env` file at the project root. Copy `.env.example` to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BACKEND_HOST` | Backend server host | `0.0.0.0` |
+| `BACKEND_PORT` | Backend server port | `8000` |
+| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | `http://localhost:3000` |
+| `REACT_APP_BASE_URL` | Backend URL for frontend | `http://localhost:8000` |
+
+### Optional LLM Configuration
+
+You can also set LLM credentials in `.env` (or configure via UI):
+
+```bash
+# LLM_PROVIDER=openai
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+# GOOGLE_API_KEY=AI...
+```
 
 ## Default Models
 

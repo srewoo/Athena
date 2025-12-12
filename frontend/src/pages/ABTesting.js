@@ -9,8 +9,7 @@ import { Progress } from '../components/ui/progress';
 import { GitCompare, Loader2, Trophy, TrendingUp, TrendingDown, Minus, ArrowLeft } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../hooks/use-toast';
-
-const API = 'http://localhost:8000/api';
+import { API } from '../App';
 
 const ABTesting = () => {
   const navigate = useNavigate();

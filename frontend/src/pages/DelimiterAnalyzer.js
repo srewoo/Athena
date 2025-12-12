@@ -5,6 +5,7 @@ import { Textarea } from '../components/ui/textarea';
 import { Badge } from '../components/ui/badge';
 import { FileCode, Loader2, Lightbulb } from 'lucide-react';
 import axios from 'axios';
+import { API } from '../App';
 
 const DelimiterAnalyzer = () => {
   const [promptText, setPromptText] = useState('');
@@ -23,7 +24,7 @@ const DelimiterAnalyzer = () => {
     setResult(null);
 
     try {
-      const response = await axios.post('http://localhost:8000/api/analyze-delimiters', {
+      const response = await axios.post(`${API}/analyze-delimiters`, {
         prompt_text: promptText
       });
       setResult(response.data);

@@ -1,6 +1,14 @@
 """
 Clean FastAPI server for Athena - 5-Step Prompt Testing Workflow
 """
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from root directory (parent of backend/)
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(env_path)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
@@ -23,10 +31,11 @@ import project_api
 
 app = FastAPI(title="Athena - Prompt Testing Application")
 
-# CORS middleware
+# CORS middleware - load origins from env
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1324,4 +1333,6 @@ async def save_settings(settings: dict):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("BACKEND_HOST", "0.0.0.0")
+    port = int(os.getenv("BACKEND_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

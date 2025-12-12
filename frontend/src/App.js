@@ -19,7 +19,8 @@ const Help = lazy(() => import("./pages/Help"));
 const EvaluationDetail = lazy(() => import("./pages/EvaluationDetail"));
 
 // API base URL - adjust this if your backend runs on a different port
-export const API = process.env.REACT_APP_API_URL || "http://localhost:8000/api";
+export const BASE_URL = process.env.REACT_APP_BASE_URL || "http://localhost:8000";
+export const API = process.env.REACT_APP_API_URL || `${BASE_URL}/api`;
 
 // Loading fallback component
 const PageLoader = () => (

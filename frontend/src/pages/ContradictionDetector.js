@@ -5,6 +5,7 @@ import { Textarea } from '../components/ui/textarea';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import ContradictionAlert from '../components/ContradictionAlert';
 import axios from 'axios';
+import { API } from '../App';
 
 const ContradictionDetector = () => {
   const [promptText, setPromptText] = useState('');
@@ -23,7 +24,7 @@ const ContradictionDetector = () => {
     setResult(null);
 
     try {
-      const response = await axios.post('http://localhost:8000/api/detect-contradictions', {
+      const response = await axios.post(`${API}/detect-contradictions`, {
         prompt_text: promptText
       });
       setResult(response.data);

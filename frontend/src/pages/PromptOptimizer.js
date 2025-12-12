@@ -16,7 +16,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { useToast } from "../hooks/use-toast";
-import { API } from "../App";
+import { API, BASE_URL } from "../App";
 import { ThemeToggle } from "../components/theme-toggle";
 
 const PromptOptimizer = () => {
@@ -1727,7 +1727,7 @@ const PromptOptimizer = () => {
               <div className="flex-1">
                 <h3 className="font-semibold text-red-600 dark:text-red-400 mb-1">Backend Server Not Connected</h3>
                 <p className="text-sm text-slate-300 mb-2">
-                  Cannot connect to the backend server at <code className="bg-slate-800 px-1 py-0.5 rounded">localhost:8000</code>
+                  Cannot connect to the backend server at <code className="bg-slate-800 px-1 py-0.5 rounded">{BASE_URL}</code>
                 </p>
                 <p className="text-sm text-slate-600 dark:text-slate-400 mb-3">
                   The server may need to be restarted to load the new project API endpoints.

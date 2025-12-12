@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../co
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../components/ui/accordion";
 import { ArrowLeft, CheckCircle, Sparkles, Play, DollarSign, History, GitCompare, Settings, Download, AlertCircle, Lightbulb, AlertTriangle, FileCode, Wand2, Zap, Target, Brain, Layers } from "lucide-react";
 import { Badge } from "../components/ui/badge";
+import { BASE_URL } from "../App";
 
 export default function Help() {
   const navigate = useNavigate();
@@ -676,7 +677,7 @@ export default function Help() {
                   Back to Dashboard
                 </Button>
                 <Button
-                  onClick={() => window.open("http://localhost:8000/docs", "_blank")}
+                  onClick={() => window.open(`${BASE_URL}/docs`, "_blank")}
                   variant="outline"
                   className="bg-slate-800 border-slate-600 hover:bg-slate-700 text-white"
                 >

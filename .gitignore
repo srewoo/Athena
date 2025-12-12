@@ -156,3 +156,5 @@ backend/*.db
 backend/uploads/
 backend/logs/
 BKP/
+.claude/
+backend/saved_projects/

@@ -7,6 +7,7 @@ import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Wand2, Loader2, Copy, Check } from 'lucide-react';
 import axios from 'axios';
+import { API } from '../App';
 
 const MetapromptGenerator = () => {
   const [promptText, setPromptText] = useState('');
@@ -28,7 +29,7 @@ const MetapromptGenerator = () => {
     setResult(null);
 
     try {
-      const response = await axios.post('http://localhost:8000/api/generate-metaprompt', {
+      const response = await axios.post(`${API}/generate-metaprompt`, {
         prompt_text: promptText,
         desired_behavior: desiredBehavior,
         undesired_behavior: undesiredBehavior
