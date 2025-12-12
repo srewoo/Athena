@@ -118,15 +118,59 @@ def parse_eval_json_strict(text: str) -> Optional[EvalResult]:
     """
     Strictly parse evaluation JSON with validation.
     Returns None if parsing fails - caller must handle as failure.
+    Handles multiple response formats from different LLMs.
     """
     if not text:
+        return None
+
+    def try_parse_data(data: dict) -> Optional[EvalResult]:
+        """Try to extract score and reasoning from various JSON formats"""
+        # Standard format: {"score": X, "reasoning": "..."}
+        if "score" in data and "reasoning" in data:
+            try:
+                return EvalResult(**data)
+            except (ValueError, TypeError):
+                pass
+
+        # Rubric format: {"parameters": [...], "overall_analysis": "..."}
+        if "parameters" in data and isinstance(data["parameters"], list):
+            try:
+                params = data["parameters"]
+                if params:
+                    # Calculate average score from raw_score fields
+                    scores = [p.get("raw_score", p.get("score", 0)) for p in params if isinstance(p, dict)]
+                    if scores:
+                        avg_score = sum(scores) / len(scores)
+                        # Get overall analysis or build from individual analyses
+                        reasoning = data.get("overall_analysis", "")
+                        if not reasoning:
+                            reasoning = "; ".join([p.get("analysis", "") for p in params if p.get("analysis")])
+                        return EvalResult(score=avg_score, reasoning=reasoning[:500])
+            except (ValueError, TypeError):
+                pass
+
+        # Alternative format: {"evaluation": {"score": X, ...}}
+        if "evaluation" in data and isinstance(data["evaluation"], dict):
+            return try_parse_data(data["evaluation"])
+
+        # Format with "rating" instead of "score"
+        if "rating" in data:
+            try:
+                score = float(data["rating"])
+                reasoning = data.get("reasoning", data.get("explanation", data.get("feedback", "")))
+                return EvalResult(score=score, reasoning=reasoning)
+            except (ValueError, TypeError):
+                pass
+
         return None
 
     # Try to find JSON object in response
     # First, try the whole text as JSON
     try:
         data = json.loads(text.strip())
-        return EvalResult(**data)
+        result = try_parse_data(data)
+        if result:
+            return result
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -136,29 +180,51 @@ def parse_eval_json_strict(text: str) -> Optional[EvalResult]:
     if match:
         try:
             data = json.loads(match.group(1))
-            return EvalResult(**data)
+            result = try_parse_data(data)
+            if result:
+                return result
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Try to find a JSON object with required fields
-    json_pattern = r'\{[^{}]*"score"\s*:\s*[\d.]+[^{}]*"reasoning"\s*:\s*"[^"]*"[^{}]*\}'
-    match = re.search(json_pattern, text, re.DOTALL)
-    if match:
+    # Try to find any JSON object in the text
+    json_start = text.find('{')
+    json_end = text.rfind('}')
+    if json_start != -1 and json_end != -1 and json_end > json_start:
         try:
-            data = json.loads(match.group())
-            return EvalResult(**data)
+            json_str = text[json_start:json_end + 1]
+            data = json.loads(json_str)
+            result = try_parse_data(data)
+            if result:
+                return result
         except (json.JSONDecodeError, ValueError):
             pass
 
     # Last resort: try to extract score and reasoning separately
     score_match = re.search(r'"score"\s*:\s*([\d.]+)', text)
+    if not score_match:
+        score_match = re.search(r'"raw_score"\s*:\s*([\d.]+)', text)
+    if not score_match:
+        score_match = re.search(r'"rating"\s*:\s*([\d.]+)', text)
+
     reasoning_match = re.search(r'"reasoning"\s*:\s*"([^"]*)"', text)
+    if not reasoning_match:
+        reasoning_match = re.search(r'"overall_analysis"\s*:\s*"([^"]*)"', text)
+    if not reasoning_match:
+        reasoning_match = re.search(r'"analysis"\s*:\s*"([^"]*)"', text)
 
     if score_match and reasoning_match:
         try:
             score = float(score_match.group(1))
             reasoning = reasoning_match.group(1)
             return EvalResult(score=score, reasoning=reasoning)
+        except (ValueError, TypeError):
+            pass
+
+    # If we found a score but no reasoning, still return it
+    if score_match:
+        try:
+            score = float(score_match.group(1))
+            return EvalResult(score=score, reasoning="Score extracted from response")
         except (ValueError, TypeError):
             pass
 
@@ -629,78 +695,57 @@ async def generate_eval_prompt(project_id: str):
     requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
 
     # Template-based eval prompt with {{INPUT}} and {{OUTPUT}} placeholders
-    # Following best practices: clear structure, rubrics, chain-of-thought, JSON output
+    # Plain text format for readability
     if not api_key:
-        eval_prompt = f"""<role>
+        eval_prompt = f"""**Evaluator Role:**
 You are an expert evaluator assessing AI-generated responses. Your task is to evaluate how well the response meets the specified requirements.
-</role>
 
-<context>
+**Context:**
 Use Case: {project.use_case}
 Requirements: {requirements_str}
-</context>
 
-<system_prompt_being_evaluated>
+**System Prompt Being Evaluated:**
 {current_prompt}
-</system_prompt_being_evaluated>
 
-<input>
+---
+
+**User Input:**
 {{{{INPUT}}}}
-</input>
 
-<output_to_evaluate>
+**Response to Evaluate:**
 {{{{OUTPUT}}}}
-</output_to_evaluate>
 
-<evaluation_criteria>
-Evaluate the response against these criteria:
+---
 
-1. **Task Completion** (Weight: 30%)
-   - Does the response fully address the user's input?
-   - Are all requested elements present?
+**Evaluation Criteria:**
 
-2. **Requirement Adherence** (Weight: 25%)
-   - Does it follow all specified requirements: {requirements_str}?
-   - Are there any violations of the guidelines?
+1. Task Completion (30%) - Does the response fully address the user's input? Are all requested elements present?
 
-3. **Quality & Coherence** (Weight: 20%)
-   - Is the response well-structured and easy to understand?
-   - Is the language appropriate for the use case?
+2. Requirement Adherence (25%) - Does it follow all specified requirements: {requirements_str}? Are there any violations?
 
-4. **Accuracy & Safety** (Weight: 15%)
-   - Is the information factually correct?
-   - Are there any harmful, biased, or inappropriate elements?
+3. Quality & Coherence (20%) - Is the response well-structured and easy to understand? Is the language appropriate?
 
-5. **Completeness** (Weight: 10%)
-   - Is the response comprehensive without being unnecessarily verbose?
-   - Are edge cases handled appropriately?
-</evaluation_criteria>
+4. Accuracy & Safety (15%) - Is the information factually correct? Are there any harmful or inappropriate elements?
 
-<rubric>
-Score 5 (Excellent): Exceeds all expectations. Perfectly addresses the input, follows all requirements, high quality, accurate, and complete.
-Score 4 (Good): Meets all requirements well. Minor issues that don't significantly impact quality.
-Score 3 (Acceptable): Meets basic requirements. Some noticeable issues but still functional.
-Score 2 (Poor): Significant issues. Missing requirements, quality problems, or inaccuracies.
-Score 1 (Fail): Does not meet requirements. Major failures, harmful content, or completely off-topic.
-</rubric>
+5. Completeness (10%) - Is the response comprehensive without being unnecessarily verbose?
 
-<instructions>
-Think step-by-step:
-1. First, identify what the user asked for in the INPUT
-2. Review what the system was supposed to do (system prompt)
-3. Evaluate the OUTPUT against each criterion
-4. Calculate a weighted score
-5. Provide specific, actionable feedback
+**Scoring Rubric:**
+- Score 5 (Excellent): Exceeds all expectations. Perfectly addresses the input, follows all requirements.
+- Score 4 (Good): Meets all requirements well. Minor issues that don't significantly impact quality.
+- Score 3 (Acceptable): Meets basic requirements. Some noticeable issues but still functional.
+- Score 2 (Poor): Significant issues. Missing requirements, quality problems, or inaccuracies.
+- Score 1 (Fail): Does not meet requirements. Major failures, harmful content, or completely off-topic.
 
-Return your evaluation in this exact JSON format:
-</instructions>
+**Instructions:**
+1. Identify what the user asked for in the input
+2. Evaluate the response against each criterion
+3. Provide a score and specific feedback
 
-<output_format>
+**Return your evaluation as JSON:**
 {{
     "score": <number from 1-5>,
     "reasoning": "<2-3 sentences explaining the score with specific examples>"
-}}
-</output_format>"""
+}}"""
 
         rationale = "Template-based evaluation prompt with {{INPUT}}/{{OUTPUT}} placeholders. Configure API key for AI-customized eval prompts."
 
@@ -718,51 +763,44 @@ Return your evaluation in this exact JSON format:
     # Use LLM to generate sophisticated eval prompt with best practices
     system_prompt = """You are an expert prompt engineer specializing in LLM-as-Judge evaluation systems.
 
-Your task is to create a comprehensive evaluation prompt following these best practices:
+Your task is to create a comprehensive evaluation prompt in PLAIN TEXT format (no XML tags).
 
 ## Structure Requirements:
-1. Use XML tags to clearly delimit sections (<role>, <context>, <input>, <output_to_evaluate>, <evaluation_criteria>, <rubric>, <instructions>, <output_format>)
+1. Use markdown-style headers with ** for sections (e.g., **Evaluator Role:**, **Context:**, **Evaluation Criteria:**)
 2. Include {{INPUT}} and {{OUTPUT}} placeholders that will be replaced with actual test data
-3. Define a clear evaluator role with specific expertise
+3. Define a clear evaluator role with specific expertise relevant to the use case
 4. Create evaluation criteria weighted by importance (must sum to 100%)
+5. Use --- as section dividers where appropriate
 
 ## Rubric Requirements:
-5. Create a detailed 1-5 scoring rubric with:
+6. Create a detailed 1-5 scoring rubric with:
    - Score 5: Specific excellence indicators
    - Score 4: What "good" looks like with minor issues
    - Score 3: Baseline acceptable behavior
    - Score 2: Clear failure modes
    - Score 1: Critical failures and deal-breakers
 
-## Chain-of-Thought:
-6. Include step-by-step evaluation instructions that encourage careful reasoning
-7. Ask the evaluator to identify specific examples before scoring
-
-## Output Format:
+## Instructions:
+7. Include brief evaluation instructions
 8. Require JSON output with "score" (1-5 number) and "reasoning" (specific explanation)
 
-Return ONLY the evaluation prompt text with all XML tags and placeholders. No explanations."""
+Return ONLY the evaluation prompt text in plain text format. No XML tags. No explanations."""
 
     user_message = f"""Create an evaluation prompt for this use case:
 
-<use_case>
-{project.use_case}
-</use_case>
+Use Case: {project.use_case}
 
-<requirements>
-{requirements_str}
-</requirements>
+Requirements: {requirements_str}
 
-<system_prompt_to_evaluate>
+System Prompt Being Evaluated:
 {current_prompt}
-</system_prompt_to_evaluate>
 
-Generate a comprehensive evaluation prompt that:
+Generate a comprehensive evaluation prompt in plain text that:
 - Uses {{{{INPUT}}}} placeholder for the user's test input
 - Uses {{{{OUTPUT}}}} placeholder for the AI's response to evaluate
 - Has criteria specifically tailored to the use case and requirements
 - Includes domain-specific failure modes in the rubric
-- Encourages chain-of-thought evaluation before scoring"""
+- Uses markdown headers (**Header:**) instead of XML tags"""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -1101,7 +1139,9 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Support both num_examples and sample_count (frontend uses sample_count)
-    num_examples = request.sample_count or request.num_examples if request else 10
+    # Hard limit of 100 test cases maximum
+    requested_count = request.sample_count or request.num_examples if request else 10
+    num_examples = min(requested_count, 100)
 
     # Get the specific version or latest
     if project.system_prompt_versions:
@@ -1668,11 +1708,16 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
         import asyncio
         results = []
 
-        # Limit to first 10 test cases to avoid excessive API calls
-        test_subset = test_cases[:10]
+        # Run all test cases (up to 100 max)
+        test_subset = test_cases[:100]
 
-        for tc in test_subset:
-            result = await run_single_test_case(
+        # Process in parallel batches of 10 to speed up execution
+        # while avoiding rate limits and memory issues
+        BATCH_SIZE = 10
+
+        async def run_test_with_params(tc):
+            """Wrapper to run a single test case with all the required params"""
+            return await run_single_test_case(
                 test_case=tc,
                 system_prompt=system_prompt,
                 eval_prompt=eval_prompt,
@@ -1686,7 +1731,43 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
                 eval_api_key=eval_api_key if has_eval_api_key else api_key,
                 pass_threshold=pass_threshold
             )
-            results.append(result)
+
+        # Process test cases in batches
+        for i in range(0, len(test_subset), BATCH_SIZE):
+            batch = test_subset[i:i + BATCH_SIZE]
+            # Run batch in parallel using asyncio.gather
+            batch_results = await asyncio.gather(
+                *[run_test_with_params(tc) for tc in batch],
+                return_exceptions=True
+            )
+
+            # Handle any exceptions that occurred
+            for j, result in enumerate(batch_results):
+                if isinstance(result, Exception):
+                    # Convert exception to error result
+                    tc = batch[j]
+                    results.append({
+                        "test_case_id": tc.get("id"),
+                        "input": tc.get("input", ""),
+                        "output": "",
+                        "score": None,
+                        "passed": False,
+                        "feedback": f"Batch execution error: {str(result)}",
+                        "error": True,
+                        "evaluation_error": False,
+                        "generation_error": True,
+                        "latency_ms": 0,
+                        "ttfb_ms": 0,
+                        "tokens_used": 0,
+                        "judge_metadata": {
+                            "eval_provider": eval_provider,
+                            "eval_model": eval_model,
+                            "parsing_status": "not_attempted",
+                            "raw_eval_output": None
+                        }
+                    })
+                else:
+                    results.append(result)
 
         test_run["status"] = "completed"
         test_run["results"] = results
@@ -2566,36 +2647,71 @@ async def run_ab_test(project_id: str, test_id: str):
     project.ab_tests[test_index] = ab_test
     project_storage.save_project(project)
 
-    for tc in test_subset:
-        # Run Version A
-        result_a = await run_single_test_case(
-            test_case=tc,
-            system_prompt=prompt_a,
-            eval_prompt=eval_prompt,
-            llm_provider=provider,
-            model_name=model_name,
-            api_key=api_key,
-            eval_provider=provider,
-            eval_model_name=model_name,
-            eval_api_key=api_key,
-            pass_threshold=3.5
-        )
-        results_a.append(result_a)
+    # Process in parallel batches of 10 for better performance
+    import asyncio
+    BATCH_SIZE = 10
 
-        # Run Version B
-        result_b = await run_single_test_case(
-            test_case=tc,
-            system_prompt=prompt_b,
-            eval_prompt=eval_prompt,
-            llm_provider=provider,
-            model_name=model_name,
-            api_key=api_key,
-            eval_provider=provider,
-            eval_model_name=model_name,
-            eval_api_key=api_key,
-            pass_threshold=3.5
+    async def run_ab_pair(tc):
+        """Run both A and B tests for a single test case in parallel"""
+        result_a, result_b = await asyncio.gather(
+            run_single_test_case(
+                test_case=tc,
+                system_prompt=prompt_a,
+                eval_prompt=eval_prompt,
+                llm_provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                eval_provider=provider,
+                eval_model_name=model_name,
+                eval_api_key=api_key,
+                pass_threshold=3.5
+            ),
+            run_single_test_case(
+                test_case=tc,
+                system_prompt=prompt_b,
+                eval_prompt=eval_prompt,
+                llm_provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                eval_provider=provider,
+                eval_model_name=model_name,
+                eval_api_key=api_key,
+                pass_threshold=3.5
+            )
         )
-        results_b.append(result_b)
+        return result_a, result_b
+
+    # Process test cases in batches
+    for i in range(0, len(test_subset), BATCH_SIZE):
+        batch = test_subset[i:i + BATCH_SIZE]
+        # Run batch in parallel
+        batch_results = await asyncio.gather(
+            *[run_ab_pair(tc) for tc in batch],
+            return_exceptions=True
+        )
+
+        # Handle results
+        for j, result in enumerate(batch_results):
+            if isinstance(result, Exception):
+                # Create error results for both A and B
+                tc = batch[j]
+                error_result = {
+                    "test_case_id": tc.get("id"),
+                    "input": tc.get("input", ""),
+                    "output": "",
+                    "score": None,
+                    "passed": False,
+                    "feedback": f"Batch execution error: {str(result)}",
+                    "error": True,
+                    "latency_ms": 0,
+                    "tokens_used": 0
+                }
+                results_a.append(error_result)
+                results_b.append(error_result)
+            else:
+                result_a, result_b = result
+                results_a.append(result_a)
+                results_b.append(result_b)
 
     # Calculate statistics
     scores_a = [r.get("score") for r in results_a if r.get("score") is not None]

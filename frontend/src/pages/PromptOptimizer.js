@@ -114,7 +114,7 @@ const PromptOptimizer = () => {
   // Settings Modal
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [llmProvider, setLlmProvider] = useState("openai");
-  const [llmModel, setLlmModel] = useState("");
+  const [llmModel, setLlmModel] = useState("gpt-4o-mini");
   const [apiKey, setApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -152,7 +152,7 @@ const PromptOptimizer = () => {
 
   // State for separate evaluation model
   const [evalProvider, setEvalProvider] = useState("openai");
-  const [evalModel, setEvalModel] = useState("o1-mini");  // Default to thinking model
+  const [evalModel, setEvalModel] = useState("o3-mini");  // Default to thinking model
   const [useSeparateEvalModel, setUseSeparateEvalModel] = useState(true);  // Enable by default
 
   // Thinking/Reasoning models for evaluation
@@ -2092,11 +2092,11 @@ const PromptOptimizer = () => {
                     <SelectTrigger className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                       <SelectValue />
                     </SelectTrigger>
-                    <SelectContent className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600">
-                      <SelectItem value="openai" className="text-slate-900 dark:text-slate-100">OpenAI (GPT)</SelectItem>
-                      <SelectItem value="claude" className="text-slate-900 dark:text-slate-100">Anthropic (Claude)</SelectItem>
-                      <SelectItem value="gemini" className="text-slate-900 dark:text-slate-100">Google (Gemini)</SelectItem>
-                      <SelectItem value="multi" className="text-slate-900 dark:text-slate-100">Multi-provider</SelectItem>
+                    <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
+                      <SelectItem value="openai" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">OpenAI (GPT)</SelectItem>
+                      <SelectItem value="claude" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">Anthropic (Claude)</SelectItem>
+                      <SelectItem value="gemini" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">Google (Gemini)</SelectItem>
+                      <SelectItem value="multi" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">Multi-provider</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -2586,14 +2586,14 @@ const PromptOptimizer = () => {
                   {/* Sample count input */}
                   {!dataset && (
                     <div>
-                      <Label htmlFor="sampleCount" className="text-slate-700 dark:text-slate-300">Number of Samples</Label>
+                      <Label htmlFor="sampleCount" className="text-slate-700 dark:text-slate-300">Number of Samples (max 100)</Label>
                       <Input
                         id="sampleCount"
                         type="number"
                         value={sampleCount}
-                        onChange={(e) => setSampleCount(parseInt(e.target.value))}
+                        onChange={(e) => setSampleCount(Math.min(parseInt(e.target.value) || 10, 100))}
                         min="10"
-                        max="500"
+                        max="100"
                         className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100"
                         disabled={isGeneratingDataset}
                       />
@@ -2771,7 +2771,7 @@ const PromptOptimizer = () => {
             <Card id="test-run-section" className="border-slate-300 dark:border-slate-700 bg-white/50 dark:bg-slate-800/50 backdrop-blur-sm">
               <SectionHeader
                 section="testRun"
-                title="5. Test Run"
+                title={<>5. Test Run <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 rounded-full">BETA</span></>}
                 description="Execute prompt against dataset and evaluate results"
               />
               {expandedSections.testRun && (
@@ -2815,9 +2815,9 @@ const PromptOptimizer = () => {
                           <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                             <SelectValue placeholder="Select version" />
                           </SelectTrigger>
-                          <SelectContent className="bg-white dark:bg-slate-800">
+                          <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
                             {versionHistory.map((v) => (
-                              <SelectItem key={v.version} value={String(v.version)} className="text-slate-900 dark:text-slate-100">
+                              <SelectItem key={v.version} value={String(v.version)} className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700">
                                 Version {v.version} {v.is_final ? "(Final)" : ""}
                               </SelectItem>
                             ))}
@@ -2834,11 +2834,11 @@ const PromptOptimizer = () => {
                           <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                             <SelectValue />
                           </SelectTrigger>
-                          <SelectContent className="bg-white dark:bg-slate-800">
-                            <SelectItem value="3.0" className="text-slate-900 dark:text-slate-100">3.0 (Lenient)</SelectItem>
-                            <SelectItem value="3.5" className="text-slate-900 dark:text-slate-100">3.5 (Standard)</SelectItem>
-                            <SelectItem value="4.0" className="text-slate-900 dark:text-slate-100">4.0 (Strict)</SelectItem>
-                            <SelectItem value="4.5" className="text-slate-900 dark:text-slate-100">4.5 (Very Strict)</SelectItem>
+                          <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
+                            <SelectItem value="3.0" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">3.0 (Lenient)</SelectItem>
+                            <SelectItem value="3.5" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">3.5 (Standard)</SelectItem>
+                            <SelectItem value="4.0" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">4.0 (Strict)</SelectItem>
+                            <SelectItem value="4.5" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">4.5 (Very Strict)</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -2849,7 +2849,7 @@ const PromptOptimizer = () => {
                           <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                             <SelectValue placeholder="Select model" />
                           </SelectTrigger>
-                          <SelectContent className="bg-white dark:bg-slate-800">
+                          <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
                             {modelOptions[llmProvider]?.map((model, index) => {
                               if (typeof model === 'object' && model.disabled) {
                                 return (
@@ -2859,7 +2859,7 @@ const PromptOptimizer = () => {
                                 );
                               }
                               return (
-                                <SelectItem key={model} value={model} className="text-slate-900 dark:text-slate-100">
+                                <SelectItem key={model} value={model} className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700">
                                   {model}
                                 </SelectItem>
                               );
@@ -2902,10 +2902,10 @@ const PromptOptimizer = () => {
                               <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                                 <SelectValue />
                               </SelectTrigger>
-                              <SelectContent className="bg-white dark:bg-slate-800">
-                                <SelectItem value="openai" className="text-slate-900 dark:text-slate-100">OpenAI</SelectItem>
-                                <SelectItem value="claude" className="text-slate-900 dark:text-slate-100">Anthropic</SelectItem>
-                                <SelectItem value="gemini" className="text-slate-900 dark:text-slate-100">Google</SelectItem>
+                              <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
+                                <SelectItem value="openai" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700">OpenAI</SelectItem>
+                                <SelectItem value="claude" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700">Anthropic</SelectItem>
+                                <SelectItem value="gemini" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700">Google</SelectItem>
                               </SelectContent>
                             </Select>
                           </div>
@@ -2915,9 +2915,9 @@ const PromptOptimizer = () => {
                               <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                                 <SelectValue placeholder="Select thinking model" />
                               </SelectTrigger>
-                              <SelectContent className="bg-white dark:bg-slate-800">
+                              <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
                                 {thinkingModels[evalProvider]?.map((model) => (
-                                  <SelectItem key={model} value={model} className="text-slate-900 dark:text-slate-100">
+                                  <SelectItem key={model} value={model} className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700">
                                     {model}
                                   </SelectItem>
                                 ))}
@@ -3149,12 +3149,12 @@ const PromptOptimizer = () => {
                         <div>
                           <Label className="text-slate-700 dark:text-slate-300">Run A (Baseline)</Label>
                           <Select value={compareRunA || ""} onValueChange={setCompareRunA}>
-                            <SelectTrigger className="mt-1">
+                            <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                               <SelectValue placeholder="Select run..." />
                             </SelectTrigger>
-                            <SelectContent>
+                            <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
                               {testRunHistory.map((run) => (
-                                <SelectItem key={run.run_id} value={run.run_id}>
+                                <SelectItem key={run.run_id} value={run.run_id} className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">
                                   V{run.prompt_version} - {run.summary?.pass_rate || 0}% pass
                                 </SelectItem>
                               ))}
@@ -3164,12 +3164,12 @@ const PromptOptimizer = () => {
                         <div>
                           <Label className="text-slate-700 dark:text-slate-300">Run B (Compare)</Label>
                           <Select value={compareRunB || ""} onValueChange={setCompareRunB}>
-                            <SelectTrigger className="mt-1">
+                            <SelectTrigger className="mt-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                               <SelectValue placeholder="Select run..." />
                             </SelectTrigger>
-                            <SelectContent>
+                            <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
                               {testRunHistory.map((run) => (
-                                <SelectItem key={run.run_id} value={run.run_id}>
+                                <SelectItem key={run.run_id} value={run.run_id} className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">
                                   V{run.prompt_version} - {run.summary?.pass_rate || 0}% pass
                                 </SelectItem>
                               ))}
@@ -3537,16 +3537,14 @@ const PromptOptimizer = () => {
                 value={String(regenerateSampleCount)}
                 onValueChange={(v) => setRegenerateSampleCount(parseInt(v))}
               >
-                <SelectTrigger className="mt-2">
+                <SelectTrigger className="mt-2 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10 (Quick test)</SelectItem>
-                  <SelectItem value="25">25 (Small)</SelectItem>
-                  <SelectItem value="50">50 (Medium)</SelectItem>
-                  <SelectItem value="100">100 (Standard)</SelectItem>
-                  <SelectItem value="200">200 (Large)</SelectItem>
-                  <SelectItem value="500">500 (Comprehensive)</SelectItem>
+                <SelectContent className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600">
+                  <SelectItem value="10" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">10 (Quick test)</SelectItem>
+                  <SelectItem value="25" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">25 (Small)</SelectItem>
+                  <SelectItem value="50" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">50 (Medium)</SelectItem>
+                  <SelectItem value="100" className="text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 data-[highlighted]:bg-slate-100 dark:data-[highlighted]:bg-slate-700 data-[highlighted]:text-slate-900 dark:data-[highlighted]:text-slate-100">100 (Max)</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-slate-500 mt-2">
