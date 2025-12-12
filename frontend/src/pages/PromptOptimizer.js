@@ -298,24 +298,45 @@ const PromptOptimizer = () => {
         setInitialPrompt(project.system_prompt_versions[0].prompt_text);
       }
 
-      // Set eval prompt if exists
+      // Set eval prompt if exists (handle both old and new formats)
       if (project.eval_prompt) {
-        setEvalPrompt(project.eval_prompt.prompt_text);
-        setEvalRationale(project.eval_prompt.rationale);
+        // New format: eval_prompt is a string, eval_rationale is separate
+        if (typeof project.eval_prompt === 'string') {
+          setEvalPrompt(project.eval_prompt);
+          setEvalRationale(project.eval_rationale || '');
+        } else {
+          // Old format: eval_prompt is an object with prompt_text and rationale
+          setEvalPrompt(project.eval_prompt.prompt_text);
+          setEvalRationale(project.eval_prompt.rationale);
+        }
       }
 
-      // Set dataset if exists (but mark as not from current session)
+      // Set dataset if exists (mark as current session since it was persisted)
       if (project.dataset) {
         setDataset(project.dataset);
-        setIsCurrentSessionDataset(false); // Loaded from saved project, not current session
+        setIsCurrentSessionDataset(true); // Persisted dataset can be used for test runs
       }
 
-      // Expand optimization section
+      // Load test run history if exists
+      if (project.test_runs && project.test_runs.length > 0) {
+        // Transform to match expected format if needed
+        const formattedRuns = project.test_runs.map(run => ({
+          run_id: run.id,
+          created_at: run.created_at,
+          version_number: run.version_number,
+          status: run.status,
+          summary: run.summary
+        }));
+        setTestRunHistory(formattedRuns);
+      }
+
+      // Expand sections based on what data exists
       setExpandedSections({
         requirements: false,
         optimization: true,
-        evalPrompt: false,
-        dataset: false
+        evalPrompt: !!project.eval_prompt,
+        dataset: !!project.dataset,
+        testRun: !!(project.test_runs && project.test_runs.length > 0)
       });
 
       setProjectSelectorOpen(false);
@@ -2260,10 +2281,6 @@ const PromptOptimizer = () => {
                         >
                           <MessageSquare className="w-4 h-4 mr-2" />
                           Review & Refine
-                        </Button>
-                        <Button className="bg-slate-900 dark:bg-slate-900 text-white hover:bg-slate-800 dark:hover:bg-slate-800">
-                          <Save className="w-4 h-4 mr-2" />
-                          Save Changes
                         </Button>
                         <Button
                           onClick={() => {

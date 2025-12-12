@@ -21,10 +21,6 @@ llm_client = get_llm_client()
 # Import shared settings module
 from shared_settings import get_settings
 
-# In-memory storage for test runs and datasets
-test_runs_store: Dict[str, Dict[str, Any]] = {}
-datasets_store: Dict[str, List[Dict[str, Any]]] = {}
-
 
 class CreateProjectRequest(BaseModel):
     name: str = None
@@ -335,9 +331,17 @@ Requirements: {', '.join(project.key_requirements) if project.key_requirements e
 **Instructions:**
 Rate the response on a scale of 1-5 and provide specific feedback."""
 
+        rationale = "Template-based evaluation prompt. Configure API key for AI-generated eval prompts."
+
+        # Persist eval prompt to project
+        project.eval_prompt = eval_prompt
+        project.eval_rationale = rationale
+        project.updated_at = datetime.now()
+        project_storage.save_project(project)
+
         return {
             "eval_prompt": eval_prompt,
-            "rationale": "Template-based evaluation prompt. Configure API key for AI-generated eval prompts."
+            "rationale": rationale
         }
 
     # Use LLM to generate sophisticated eval prompt
@@ -374,6 +378,12 @@ System Prompt Being Evaluated:
 
     eval_prompt = result.get("output", "").strip()
     rationale = f"AI-generated evaluation prompt tailored for {project.use_case} with focus on {', '.join(project.key_requirements[:3]) if project.key_requirements else 'quality and relevance'}."
+
+    # Persist eval prompt to project
+    project.eval_prompt = eval_prompt
+    project.eval_rationale = rationale
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
 
     return {
         "eval_prompt": eval_prompt,
@@ -573,9 +583,17 @@ Requirements: {', '.join(project.key_requirements) if project.key_requirements e
 
 **Rating:** Provide a score from 1-5 with justification."""
 
+        rationale = "Template-based refinement. Configure API key for AI refinement."
+
+        # Persist refined eval prompt to project
+        project.eval_prompt = eval_prompt
+        project.eval_rationale = rationale
+        project.updated_at = datetime.now()
+        project_storage.save_project(project)
+
         return {
             "eval_prompt": eval_prompt,
-            "rationale": f"Template-based refinement. Configure API key for AI refinement."
+            "rationale": rationale
         }
 
     # Use LLM to refine eval prompt
@@ -609,9 +627,18 @@ Create an improved evaluation prompt that addresses the feedback."""
     if result.get("error"):
         raise HTTPException(status_code=500, detail=result["error"])
 
+    refined_eval_prompt = result.get("output", "").strip()
+    rationale = f"AI-refined evaluation prompt incorporating: {request.feedback[:100]}"
+
+    # Persist refined eval prompt to project
+    project.eval_prompt = refined_eval_prompt
+    project.eval_rationale = rationale
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
     return {
-        "eval_prompt": result.get("output", "").strip(),
-        "rationale": f"AI-refined evaluation prompt incorporating: {request.feedback[:100]}"
+        "eval_prompt": refined_eval_prompt,
+        "rationale": rationale
     }
 
 
@@ -672,14 +699,21 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
             }
             test_cases.append(test_case)
 
-        datasets_store[project_id] = test_cases
-        return {
+        # Build and persist dataset
+        dataset_obj = {
             "test_cases": test_cases,
             "sample_count": len(test_cases),
             "preview": test_cases,
             "count": len(test_cases),
-            "categories": {cat: sum(1 for tc in test_cases if tc["category"] == cat) for cat in categories}
+            "categories": {cat: sum(1 for tc in test_cases if tc["category"] == cat) for cat in categories},
+            "generated_at": datetime.now().isoformat()
         }
+        project.dataset = dataset_obj
+        project.test_cases = test_cases
+        project.updated_at = datetime.now()
+        project_storage.save_project(project)
+
+        return dataset_obj
 
     # Use LLM to generate realistic test cases
     system_prompt = f"""You are a QA expert generating test cases for an AI system.
@@ -756,17 +790,24 @@ Generate {num_examples} diverse test inputs."""
             }
             test_cases.append(test_case)
 
-    # Store in memory
-    datasets_store[project_id] = test_cases
+    # Build dataset object
+    dataset_obj = {
+        "test_cases": test_cases,
+        "sample_count": len(test_cases),
+        "preview": test_cases,
+        "count": len(test_cases),
+        "categories": {cat: sum(1 for tc in test_cases if tc["category"] == cat) for cat in categories},
+        "generated_at": datetime.now().isoformat()
+    }
+
+    # Persist dataset to project file
+    project.dataset = dataset_obj
+    project.test_cases = test_cases
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
 
     # Return format expected by frontend
-    return {
-        "test_cases": test_cases,
-        "sample_count": len(test_cases),  # Frontend expects sample_count
-        "preview": test_cases,  # Frontend expects preview array
-        "count": len(test_cases),  # Keep for backward compatibility
-        "categories": {cat: sum(1 for tc in test_cases if tc["category"] == cat) for cat in categories}
-    }
+    return dataset_obj
 
 
 @router.post("/{project_id}/dataset/generate-stream")
@@ -782,7 +823,8 @@ async def export_dataset(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    test_cases = datasets_store.get(project_id, [])
+    # Get test cases from project file
+    test_cases = project.test_cases or []
 
     return {
         "project_id": project_id,
@@ -810,8 +852,8 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
 
     run_id = str(uuid.uuid4())
 
-    # Get test cases
-    test_cases = request.test_cases if request and request.test_cases else datasets_store.get(project_id, [])
+    # Get test cases from request or project file
+    test_cases = request.test_cases if request and request.test_cases else (project.test_cases or [])
 
     # Create test run
     test_run = {
@@ -824,11 +866,6 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
         "results": [],
         "summary": None
     }
-
-    # Store test run
-    if project_id not in test_runs_store:
-        test_runs_store[project_id] = {}
-    test_runs_store[project_id][run_id] = test_run
 
     # Simulate immediate completion for now (would be async in real implementation)
     test_run["status"] = "completed"
@@ -850,6 +887,14 @@ async def create_test_run(project_id: str, request: CreateTestRunRequest = None)
         "avg_score": 4.0
     }
 
+    # Persist test run to project file
+    if project.test_runs is None:
+        project.test_runs = []
+    project.test_runs.append(test_run)
+    project.test_results = test_run["results"]  # Store latest results
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
     return test_run
 
 
@@ -860,18 +905,32 @@ async def list_test_runs(project_id: str, limit: int = 10):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    runs = test_runs_store.get(project_id, {})
-    run_list = list(runs.values())
+    # Get test runs from project file
+    run_list = project.test_runs or []
+
     run_list.sort(key=lambda x: x["created_at"], reverse=True)
 
     return run_list[:limit]
 
 
+def get_test_run_from_project(project, run_id: str):
+    """Helper to get a test run from project file"""
+    if not project.test_runs:
+        return None
+    for run in project.test_runs:
+        if run["id"] == run_id:
+            return run
+    return None
+
+
 @router.get("/{project_id}/test-runs/{run_id}/status")
 async def get_test_run_status(project_id: str, run_id: str):
     """Get status of a test run"""
-    runs = test_runs_store.get(project_id, {})
-    test_run = runs.get(run_id)
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    test_run = get_test_run_from_project(project, run_id)
 
     if not test_run:
         raise HTTPException(status_code=404, detail="Test run not found")
@@ -887,8 +946,11 @@ async def get_test_run_status(project_id: str, run_id: str):
 @router.get("/{project_id}/test-runs/{run_id}/results")
 async def get_test_run_results(project_id: str, run_id: str):
     """Get results of a test run"""
-    runs = test_runs_store.get(project_id, {})
-    test_run = runs.get(run_id)
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    test_run = get_test_run_from_project(project, run_id)
 
     if not test_run:
         raise HTTPException(status_code=404, detail="Test run not found")
@@ -904,13 +966,23 @@ async def get_test_run_results(project_id: str, run_id: str):
 @router.delete("/{project_id}/test-runs/{run_id}")
 async def delete_test_run(project_id: str, run_id: str):
     """Delete a test run"""
-    runs = test_runs_store.get(project_id, {})
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    if run_id in runs:
-        del runs[run_id]
-        return {"message": "Test run deleted successfully"}
+    if not project.test_runs:
+        raise HTTPException(status_code=404, detail="Test run not found")
 
-    raise HTTPException(status_code=404, detail="Test run not found")
+    # Find and remove the test run
+    original_len = len(project.test_runs)
+    project.test_runs = [r for r in project.test_runs if r["id"] != run_id]
+
+    if len(project.test_runs) == original_len:
+        raise HTTPException(status_code=404, detail="Test run not found")
+
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+    return {"message": "Test run deleted successfully"}
 
 
 @router.post("/{project_id}/test-runs/{run_id}/delete")
@@ -922,8 +994,11 @@ async def delete_test_run_post(project_id: str, run_id: str):
 @router.get("/{project_id}/test-runs/{run_id}/export")
 async def export_test_run(project_id: str, run_id: str, format: str = "json"):
     """Export test run results"""
-    runs = test_runs_store.get(project_id, {})
-    test_run = runs.get(run_id)
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    test_run = get_test_run_from_project(project, run_id)
 
     if not test_run:
         raise HTTPException(status_code=404, detail="Test run not found")
@@ -938,13 +1013,17 @@ async def export_test_run(project_id: str, run_id: str, format: str = "json"):
 @router.post("/{project_id}/test-runs/compare")
 async def compare_test_runs(project_id: str, data: dict):
     """Compare multiple test runs"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     run_ids = data.get("run_ids", [])
-    runs = test_runs_store.get(project_id, {})
+    runs_dict = {r["id"]: r for r in (project.test_runs or [])}
 
     comparisons = []
     for run_id in run_ids:
-        if run_id in runs:
-            run = runs[run_id]
+        if run_id in runs_dict:
+            run = runs_dict[run_id]
             comparisons.append({
                 "run_id": run_id,
                 "created_at": run["created_at"],
@@ -978,9 +1057,12 @@ async def run_single_test(project_id: str, data: dict):
 @router.post("/{project_id}/test-runs/rerun-failed")
 async def rerun_failed_tests(project_id: str, data: dict):
     """Rerun failed test cases"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     run_id = data.get("run_id")
-    runs = test_runs_store.get(project_id, {})
-    original_run = runs.get(run_id)
+    original_run = get_test_run_from_project(project, run_id)
 
     if not original_run:
         raise HTTPException(status_code=404, detail="Original test run not found")
@@ -1007,6 +1089,11 @@ async def rerun_failed_tests(project_id: str, data: dict):
         }
     }
 
-    test_runs_store[project_id][new_run_id] = new_run
+    # Persist new run to project file
+    if project.test_runs is None:
+        project.test_runs = []
+    project.test_runs.append(new_run)
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
 
     return new_run

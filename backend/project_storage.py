@@ -3,11 +3,14 @@ Simple file-based project storage
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 import uuid
+import logging
 
 from models import SavedProject, ProjectListItem
+
+logger = logging.getLogger(__name__)
 
 
 PROJECTS_DIR = "saved_projects"
@@ -135,3 +138,79 @@ def create_new_project(
     )
 
     return save_project(project)
+
+
+def cleanup_old_projects(days: int = 30) -> dict:
+    """
+    Delete project files older than specified days.
+    Returns a summary of deleted projects.
+    """
+    ensure_projects_dir()
+
+    cutoff_date = datetime.now() - timedelta(days=days)
+    deleted_count = 0
+    deleted_projects = []
+    errors = []
+
+    for filename in os.listdir(PROJECTS_DIR):
+        if not filename.endswith('.json'):
+            continue
+
+        project_id = filename[:-5]
+        file_path = get_project_file_path(project_id)
+
+        try:
+            project = load_project(project_id)
+            if project and project.updated_at < cutoff_date:
+                os.remove(file_path)
+                deleted_count += 1
+                deleted_projects.append({
+                    "id": project_id,
+                    "name": project.project_name,
+                    "updated_at": project.updated_at.isoformat()
+                })
+                logger.info(f"Deleted old project: {project.project_name} (ID: {project_id})")
+        except Exception as e:
+            errors.append({"project_id": project_id, "error": str(e)})
+            logger.error(f"Error cleaning up project {project_id}: {e}")
+
+    return {
+        "deleted_count": deleted_count,
+        "deleted_projects": deleted_projects,
+        "errors": errors,
+        "cutoff_date": cutoff_date.isoformat()
+    }
+
+
+def get_storage_stats() -> dict:
+    """Get storage statistics"""
+    ensure_projects_dir()
+
+    total_size = 0
+    file_count = 0
+    oldest_project = None
+    newest_project = None
+
+    for filename in os.listdir(PROJECTS_DIR):
+        if not filename.endswith('.json'):
+            continue
+
+        file_path = os.path.join(PROJECTS_DIR, filename)
+        total_size += os.path.getsize(file_path)
+        file_count += 1
+
+        project_id = filename[:-5]
+        project = load_project(project_id)
+        if project:
+            if oldest_project is None or project.updated_at < oldest_project["updated_at"]:
+                oldest_project = {"id": project_id, "name": project.project_name, "updated_at": project.updated_at}
+            if newest_project is None or project.updated_at > newest_project["updated_at"]:
+                newest_project = {"id": project_id, "name": project.project_name, "updated_at": project.updated_at}
+
+    return {
+        "total_projects": file_count,
+        "total_size_bytes": total_size,
+        "total_size_mb": round(total_size / (1024 * 1024), 2),
+        "oldest_project": oldest_project,
+        "newest_project": newest_project
+    }

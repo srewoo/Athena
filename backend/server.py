@@ -2,8 +2,11 @@
 Clean FastAPI server for Athena - 5-Step Prompt Testing Workflow
 """
 import os
+import asyncio
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 # Load .env from root directory (parent of backend/)
 env_path = Path(__file__).parent.parent / '.env'
@@ -28,8 +31,57 @@ from models import (
 from llm_client import get_llm_client
 from shared_settings import settings_store, get_settings as get_llm_settings_shared, update_settings
 import project_api
+import project_storage
 
-app = FastAPI(title="Athena - Prompt Testing Application")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Cleanup configuration
+CLEANUP_INTERVAL_HOURS = 24  # Run cleanup every 24 hours
+CLEANUP_AGE_DAYS = 30  # Delete projects older than 30 days
+
+
+async def cleanup_scheduler():
+    """Background task to periodically clean up old projects"""
+    while True:
+        try:
+            # Wait for the specified interval
+            await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
+
+            # Run cleanup
+            logger.info("Running scheduled project cleanup...")
+            result = project_storage.cleanup_old_projects(days=CLEANUP_AGE_DAYS)
+            logger.info(f"Cleanup completed: {result['deleted_count']} projects deleted")
+
+        except asyncio.CancelledError:
+            logger.info("Cleanup scheduler stopped")
+            break
+        except Exception as e:
+            logger.error(f"Error in cleanup scheduler: {e}")
+            # Continue running even if there's an error
+            await asyncio.sleep(3600)  # Wait an hour before retrying
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle - start/stop background tasks"""
+    # Startup: Start the cleanup scheduler
+    cleanup_task = asyncio.create_task(cleanup_scheduler())
+    logger.info("Started project cleanup scheduler (runs every 24 hours, deletes projects older than 30 days)")
+
+    yield
+
+    # Shutdown: Cancel the cleanup task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Cleanup scheduler stopped")
+
+
+app = FastAPI(title="Athena - Prompt Testing Application", lifespan=lifespan)
 
 # CORS middleware - load origins from env
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -51,6 +103,24 @@ app.include_router(project_api.router)
 @app.get("/")
 async def root():
     return {"message": "Prompt Testing Application API"}
+
+
+# ============================================================================
+# ADMIN/MAINTENANCE ENDPOINTS
+# ============================================================================
+
+@app.get("/api/admin/storage-stats")
+async def get_storage_stats():
+    """Get storage statistics for project files"""
+    return project_storage.get_storage_stats()
+
+
+@app.post("/api/admin/cleanup")
+async def trigger_cleanup(days: int = 30):
+    """Manually trigger cleanup of old projects"""
+    result = project_storage.cleanup_old_projects(days=days)
+    logger.info(f"Manual cleanup triggered: {result['deleted_count']} projects deleted")
+    return result
 
 
 @app.post("/api/rewrite")
