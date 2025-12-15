@@ -3770,7 +3770,7 @@ const PromptOptimizer = () => {
                             {version.evaluation.suggestions.slice(0, 3).map((s, i) => (
                               <li key={i} className="flex items-start gap-1">
                                 <span className="text-amber-500">•</span>
-                                <span className="line-clamp-2">{s}</span>
+                                <span className="line-clamp-2">{typeof s === 'string' ? s : s.suggestion}</span>
                               </li>
                             ))}
                           </ul>

@@ -158,3 +158,4 @@ backend/logs/
 BKP/
 .claude/
 backend/saved_projects/
+saved_projects

@@ -4,7 +4,7 @@ Project management API - Simple file-based storage
 from fastapi import APIRouter, HTTPException, Body
 from fastapi.responses import JSONResponse
 from typing import List, Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from datetime import datetime
 import uuid
 import json
@@ -113,7 +113,8 @@ class EvalResult(BaseModel):
     violations: Optional[List[str]] = None
     evidence: Optional[List[str]] = None
 
-    @validator('score')
+    @field_validator('score')
+    @classmethod
     def validate_score(cls, v):
         if v < 1 or v > 5:
             raise ValueError('Score must be between 1 and 5')
@@ -1520,7 +1521,7 @@ async def smart_generate_dataset(project_id: str, request: GenerateDatasetReques
         raise HTTPException(status_code=400, detail="LLM API key required for smart generation")
 
     # Analyze the prompt structure
-    analysis = analyze_prompt(current_prompt)
+    analysis = analyze_prompt_dna(current_prompt)
 
     # Detect input format from prompt
     input_spec = detect_input_type(current_prompt, analysis.dna.template_variables)
@@ -1657,6 +1658,8 @@ async def export_dataset(project_id: str):
 # ============================================================================
 
 class CreateTestRunRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     prompt_version: int = None
     version_number: int = None  # Alias for prompt_version
     llm_provider: str = None

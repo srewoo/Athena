@@ -1,7 +1,7 @@
 """
 Simple data models for the 5-step prompt testing workflow
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 
@@ -10,6 +10,8 @@ from datetime import datetime
 
 class ProjectInput(BaseModel):
     """User input for the prompt testing workflow"""
+    model_config = ConfigDict(protected_namespaces=())
+
     provider: str  # "openai", "claude", "gemini"
     api_key: str
     model_name: Optional[str] = None
