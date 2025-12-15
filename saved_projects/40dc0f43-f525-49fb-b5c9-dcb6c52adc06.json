@@ -1,0 +1,36 @@
+{
+  "id": "40dc0f43-f525-49fb-b5c9-dcb6c52adc06",
+  "project_name": "New Project",
+  "use_case": "Testing",
+  "requirements": {
+    "use_case": "Testing"
+  },
+  "key_requirements": [
+    "req1",
+    "req2"
+  ],
+  "initial_prompt": "Initial prompt",
+  "optimized_prompt": null,
+  "optimization_score": null,
+  "eval_prompt": null,
+  "eval_rationale": null,
+  "calibration_examples": null,
+  "human_validations": null,
+  "ab_tests": null,
+  "dataset": null,
+  "test_cases": null,
+  "test_results": null,
+  "test_runs": null,
+  "final_report": null,
+  "system_prompt_versions": [
+    {
+      "version": 1,
+      "prompt_text": "Initial prompt",
+      "created_at": "2025-12-15T12:27:31.550041",
+      "changes_made": "Initial prompt"
+    }
+  ],
+  "created_at": "2025-12-15T12:27:31.550041",
+  "updated_at": "2025-12-15T12:27:31.550068",
+  "version": 1
+}

@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(env_path)
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import json
@@ -32,6 +32,10 @@ from llm_client import get_llm_client
 from shared_settings import settings_store, get_settings as get_llm_settings_shared, update_settings
 import project_api
 import project_storage
+from prompt_analyzer import analyze_prompt, analysis_to_dict, PromptType
+from agentic_rewrite import agentic_rewrite, result_to_dict as agentic_result_to_dict, get_thinking_model_for_provider
+from agentic_eval import agentic_eval_generation, result_to_dict as agentic_eval_result_to_dict
+from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -123,73 +127,6 @@ async def trigger_cleanup(days: int = 30):
     return result
 
 
-@app.post("/api/rewrite")
-async def rewrite_prompt(data: dict):
-    """AI-powered prompt rewriting based on focus areas"""
-    prompt_text = data.get("prompt_text", "")
-    focus_areas = data.get("focus_areas", [])
-    use_case = data.get("use_case", "")
-    key_requirements = data.get("key_requirements", [])
-
-    if not prompt_text:
-        raise HTTPException(status_code=400, detail="prompt_text is required")
-
-    # Create improvement instructions
-    focus_list = "\n".join(f"- {area}" for area in focus_areas)
-    requirements_list = "\n".join(f"- {req}" for req in key_requirements) if key_requirements else "Not specified"
-
-    system_prompt = f"""You are an expert prompt engineer. Your task is to improve the given prompt by addressing the specific focus areas.
-
-Use Case: {use_case}
-Key Requirements:
-{requirements_list}
-
-Focus Areas to Address:
-{focus_list}
-
-Rewrite the prompt to:
-1. Address all focus areas mentioned above
-2. Maintain the core intent of the original prompt
-3. Add missing elements (context, examples, constraints, format, etc.)
-4. Make it more specific and actionable
-5. Keep it clear and well-structured
-
-Return the improved prompt directly, without explanations."""
-
-    # Get LLM settings from settings store (standardized field names)
-    provider = settings_store.get("llm_provider", "openai")
-    api_key = settings_store.get("api_key", "")
-    model_name = settings_store.get("model_name")
-
-    if not api_key:
-        raise HTTPException(status_code=400, detail="API key not configured. Please configure settings first.")
-
-    # Call LLM to rewrite prompt
-    user_message = f"Original prompt:\n{prompt_text}\n\nImprove this prompt by addressing the focus areas listed above."
-    response = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=provider,
-        api_key=api_key,
-        model_name=model_name,
-        temperature=0.7,
-        max_tokens=8000
-    )
-
-    if response.get("error"):
-        raise HTTPException(status_code=500, detail=response["error"])
-
-    rewritten_prompt = response.get("output", "").strip()
-
-    # Extract what was changed
-    changes_made = focus_areas[:3]  # First 3 focus areas as changes
-
-    return {
-        "rewritten_prompt": rewritten_prompt,
-        "changes_made": changes_made
-    }
-
-
 # ============================================================================
 # STEP 1: VALIDATION
 # ============================================================================
@@ -206,30 +143,66 @@ async def validate_project(project: ProjectInput):
 # STEP 2: PROMPT OPTIMIZATION
 # ============================================================================
 
+@app.post("/api/step2/analyze")
+async def analyze_prompt_endpoint(prompt_text: str):
+    """Analyze a prompt to extract DNA, detect type, and assess quality"""
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="prompt_text is required")
+
+    analysis = analyze_prompt(prompt_text)
+    return analysis_to_dict(analysis)
+
+
 @app.post("/api/step2/optimize", response_model=PromptOptimizationResult)
 async def optimize_prompt(project: ProjectInput):
-    """Step 2: Optimize the initial prompt"""
-    system_prompt = """You are an expert prompt engineer. Your task is to transform an initial prompt into a highly effective, production-ready system prompt.
+    """Step 2: Optimize the initial prompt with DNA-aware optimization"""
 
-## CRITICAL PRIORITY ORDER
-1. **Requirements Alignment** - Ensure ALL requirements are addressed
-2. **Template Variable Preservation** - NEVER remove or modify {{variable}} placeholders
-3. **Clarity & Structure** - Make instructions crystal clear and well-organized
-4. **Best Practices** - Apply proven prompt engineering techniques
+    # First, analyze the prompt to understand its structure
+    analysis = analyze_prompt(project.initial_prompt)
+    analysis_dict = analysis_to_dict(analysis)
 
-## TEMPLATE VARIABLE RULES
-- **PRESERVE ALL** `{{variable}}` placeholders EXACTLY as they appear
-- **DO NOT** rename, remove, or modify variable syntax
+    # Build DNA preservation instructions
+    dna_instructions = build_dna_preservation_instructions(analysis)
 
-## SUBSTANTIAL IMPROVEMENT GUIDELINES
-- Add new sections (e.g., Role Definition, Output Format, Error Handling)
-- Provide concrete examples where helpful
-- Remove redundancy and ambiguity
-- Add structure with clear headers or XML tags
-- Specify output format explicitly
+    # Build type-specific optimization guidance
+    type_guidance = build_type_specific_guidance(analysis.prompt_type)
+
+    # Check if prompt is already high quality
+    if analysis.quality_score >= 8.5 and not analysis.improvement_needed:
+        # Return the original with high score - no changes needed
+        return PromptOptimizationResult(
+            optimized_prompt=project.initial_prompt,
+            score=analysis.quality_score,
+            analysis=f"This prompt is already production-ready (score: {analysis.quality_score}/10). Strengths: {', '.join(analysis.strengths[:3])}. No optimization needed.",
+            improvements=[],
+            suggestions=analysis.improvement_areas if analysis.improvement_areas else ["Consider adding examples for edge cases"]
+        )
+
+    system_prompt = f"""You are an expert prompt engineer. Your task is to transform an initial prompt into a highly effective, production-ready system prompt.
+
+## PROMPT ANALYSIS RESULTS
+- **Detected Type:** {analysis.prompt_type.value}
+- **Current Quality Score:** {analysis.quality_score}/10
+- **Improvement Needed:** {analysis.improvement_needed}
+
+## AREAS TO IMPROVE
+{chr(10).join(f'- {area}' for area in analysis.improvement_areas) if analysis.improvement_areas else '- Minor refinements only'}
+
+## CURRENT STRENGTHS (PRESERVE THESE)
+{chr(10).join(f'- {strength}' for strength in analysis.strengths) if analysis.strengths else '- None identified'}
+
+{dna_instructions}
+
+{type_guidance}
+
+## OPTIMIZATION RULES
+1. **PRESERVE DNA**: Keep all template variables, output format, scoring scales, and key terminology EXACTLY as found
+2. **FIX WEAKNESSES**: Address the specific improvement areas identified above
+3. **MAINTAIN STRENGTHS**: Do not change what's already working well
+4. **ADD STRUCTURE**: If missing, add clear sections (Role, Task, Format, Constraints)
+5. **DO NOT OVER-ENGINEER**: Only add what's genuinely needed
 
 ## QUALITY SCORING (1-10)
-Rate the optimized prompt on this scale:
 - **9-10**: Exceptional - comprehensive, clear structure, examples, edge cases handled
 - **7-8**: Strong - well-structured, clear instructions, most requirements covered
 - **5-6**: Good - clear improvements, addresses main requirements
@@ -237,15 +210,15 @@ Rate the optimized prompt on this scale:
 - **1-2**: Poor - minimal improvement or missing critical requirements
 
 Return a JSON object with this structure:
-{
+{{
     "optimized_prompt": "The complete optimized system prompt",
     "score": 8.5,
     "analysis": "Detailed analysis of optimizations made",
     "improvements": ["Improvement 1", "Improvement 2", "..."],
     "suggestions": ["Additional suggestion 1", "Additional suggestion 2", "..."]
-}"""
+}}"""
 
-    user_message = f"""Please optimize this prompt.
+    user_message = f"""Please optimize this prompt based on the analysis above.
 
 **Use Case:** {project.use_case}
 
@@ -257,7 +230,7 @@ Return a JSON object with this structure:
 {project.initial_prompt}
 ```
 
-Transform this into a high-quality system prompt that addresses all requirements and follows best practices."""
+Focus on fixing the identified weaknesses while preserving the DNA elements and strengths."""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -265,7 +238,7 @@ Transform this into a high-quality system prompt that addresses all requirements
         provider=project.provider,
         api_key=project.api_key,
         model_name=project.model_name,
-        temperature=0.7,
+        temperature=0.5,  # Lower temperature for more consistent optimization
         max_tokens=8000
     )
 
@@ -276,11 +249,179 @@ Transform this into a high-quality system prompt that addresses all requirements
         json_match = re.search(r'\{[\s\S]*\}', result["output"])
         if json_match:
             data = json.loads(json_match.group())
+
+            # Validate DNA preservation
+            optimized = data.get("optimized_prompt", "")
+            validation_issues = validate_dna_preservation(project.initial_prompt, optimized, analysis)
+
+            if validation_issues:
+                logger.warning(f"DNA preservation issues: {validation_issues}")
+                # Add warning to analysis
+                data["analysis"] = data.get("analysis", "") + f"\n\nWARNING: Some DNA elements may have been modified: {', '.join(validation_issues)}"
+
+            # Include analysis metadata in response
+            data["prompt_analysis"] = analysis_dict
+
             return PromptOptimizationResult(**data)
         else:
             raise ValueError("No JSON found in response")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse optimization result: {str(e)}")
+
+
+def build_dna_preservation_instructions(analysis) -> str:
+    """Build instructions for preserving prompt DNA"""
+    instructions = ["## CRITICAL: DNA PRESERVATION RULES"]
+
+    dna = analysis.dna
+
+    if dna.template_variables:
+        instructions.append(f"\n### Template Variables (MUST PRESERVE EXACTLY)")
+        for var in dna.template_variables:
+            instructions.append(f"- `{{{{{var}}}}}` - DO NOT modify, rename, or remove")
+
+    if dna.output_format:
+        instructions.append(f"\n### Output Format (MUST PRESERVE)")
+        instructions.append(f"- Format type: {dna.output_format}")
+        if dna.output_schema:
+            instructions.append(f"- Schema structure must remain compatible")
+
+    if dna.scoring_scale:
+        instructions.append(f"\n### Scoring Scale (MUST PRESERVE)")
+        scale = dna.scoring_scale
+        if scale.get('type') == 'numeric':
+            instructions.append(f"- Range: {scale.get('min', 0)}-{scale.get('max', 10)} (DO NOT change)")
+        elif scale.get('type') == 'categorical':
+            instructions.append(f"- Categories: {', '.join(scale.get('categories', []))}")
+
+    if dna.key_terminology:
+        instructions.append(f"\n### Key Terminology (PRESERVE)")
+        for term in dna.key_terminology[:10]:
+            instructions.append(f"- \"{term}\"")
+
+    if dna.sections:
+        instructions.append(f"\n### Existing Sections (PRESERVE STRUCTURE)")
+        for section in dna.sections[:10]:
+            instructions.append(f"- {section}")
+
+    return "\n".join(instructions)
+
+
+def build_type_specific_guidance(prompt_type: PromptType) -> str:
+    """Build optimization guidance specific to the prompt type"""
+    guidance = {
+        PromptType.ANALYTICAL: """
+## TYPE-SPECIFIC GUIDANCE (Analytical/Scoring Prompt)
+- Ensure scoring rubric is explicit and detailed
+- Each score level should have clear criteria
+- Include examples of what constitutes each score
+- Add instructions for handling ambiguous cases
+- Ensure evidence-based reasoning is required""",
+
+        PromptType.STRUCTURED_OUTPUT: """
+## TYPE-SPECIFIC GUIDANCE (Structured Output Prompt)
+- Output schema must be explicit and complete
+- Include field-by-field specifications
+- Add validation rules for each field
+- Specify data types clearly
+- Include an example of valid output""",
+
+        PromptType.CONVERSATIONAL: """
+## TYPE-SPECIFIC GUIDANCE (Conversational Prompt)
+- Define tone and personality clearly
+- Include examples of good responses
+- Add safety and boundary guidelines
+- Specify how to handle edge cases
+- Define what topics are in/out of scope""",
+
+        PromptType.CREATIVE: """
+## TYPE-SPECIFIC GUIDANCE (Creative Prompt)
+- Define style and tone requirements
+- Include constraints (length, format, etc.)
+- Add examples of desired output quality
+- Specify any themes or elements to include/avoid""",
+
+        PromptType.EXTRACTION: """
+## TYPE-SPECIFIC GUIDANCE (Extraction Prompt)
+- Define exactly what to extract
+- Specify output format for extracted data
+- Add rules for handling missing data
+- Include examples of input/output pairs""",
+
+        PromptType.INSTRUCTIONAL: """
+## TYPE-SPECIFIC GUIDANCE (Instructional Prompt)
+- Ensure step-by-step clarity
+- Add numbered steps where appropriate
+- Include prerequisites or assumptions
+- Add tips for common mistakes""",
+
+        PromptType.HYBRID: """
+## TYPE-SPECIFIC GUIDANCE (Hybrid Prompt)
+- Balance all identified prompt types
+- Ensure clear transitions between modes
+- Maintain consistency across sections"""
+    }
+
+    return guidance.get(prompt_type, guidance[PromptType.HYBRID])
+
+
+def validate_dna_preservation(original: str, optimized: str, analysis) -> List[str]:
+    """Validate that DNA elements were preserved in the optimized prompt"""
+    issues = []
+    dna = analysis.dna
+
+    # Check template variables
+    for var in dna.template_variables:
+        patterns = [f"{{{{{var}}}}}", f"{{{var}}}", f"<<{var}>>"]
+        found = any(pattern in optimized for pattern in patterns)
+        if not found:
+            issues.append(f"Template variable '{var}' may be missing")
+
+    # Check scoring scale preservation (if numeric)
+    if dna.scoring_scale and dna.scoring_scale.get('type') == 'numeric':
+        min_val = str(dna.scoring_scale.get('min', 0))
+        max_val = str(dna.scoring_scale.get('max', 10))
+        scale_pattern = f"{min_val}.*{max_val}|{min_val}-{max_val}"
+        if not re.search(scale_pattern, optimized):
+            # Check if the scale is mentioned in any form
+            if min_val not in optimized or max_val not in optimized:
+                issues.append(f"Scoring scale {min_val}-{max_val} may be missing")
+
+    return issues
+
+
+def build_eval_dimensions_text(analysis) -> str:
+    """Build text describing recommended evaluation dimensions based on prompt type"""
+    dimensions = analysis.suggested_eval_dimensions
+    if not dimensions:
+        return "Use standard evaluation dimensions: Format Compliance, Accuracy, Completeness, Clarity"
+
+    lines = []
+    for i, dim in enumerate(dimensions, 1):
+        lines.append(f"{i}. **{dim['name']}**")
+        lines.append(f"   - Description: {dim['description']}")
+        lines.append(f"   - Check: {dim['check']}")
+
+    return "\n".join(lines)
+
+
+def build_test_categories_text(analysis) -> str:
+    """Build text describing recommended test categories based on prompt type"""
+    categories = analysis.suggested_test_categories
+    if not categories:
+        return "Use standard distribution: 50% positive, 20% edge cases, 15% negative, 15% adversarial"
+
+    lines = []
+    for cat in categories:
+        lines.append(f"### {cat['name'].upper()} ({cat['percentage']}%)")
+        lines.append(f"Description: {cat['description']}")
+        if 'examples' in cat:
+            lines.append("Examples:")
+            for ex in cat['examples'][:3]:
+                lines.append(f"  - {ex}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 @app.post("/api/step2/refine", response_model=PromptOptimizationResult)
@@ -343,155 +484,137 @@ Please incorporate this feedback and provide an improved version."""
         raise HTTPException(status_code=500, detail=f"Failed to parse refinement result: {str(e)}")
 
 
-@app.post("/api/step2/ai-rewrite", response_model=PromptOptimizationResult)
-async def ai_rewrite_optimization(project: ProjectInput, current_result: dict):
-    """Step 2 AI Rewrite: Automatically refine the optimized prompt without user feedback"""
-    system_prompt = """You are an expert prompt engineer. Your task is to critically review and further improve an already optimized prompt.
+@app.post("/api/step2/agentic-rewrite")
+async def agentic_rewrite_optimization(project: ProjectInput, current_result: dict, use_thinking_model: bool = True):
+    """
+    Step 2 Agentic Rewrite: Multi-step, self-correcting prompt optimization.
 
-You will receive a CURRENT optimized prompt and its score. Your job is to:
-1. Identify any remaining weaknesses or areas for improvement
-2. Enhance clarity, structure, and effectiveness
-3. Add more specific examples or edge case handling if needed
-4. Improve the prompt to achieve a higher quality score
+    This is an enhanced version of AI Rewrite that uses:
+    1. Deep analysis with thinking model (o3-mini, etc.)
+    2. Structured improvement planning
+    3. Careful execution with DNA preservation
+    4. Validation and iteration loop
 
-Be critical and look for subtle improvements that weren't addressed in the initial optimization.
+    Parameters:
+    - project: Project configuration including API keys
+    - current_result: Current optimization result with optimized_prompt
+    - use_thinking_model: Whether to use a thinking model for analysis (default: True)
+    """
+    current_prompt = current_result.get('optimized_prompt', '')
+    if not current_prompt:
+        raise HTTPException(status_code=400, detail="optimized_prompt is required in current_result")
 
-Return a JSON object with this structure:
-{
-    "optimized_prompt": "The further improved system prompt",
-    "score": 9.0,
-    "analysis": "Detailed analysis of what was improved in this iteration",
-    "improvements": ["Improvement 1", "Improvement 2", "..."],
-    "suggestions": ["Additional suggestion 1", "Additional suggestion 2", "..."]
-}"""
+    # Extract analysis context from current_result (from Re-Analyze feedback)
+    analysis_context = current_result.get('analysis_context', None)
 
-    user_message = f"""Please review and further improve this optimized prompt.
+    # Determine thinking model to use
+    thinking_model = None
+    if use_thinking_model:
+        thinking_model = get_thinking_model_for_provider(project.provider)
+        logger.info(f"Using thinking model: {thinking_model} for deep analysis")
 
-**Use Case:** {project.use_case}
-
-**Requirements:** {project.requirements}
-
-**CURRENT Optimized Prompt:**
-```
-{current_result.get('optimized_prompt', '')}
-```
-
-**Current Score:** {current_result.get('score', 0)} / 10
-
-**CURRENT Analysis:**
-{current_result.get('analysis', '')}
-
-Critically review this prompt and identify any areas that can be further improved. Focus on:
-- Clarity and specificity
-- Edge case handling
-- Examples and demonstrations
-- Output format specifications
-- Error handling instructions
-
-Provide an enhanced version that addresses these areas."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.7,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
+    if analysis_context:
+        logger.info(f"Incorporating analysis context: {len(analysis_context.get('suggestions', []))} suggestions, {len(analysis_context.get('missing_requirements', []))} missing requirements")
 
     try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            return PromptOptimizationResult(**data)
-        else:
-            raise ValueError("No JSON found in response")
+        result = await agentic_rewrite(
+            prompt=current_prompt,
+            use_case=project.use_case,
+            requirements=project.requirements,
+            llm_client=llm_client,
+            provider=project.provider,
+            api_key=project.api_key,
+            model_name=project.model_name,
+            thinking_model=thinking_model,
+            max_iterations=2,
+            user_analysis_context=analysis_context
+        )
+
+        # Convert to the expected response format
+        return {
+            "optimized_prompt": result.final_prompt,
+            "score": result.final_score,
+            "analysis": result.reason,
+            "improvements": [
+                f"{imp.get('area', 'Unknown')}: {imp.get('target', 'Improved')}"
+                for imp in (result.improvement_plan.get("improve", []) if result.improvement_plan else [])
+            ],
+            "suggestions": result.improvement_plan.get("add", []) if result.improvement_plan else [],
+            "no_change": result.no_change,
+            "agentic_details": {
+                "iterations": result.iterations,
+                "steps_taken": result.steps_taken,
+                "original_score": result.original_score,
+                "final_score": result.final_score,
+                "quality_delta": result.final_score - result.original_score,
+                "validation": result.validation
+            }
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse AI rewrite result: {str(e)}")
+        logger.error(f"Agentic rewrite failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agentic rewrite failed: {str(e)}")
 
 
 # ============================================================================
 # STEP 3: EVALUATION PROMPT GENERATION
 # ============================================================================
 
-@app.post("/api/step3/generate-eval", response_model=EvaluationPromptResult)
-async def generate_evaluation_prompt(project: ProjectInput, optimized_prompt: str):
-    """Step 3: Generate evaluation prompt using 5-section structure"""
-    system_prompt = """You are an expert in LLM evaluation. Your task is to create a comprehensive evaluation prompt following the 5-SECTION STRUCTURE:
+@app.post("/api/step3/agentic-generate-eval")
+async def agentic_generate_evaluation_prompt(project: ProjectInput, optimized_prompt: str = Body(...), use_thinking_model: bool = Body(True)):
+    """
+    Step 3 Agentic Eval Generation: Multi-step, self-validating evaluation prompt generation.
 
-### **I. Evaluator's Role & Goal**
-- Define the evaluator's primary role
-- State the specific goal: rigorously evaluate AI responses against core operational principles
+    This is an enhanced version of eval generation that uses:
+    1. Deep analysis with thinking model to understand what could go wrong
+    2. Systematic failure mode identification
+    3. Eval dimensions designed to catch each failure mode
+    4. Self-test validation to ensure coverage
+    5. Iterative refinement if gaps found
 
-### **II. Core Expectations**
-Define what a high-quality output must do based on requirements.
+    Parameters:
+    - project: Project configuration including API keys
+    - optimized_prompt: The system prompt to generate eval for
+    - use_thinking_model: Whether to use a thinking model for analysis (default: True)
+    """
+    if not optimized_prompt:
+        raise HTTPException(status_code=400, detail="optimized_prompt is required")
 
-### **III. Detailed 1-5 Rating Scale**
-**Rating 1 (Very Poor):** Hallucination, complete irrelevance, broken format, major requirement violations
-**Rating 2 (Poor):** Incorrect logic, partially ungrounded responses, significant requirement gaps
-**Rating 3 (Acceptable):** Functionally correct but with flaws, minor logical gaps
-**Rating 4 (Good):** High quality with minor room for improvement
-**Rating 5 (Excellent):** Flawless execution, all requirements perfectly addressed
-
-### **IV. Evaluation Task**
-Provide step-by-step instructions for the evaluator.
-
-### **V. Output Format**
-```json
-{
-    "score": 3,
-    "reasoning": "Detailed explanation of why this score was assigned"
-}
-```
-
-**IMPORTANT:** The evaluation prompt must use placeholders {{input}} and {{output}}.
-
-Return a JSON object:
-{
-    "eval_prompt": "Complete evaluation prompt with all 5 sections",
-    "eval_criteria": ["Criterion 1", "Criterion 2", "..."],
-    "rationale": "Brief explanation of the evaluation approach"
-}"""
-
-    user_message = f"""Create an evaluation prompt for this use case.
-
-**Use Case:** {project.use_case}
-
-**Requirements:** {project.requirements}
-
-**System Prompt to Evaluate:**
-```
-{optimized_prompt}
-```
-
-Create a comprehensive evaluation prompt that will assess whether outputs from this system prompt meet all requirements and quality standards."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.5,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
+    # Determine thinking model to use
+    thinking_model = None
+    if use_thinking_model:
+        thinking_model = get_thinking_model_for_provider(project.provider)
+        logger.info(f"Using thinking model: {thinking_model} for eval generation")
 
     try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            return EvaluationPromptResult(**data)
-        else:
-            raise ValueError("No JSON found in response")
+        result = await agentic_eval_generation(
+            system_prompt=optimized_prompt,
+            use_case=project.use_case,
+            requirements=project.requirements,
+            llm_client=llm_client,
+            provider=project.provider,
+            api_key=project.api_key,
+            model_name=project.model_name,
+            thinking_model=thinking_model,
+            max_iterations=2
+        )
+
+        return {
+            "eval_prompt": result.eval_prompt,
+            "eval_criteria": result.eval_criteria,
+            "rationale": result.rationale,
+            "agentic_details": {
+                "failure_modes": result.failure_modes,
+                "eval_dimensions": result.eval_dimensions,
+                "self_test": result.self_test,
+                "iterations": result.iterations,
+                "steps_taken": result.steps_taken
+            }
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse evaluation prompt result: {str(e)}")
+        logger.error(f"Agentic eval generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agentic eval generation failed: {str(e)}")
 
 
 @app.post("/api/step3/refine", response_model=EvaluationPromptResult)
@@ -550,95 +673,70 @@ Please incorporate this feedback and provide an improved evaluation prompt."""
         raise HTTPException(status_code=500, detail=f"Failed to parse refinement: {str(e)}")
 
 
-@app.post("/api/step3/ai-rewrite", response_model=EvaluationPromptResult)
-async def ai_rewrite_eval_prompt(project: ProjectInput, optimized_prompt: str, current_result: dict):
-    """Step 3 AI Rewrite: Automatically refine evaluation prompt without user feedback"""
-    system_prompt = """You are an expert in LLM evaluation. Critically review and further improve an evaluation prompt.
-
-Your job is to:
-1. Identify any missing evaluation criteria
-2. Make the rating scale more precise and actionable
-3. Add specific examples for each rating level if missing
-4. Improve clarity and reduce ambiguity
-5. Ensure comprehensive coverage of edge cases
-
-Return JSON:
-{
-    "eval_prompt": "The further improved evaluation prompt",
-    "eval_criteria": ["Criterion 1", "..."],
-    "rationale": "Explanation of improvements made"
-}"""
-
-    user_message = f"""Please review and further improve this evaluation prompt.
-
-**Use Case:** {project.use_case}
-**Requirements:** {project.requirements}
-
-**System Prompt Being Evaluated:**
-```
-{optimized_prompt}
-```
-
-**CURRENT Evaluation Prompt:**
-```
-{current_result.get("eval_prompt", "")}
-```
-
-Critically review and enhance this evaluation prompt."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.5,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            return EvaluationPromptResult(**data)
-        else:
-            raise ValueError("No JSON found in response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse AI rewrite: {str(e)}")
-
-
 # ============================================================================
 # STEP 4: TEST DATA GENERATION
 # ============================================================================
 
 @app.post("/api/step4/generate-testdata", response_model=TestDataResult)
 async def generate_test_data(project: ProjectInput, optimized_prompt: str, num_cases: int = 10):
-    """Step 4: Generate test data using distribution-based approach"""
-    system_prompt = """You are an expert test data generator. Generate REALISTIC INPUT DATA (user queries/requests).
+    """Step 4: Generate test data using smart, type-aware distribution"""
 
-## Test Case Distribution
-- **60% Positive** (typical, valid use cases)
-- **20% Edge Cases** (boundary conditions, unusual but valid)
-- **10% Negative** (invalid, out-of-scope)
-- **10% Adversarial** (prompt injection, jailbreak attempts)
+    # Analyze the optimized prompt to get type-specific test categories
+    analysis = analyze_prompt(optimized_prompt)
+    analysis_dict = analysis_to_dict(analysis)
+
+    # Build dynamic test categories based on prompt type
+    test_categories_text = build_test_categories_text(analysis)
+
+    # Calculate distribution based on analysis
+    categories = analysis.suggested_test_categories
+    distribution = {}
+    for cat in categories:
+        count = max(1, int(num_cases * cat['percentage'] / 100))
+        distribution[cat['name']] = count
+
+    # Adjust to match total
+    total = sum(distribution.values())
+    if total != num_cases:
+        # Add/remove from largest category
+        largest = max(distribution, key=distribution.get)
+        distribution[largest] += (num_cases - total)
+
+    system_prompt = f"""You are an expert test data generator. Generate REALISTIC INPUT DATA (user queries/requests) tailored to test a specific type of system prompt.
+
+## PROMPT ANALYSIS
+- **Prompt Type:** {analysis.prompt_type.value}
+- **Output Format:** {analysis.dna.output_format or 'unspecified'}
+- **Template Variables:** {', '.join(analysis.dna.template_variables) if analysis.dna.template_variables else 'None'}
+- **Key Terminology:** {', '.join(analysis.dna.key_terminology[:5]) if analysis.dna.key_terminology else 'None'}
+
+## TEST CASE CATEGORIES (use these exact categories)
+{test_categories_text}
+
+## DISTRIBUTION FOR THIS RUN
+{chr(10).join(f'- {cat}: {count} cases' for cat, count in distribution.items())}
+
+## CRITICAL RULES
+1. Generate inputs that match the prompt's expected input format
+2. If template variables exist ({', '.join(analysis.dna.template_variables) if analysis.dna.template_variables else 'none'}), generate values for those variables
+3. Make adversarial cases realistic - actual prompt injection attempts, not obvious markers
+4. Edge cases should test real boundary conditions relevant to THIS prompt type
+5. Each test case must be unique and test something different
 
 ## OUTPUT FORMAT
 Return a JSON object:
-{
+{{
     "test_cases": [
-        {
-            "input": "The actual input text/query",
+        {{
+            "input": "The actual input text/query (or JSON if the prompt expects structured input)",
             "category": "positive|edge_case|negative|adversarial",
-            "test_focus": "What this test case is designed to test",
+            "test_focus": "What specific aspect this test case validates",
             "expected_behavior": "How the system should handle this input"
-        }
+        }}
     ]
-}"""
+}}"""
 
-    user_message = f"""Generate {num_cases} test input cases for this system.
+    user_message = f"""Generate {num_cases} test input cases for this {analysis.prompt_type.value} system.
 
 **Use Case:** {project.use_case}
 
@@ -649,7 +747,11 @@ Return a JSON object:
 {optimized_prompt}
 ```
 
-Generate {num_cases} diverse, realistic INPUT cases following the distribution guidelines."""
+**Distribution to generate:**
+{chr(10).join(f'- {cat}: {count} cases' for cat, count in distribution.items())}
+
+Generate {num_cases} diverse, realistic INPUT cases that properly test a {analysis.prompt_type.value} prompt.
+Ensure each test case is designed to validate a specific aspect of the system's behavior."""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -746,6 +848,102 @@ Generate {num_cases} improved test cases incorporating this feedback."""
             raise ValueError("No JSON found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse refinement: {str(e)}")
+
+
+@app.post("/api/step4/smart-generate-testdata", response_model=TestDataResult)
+async def smart_generate_test_data(project: ProjectInput, optimized_prompt: str = Body(...), num_cases: int = Body(10)):
+    """
+    Step 4 Smart Test Data Generation: Context-aware test input generation.
+
+    This enhanced version:
+    1. Detects the expected input type (call transcript, email, code, etc.)
+    2. Generates realistic, domain-appropriate test inputs
+    3. Creates full, complete inputs (not placeholders)
+    4. Varies scenarios based on the input type
+    """
+
+    # Analyze the prompt to understand its structure
+    analysis = analyze_prompt(optimized_prompt)
+    analysis_dict = analysis_to_dict(analysis)
+
+    # Detect the expected input format
+    input_spec = detect_input_type(optimized_prompt, analysis.dna.template_variables)
+    logger.info(f"Detected input type: {input_spec.input_type.value}, template variable: {input_spec.template_variable}")
+
+    # Get scenario variations for this input type
+    scenarios = get_scenario_variations(input_spec, num_cases)
+
+    # Build the smart generation prompt
+    system_prompt = build_input_generation_prompt(input_spec, optimized_prompt, project.use_case, project.requirements)
+
+    # Build scenario descriptions for the user message
+    scenario_list = "\n".join([
+        f"{i+1}. [{s['category'].upper()}] {s['scenario']}: {s['description']}"
+        for i, s in enumerate(scenarios)
+    ])
+
+    user_message = f"""Generate {num_cases} COMPLETE, REALISTIC test inputs for this system prompt.
+
+**Input Type Detected:** {input_spec.input_type.value.replace('_', ' ').title()}
+**Template Variable:** {{{{{input_spec.template_variable}}}}}
+**Domain Context:** {input_spec.domain_context or 'General'}
+
+**System Prompt Being Tested:**
+```
+{optimized_prompt}
+```
+
+**Scenarios to Generate (one test case per scenario):**
+{scenario_list}
+
+## CRITICAL REQUIREMENTS:
+1. Generate FULL, COMPLETE inputs - NOT summaries or placeholders
+2. For {input_spec.input_type.value.replace('_', ' ')}, include ALL necessary details
+3. Each input should be {input_spec.expected_length} length (200-800 words for transcripts/documents)
+4. Make inputs REALISTIC with specific names, dates, numbers, and details
+5. Vary the content significantly between test cases
+
+Return JSON with complete test cases."""
+
+    result = await llm_client.chat(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        provider=project.provider,
+        api_key=project.api_key,
+        model_name=project.model_name,
+        temperature=0.8,
+        max_tokens=16000  # More tokens for full transcripts/documents
+    )
+
+    if result["error"]:
+        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
+
+    try:
+        json_match = re.search(r'\{[\s\S]*\}', result["output"])
+        if json_match:
+            data = json.loads(json_match.group())
+            test_cases = data.get("test_cases", [])
+            categories = {}
+            for tc in test_cases:
+                cat = tc.get("category", "unknown")
+                categories[cat] = categories.get(cat, 0) + 1
+
+            return TestDataResult(
+                test_cases=test_cases,
+                count=len(test_cases),
+                categories=categories,
+                metadata={
+                    "input_type": input_spec.input_type.value,
+                    "template_variable": input_spec.template_variable,
+                    "domain_context": input_spec.domain_context,
+                    "expected_length": input_spec.expected_length
+                }
+            )
+        else:
+            raise ValueError("No JSON found in response")
+    except Exception as e:
+        logger.error(f"Failed to parse smart test data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse test data result: {str(e)}")
 
 
 # ============================================================================

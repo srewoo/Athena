@@ -14,9 +14,80 @@ import logging
 import project_storage
 from models import SavedProject, ProjectListItem
 from llm_client import get_llm_client
+from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
+from prompt_analyzer import analyze_prompt as analyze_prompt_dna
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
+
+def _get_input_type_instructions(input_type: InputType) -> str:
+    """Get detailed instructions for generating specific input types"""
+    instructions = {
+        InputType.CALL_TRANSCRIPT: """Generate COMPLETE call transcripts with:
+- Multiple speakers with names (e.g., "John:", "Sarah:", "Manager:")
+- Natural conversation flow with greetings, main discussion, and wrap-up
+- Timestamps where appropriate (e.g., [00:01:23])
+- Realistic details: specific numbers, dates, project names, action items
+- Natural speech patterns: filler words, interruptions, acknowledgments
+- Length: 200-600 words per transcript
+
+Example format:
+[00:00:05] Sarah: Hi everyone, thanks for joining. Let's get started with the Q3 review.
+[00:00:12] John: Thanks Sarah. I wanted to discuss the customer feedback we received...
+""",
+
+        InputType.CONVERSATION: """Generate REALISTIC chat/message conversations with:
+- Multiple participants with distinct styles
+- Natural chat patterns: short messages, abbreviations, occasional typos
+- Timestamps between messages
+- Topic flow and context switches
+- Emojis where natural""",
+
+        InputType.EMAIL: """Generate COMPLETE emails with:
+- Subject line
+- From/To headers
+- Professional greeting and signature
+- Clear body content
+- References to attachments if relevant""",
+
+        InputType.CODE: """Generate REALISTIC code samples with:
+- Proper syntax for the language
+- Meaningful variable/function names
+- Comments where appropriate
+- Varying complexity and quality""",
+
+        InputType.DOCUMENT: """Generate COMPLETE documents with:
+- Proper structure (sections, headings)
+- Professional language
+- Specific details and data
+- Appropriate length for the document type""",
+
+        InputType.TICKET: """Generate REALISTIC support tickets with:
+- Clear issue description
+- Steps to reproduce (if applicable)
+- Environment/system info
+- Varying levels of detail and urgency""",
+
+        InputType.REVIEW: """Generate REALISTIC reviews with:
+- Specific feedback points
+- Emotional tone variation
+- Rating references
+- Varying length and detail""",
+
+        InputType.SIMPLE_TEXT: """Generate diverse text inputs with:
+- Varying length and complexity
+- Different tones and styles
+- Realistic content for the use case""",
+
+        InputType.MULTI_PARAGRAPH: """Generate complete multi-paragraph content with:
+- Clear structure and flow
+- Detailed information
+- Appropriate length (300-800 words)""",
+    }
+
+    return instructions.get(input_type, """Generate realistic inputs appropriate for the detected format.
+Include specific details, vary length and complexity.""")
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -81,15 +152,15 @@ def sanitize_for_eval(text: str, max_length: int = 10000) -> str:
     if not text:
         return ""
 
-    # Truncate to prevent excessive length
-    if len(text) > max_length:
-        text = text[:max_length] + "... [truncated]"
-
-    # Escape XML-like tags that could break delimiters
+    # Escape XML-like tags that could break delimiters BEFORE truncation
     # Replace < and > with escaped versions in content
     text = text.replace("</", "⟨/")  # Using Unicode look-alike for safety
     text = text.replace("<", "⟨")
     text = text.replace(">", "⟩")
+
+    # Truncate to prevent excessive length AFTER escaping
+    if len(text) > max_length:
+        text = text[:max_length] + "... [truncated]"
 
     # Detect and flag potential injection attempts (for logging)
     injection_patterns = [
@@ -892,6 +963,39 @@ async def get_version(project_id: str, version_number: int):
     raise HTTPException(status_code=404, detail="Version not found")
 
 
+@router.delete("/{project_id}/versions/{version_number}")
+async def delete_version(project_id: str, version_number: int):
+    """Delete a specific version from the project"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.system_prompt_versions:
+        raise HTTPException(status_code=404, detail="No versions found")
+
+    # Don't allow deleting if only one version exists
+    if len(project.system_prompt_versions) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the only version")
+
+    # Find and remove the version
+    original_length = len(project.system_prompt_versions)
+    project.system_prompt_versions = [
+        v for v in project.system_prompt_versions
+        if v["version"] != version_number
+    ]
+
+    if len(project.system_prompt_versions) == original_length:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # Save updated project
+    project_storage.save_project(project)
+
+    return {
+        "message": f"Version {version_number} deleted successfully",
+        "remaining_versions": len(project.system_prompt_versions)
+    }
+
+
 # ============================================================================
 # REWRITE ENDPOINTS
 # ============================================================================
@@ -1133,7 +1237,12 @@ class GenerateDatasetRequest(BaseModel):
 
 @router.post("/{project_id}/dataset/generate")
 async def generate_dataset(project_id: str, request: GenerateDatasetRequest = None):
-    """Generate test dataset using LLM based on specific prompt version"""
+    """
+    Generate test dataset using smart, context-aware generation.
+
+    Automatically detects input format from the system prompt (e.g., call transcripts,
+    emails, code) and generates REALISTIC, COMPLETE test inputs.
+    """
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1146,10 +1255,9 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
     # Get the specific version or latest
     if project.system_prompt_versions:
         if request and request.version is not None:
-            # Find specific version
             version_data = next(
                 (v for v in project.system_prompt_versions if v.get("version") == request.version),
-                project.system_prompt_versions[-1]  # Fallback to latest
+                project.system_prompt_versions[-1]
             )
         else:
             version_data = project.system_prompt_versions[-1]
@@ -1179,7 +1287,6 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
             }
             test_cases.append(test_case)
 
-        # Build and persist dataset
         dataset_obj = {
             "test_cases": test_cases,
             "sample_count": len(test_cases),
@@ -1192,35 +1299,76 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
         project.test_cases = test_cases
         project.updated_at = datetime.now()
         project_storage.save_project(project)
-
         return dataset_obj
 
-    # Use LLM to generate realistic test cases
-    system_prompt = f"""You are a QA expert generating test cases for an AI system.
-Generate {num_examples} diverse test inputs that will thoroughly test the system.
+    # ========== SMART CONTEXT-AWARE GENERATION ==========
 
-Distribution:
-- 60% positive/typical cases (category: "positive")
-- 20% edge cases/boundary conditions (category: "edge_case")
-- 10% negative/inappropriate inputs (category: "negative")
-- 10% adversarial/injection attempts (category: "adversarial")
+    # Analyze the system prompt to understand expected input format
+    analysis = analyze_prompt_dna(current_prompt)
+    input_spec = detect_input_type(current_prompt, analysis.dna.template_variables)
 
-Return a JSON array with objects containing:
-- "input": the test input string
-- "expected_behavior": what the system should do
-- "category": one of positive/edge_case/negative/adversarial
+    logger.info(f"Smart generation - Detected input type: {input_spec.input_type.value}, "
+                f"template var: {input_spec.template_variable}, domain: {input_spec.domain_context}")
 
-Return ONLY valid JSON array, no other text."""
+    # Get scenario variations for comprehensive coverage
+    scenarios = get_scenario_variations(input_spec, num_examples)
 
-    user_message = f"""Generate test cases for:
+    # Build context-aware generation prompt
+    use_case = project.use_case or "Not specified"
+    requirements = ", ".join(project.key_requirements) if project.key_requirements else "Not specified"
 
-Use Case: {project.use_case}
-Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
+    # Build scenario descriptions
+    scenario_list = "\n".join([
+        f"{i+1}. [{s['category'].upper()}] {s['scenario']}: {s['description']}"
+        for i, s in enumerate(scenarios)
+    ])
 
-System Prompt:
+    system_prompt = f"""You are an expert test data generator creating REALISTIC test inputs.
+
+## INPUT TYPE DETECTED: {input_spec.input_type.value.replace('_', ' ').title()}
+
+## CONTEXT
+- **Template Variable:** {{{{{input_spec.template_variable}}}}}
+- **Domain:** {input_spec.domain_context or 'General'}
+- **Use Case:** {use_case}
+
+## CRITICAL INSTRUCTIONS FOR {input_spec.input_type.value.upper()}
+{_get_input_type_instructions(input_spec.input_type)}
+
+## OUTPUT FORMAT
+Return a JSON object with test_cases array:
+{{
+    "test_cases": [
+        {{
+            "input": "THE COMPLETE, REALISTIC INPUT - NOT A SUMMARY OR PLACEHOLDER",
+            "category": "positive|edge_case|negative|adversarial",
+            "test_focus": "What this test case validates",
+            "expected_behavior": "How the system should handle this"
+        }}
+    ]
+}}
+
+## RULES
+1. Generate COMPLETE inputs - if it's a call transcript, write the FULL conversation
+2. Each input should be realistic with specific names, dates, numbers
+3. Vary length and complexity across test cases
+4. Include natural elements (filler words for transcripts, typos for chats, etc.)
+5. Make edge cases and adversarial inputs subtle and realistic"""
+
+    user_message = f"""Generate {num_examples} COMPLETE, REALISTIC test inputs for this system.
+
+**System Prompt Being Tested:**
+```
 {current_prompt}
+```
 
-Generate {num_examples} diverse test inputs."""
+**Use Case:** {use_case}
+**Requirements:** {requirements}
+
+**Scenarios to Cover (generate one test case per scenario):**
+{scenario_list}
+
+Generate {num_examples} FULL, REALISTIC inputs. For {input_spec.input_type.value.replace('_', ' ')}, each input should be complete and detailed (200-800 words for transcripts/documents)."""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -1229,7 +1377,7 @@ Generate {num_examples} diverse test inputs."""
         api_key=api_key,
         model_name=model_name,
         temperature=0.8,
-        max_tokens=8000
+        max_tokens=16000  # More tokens for complete inputs
     )
 
     if result.get("error"):
@@ -1237,28 +1385,49 @@ Generate {num_examples} diverse test inputs."""
 
     # Parse JSON from LLM response
     try:
-        output = result.get("output", "[]").strip()
+        output = result.get("output", "{}").strip()
+
         # Handle markdown code blocks
         if "```json" in output:
             output = output.split("```json")[1].split("```")[0]
         elif "```" in output:
             output = output.split("```")[1].split("```")[0]
 
-        generated_cases = json.loads(output)
+        # Try to find JSON object in response
+        json_match = re.search(r'\{[\s\S]*\}', output)
+        if json_match:
+            parsed = json.loads(json_match.group())
+            # Handle both formats: {"test_cases": [...]} or [...]
+            if isinstance(parsed, dict) and "test_cases" in parsed:
+                generated_cases = parsed["test_cases"]
+            elif isinstance(parsed, list):
+                generated_cases = parsed
+            else:
+                generated_cases = []
+        else:
+            # Try parsing as array
+            generated_cases = json.loads(output)
 
         test_cases = []
+        categories_count = {}
         for i, tc in enumerate(generated_cases[:num_examples]):
+            category = tc.get("category", categories[i % len(categories)])
             test_case = {
                 "id": str(uuid.uuid4()),
                 "input": tc.get("input", f"Test input {i+1}"),
                 "expected_behavior": tc.get("expected_behavior", "Should respond appropriately"),
-                "category": tc.get("category", categories[i % len(categories)]),
+                "category": category,
+                "test_focus": tc.get("test_focus", ""),
                 "created_at": datetime.now().isoformat()
             }
             test_cases.append(test_case)
-    except (json.JSONDecodeError, KeyError):
+            categories_count[category] = categories_count.get(category, 0) + 1
+
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Failed to parse LLM response, using fallback: {e}")
         # Fallback to template if parsing fails
         test_cases = []
+        categories_count = {}
         for i in range(num_examples):
             category = categories[i % len(categories)]
             test_case = {
@@ -1266,18 +1435,26 @@ Generate {num_examples} diverse test inputs."""
                 "input": f"Test input {i+1} for {project.use_case}",
                 "expected_behavior": f"Should handle {category} case appropriately",
                 "category": category,
+                "test_focus": "",
                 "created_at": datetime.now().isoformat()
             }
             test_cases.append(test_case)
+            categories_count[category] = categories_count.get(category, 0) + 1
 
-    # Build dataset object
+    # Build dataset object with smart generation metadata
     dataset_obj = {
         "test_cases": test_cases,
         "sample_count": len(test_cases),
-        "preview": test_cases,
+        "preview": test_cases[:10] if len(test_cases) > 10 else test_cases,
         "count": len(test_cases),
-        "categories": {cat: sum(1 for tc in test_cases if tc["category"] == cat) for cat in categories},
-        "generated_at": datetime.now().isoformat()
+        "categories": categories_count,
+        "generated_at": datetime.now().isoformat(),
+        "metadata": {
+            "input_type": input_spec.input_type.value,
+            "template_variable": input_spec.template_variable,
+            "domain_context": input_spec.domain_context,
+            "generation_type": "smart"
+        }
     }
 
     # Persist dataset to project file
@@ -1286,7 +1463,6 @@ Generate {num_examples} diverse test inputs."""
     project.updated_at = datetime.now()
     project_storage.save_project(project)
 
-    # Return format expected by frontend
     return dataset_obj
 
 
@@ -1294,6 +1470,168 @@ Generate {num_examples} diverse test inputs."""
 async def generate_dataset_stream(project_id: str, request: GenerateDatasetRequest = None):
     """Generate test dataset (streaming not implemented, falls back to regular)"""
     return await generate_dataset(project_id, request)
+
+
+@router.post("/{project_id}/dataset/smart-generate")
+async def smart_generate_dataset(project_id: str, request: GenerateDatasetRequest = None):
+    """
+    Smart test dataset generation - Creates realistic, context-aware test inputs.
+
+    For prompts expecting specific input formats (call transcripts, emails, code, etc.),
+    this generates COMPLETE, REALISTIC test inputs rather than short placeholders.
+
+    Features:
+    - Detects expected input type from prompt template variables
+    - Generates full call transcripts, emails, documents, etc.
+    - Creates domain-appropriate test scenarios
+    - Varies test cases to cover different situations
+    """
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Hard limit of 100 test cases
+    requested_count = request.sample_count or request.num_examples if request else 10
+    num_examples = min(requested_count, 100)
+
+    # Get the specific version or latest
+    if project.system_prompt_versions:
+        if request and request.version is not None:
+            version_data = next(
+                (v for v in project.system_prompt_versions if v.get("version") == request.version),
+                project.system_prompt_versions[-1]
+            )
+        else:
+            version_data = project.system_prompt_versions[-1]
+        current_prompt = version_data.get("prompt_text", "")
+    else:
+        current_prompt = ""
+
+    if not current_prompt:
+        raise HTTPException(status_code=400, detail="No system prompt found in project")
+
+    # Get LLM settings
+    settings = get_settings()
+    provider = settings.get("provider", "openai")
+    api_key = settings.get("api_key", "")
+    model_name = settings.get("model_name")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="LLM API key required for smart generation")
+
+    # Analyze the prompt structure
+    analysis = analyze_prompt(current_prompt)
+
+    # Detect input format from prompt
+    input_spec = detect_input_type(current_prompt, analysis.dna.template_variables)
+    logger.info(f"Smart generate - Detected input type: {input_spec.input_type.value}, template var: {input_spec.template_variable}")
+
+    # Get scenario variations
+    scenarios = get_scenario_variations(input_spec, num_examples)
+
+    # Build the smart generation prompt
+    use_case = project.use_case or "Not specified"
+    requirements = ", ".join(project.key_requirements) if project.key_requirements else "Not specified"
+    system_prompt = build_input_generation_prompt(input_spec, current_prompt, use_case, requirements)
+
+    # Build scenario list for user message
+    scenario_list = "\n".join([
+        f"{i+1}. [{s['category'].upper()}] {s['scenario']}: {s['description']}"
+        for i, s in enumerate(scenarios)
+    ])
+
+    user_message = f"""Generate {num_examples} COMPLETE, REALISTIC test inputs.
+
+**Input Type Detected:** {input_spec.input_type.value.replace('_', ' ').title()}
+**Template Variable:** {{{{{input_spec.template_variable}}}}}
+**Domain Context:** {input_spec.domain_context or 'General'}
+
+**System Prompt Being Tested:**
+```
+{current_prompt}
+```
+
+**Scenarios to Generate:**
+{scenario_list}
+
+## CRITICAL REQUIREMENTS:
+1. Generate FULL, COMPLETE inputs - NOT summaries or placeholders
+2. For {input_spec.input_type.value.replace('_', ' ')}, include ALL necessary details
+3. Each input should be {input_spec.expected_length} length
+4. Make inputs REALISTIC with specific names, dates, numbers
+5. Vary content significantly between test cases
+
+Return JSON with test_cases array. Each must have: input, expected_behavior, category, test_focus."""
+
+    result = await llm_client.chat(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name,
+        temperature=0.8,
+        max_tokens=16000  # More tokens for full transcripts/documents
+    )
+
+    if result["error"]:
+        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
+
+    try:
+        json_match = re.search(r'\{[\s\S]*\}', result["output"])
+        if json_match:
+            data = json.loads(json_match.group())
+            raw_test_cases = data.get("test_cases", [])
+
+            # Process and add IDs
+            test_cases = []
+            categories_count = {}
+            for tc in raw_test_cases:
+                category = tc.get("category", "positive")
+                test_case = {
+                    "id": str(uuid.uuid4()),
+                    "input": tc.get("input", ""),
+                    "expected_behavior": tc.get("expected_behavior", ""),
+                    "category": category,
+                    "test_focus": tc.get("test_focus", ""),
+                    "variation": tc.get("variation", ""),
+                    "created_at": datetime.now().isoformat()
+                }
+                test_cases.append(test_case)
+                categories_count[category] = categories_count.get(category, 0) + 1
+
+            # Build dataset object
+            dataset_obj = {
+                "test_cases": test_cases,
+                "sample_count": len(test_cases),
+                "preview": test_cases[:10],
+                "count": len(test_cases),
+                "categories": categories_count,
+                "generated_at": datetime.now().isoformat(),
+                "metadata": {
+                    "input_type": input_spec.input_type.value,
+                    "template_variable": input_spec.template_variable,
+                    "domain_context": input_spec.domain_context,
+                    "expected_length": input_spec.expected_length,
+                    "generation_type": "smart"
+                }
+            }
+
+            # Save to project
+            project.dataset = dataset_obj
+            project.test_cases = test_cases
+            project.updated_at = datetime.now()
+            project_storage.save_project(project)
+
+            return dataset_obj
+        else:
+            raise ValueError("No JSON found in LLM response")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse smart test data JSON: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse test data: {str(e)}")
+    except Exception as e:
+        logger.error(f"Smart generation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Smart generation failed: {str(e)}")
 
 
 @router.get("/{project_id}/dataset/export")
@@ -2120,7 +2458,11 @@ async def delete_calibration_example(project_id: str, example_id: str):
         raise HTTPException(status_code=404, detail="No calibration examples found")
 
     original_len = len(project.calibration_examples)
-    project.calibration_examples = [e for e in project.calibration_examples if e.get("id") != example_id]
+    # Handle both dict and Pydantic model
+    project.calibration_examples = [
+        e for e in project.calibration_examples 
+        if (e.get("id") if hasattr(e, 'get') else getattr(e, 'id', None)) != example_id
+    ]
 
     if len(project.calibration_examples) == original_len:
         raise HTTPException(status_code=404, detail="Calibration example not found")
@@ -2239,11 +2581,26 @@ def build_eval_prompt_with_calibration(base_eval_prompt: str, calibration_exampl
     examples_section = "\n<calibration_examples>\nHere are examples showing how to score responses:\n\n"
 
     for i, ex in enumerate(calibration_examples[:5], 1):  # Limit to 5 examples
-        examples_section += f"""Example {i} (Score: {ex.get('score', 'N/A')} - {ex.get('category', 'general')}):
-Input: {ex.get('input', '')[:200]}
-Output: {ex.get('output', '')[:300]}
-Correct Score: {ex.get('score', 'N/A')}
-Reasoning: {ex.get('reasoning', '')}
+        # Handle both dict and Pydantic model
+        if hasattr(ex, 'model_dump'):
+            ex_dict = ex.model_dump()
+        elif hasattr(ex, 'get'):
+            ex_dict = ex
+        else:
+            # If it's an object with attributes
+            ex_dict = {
+                'score': getattr(ex, 'score', 'N/A'),
+                'category': getattr(ex, 'category', 'general'),
+                'input': getattr(ex, 'input', ''),
+                'output': getattr(ex, 'output', ''),
+                'reasoning': getattr(ex, 'reasoning', '')
+            }
+        
+        examples_section += f"""Example {i} (Score: {ex_dict.get('score', 'N/A')} - {ex_dict.get('category', 'general')}):
+Input: {ex_dict.get('input', '')[:200]}
+Output: {ex_dict.get('output', '')[:300]}
+Correct Score: {ex_dict.get('score', 'N/A')}
+Reasoning: {ex_dict.get('reasoning', '')}
 
 """
 
@@ -2282,8 +2639,12 @@ async def get_human_validations(project_id: str):
 
     # Calculate agreement metrics
     if validations:
-        agreements = sum(1 for v in validations if v.get("agrees_with_llm", False))
-        avg_diff = sum(abs(v.get("score_difference", 0)) for v in validations) / len(validations)
+        def get_val(v, key, default):
+            """Helper to get value from dict or Pydantic model"""
+            return v.get(key, default) if hasattr(v, 'get') else getattr(v, key, default)
+        
+        agreements = sum(1 for v in validations if get_val(v, "agrees_with_llm", False))
+        avg_diff = sum(abs(get_val(v, "score_difference", 0)) for v in validations) / len(validations)
     else:
         agreements = 0
         avg_diff = 0
@@ -2353,7 +2714,11 @@ async def get_pending_validations(project_id: str, run_id: Optional[str] = None)
 
     validated_ids = set()
     if project.human_validations:
-        validated_ids = {v.get("result_id") for v in project.human_validations}
+        # Handle both dict and Pydantic model
+        validated_ids = {
+            v.get("result_id") if hasattr(v, 'get') else getattr(v, 'result_id', None)
+            for v in project.human_validations
+        }
 
     pending = []
     runs_to_check = []
@@ -2399,12 +2764,25 @@ async def convert_validation_to_calibration(project_id: str, data: dict):
     validation = None
     if project.human_validations:
         for v in project.human_validations:
-            if v.get("id") == validation_id:
+            # Handle both dict and Pydantic model
+            v_id = v.get("id") if hasattr(v, 'get') else getattr(v, 'id', None)
+            if v_id == validation_id:
                 validation = v
                 break
 
     if not validation:
         raise HTTPException(status_code=404, detail="Validation not found")
+    
+    # Convert to dict if Pydantic model
+    if hasattr(validation, 'model_dump'):
+        validation = validation.model_dump()
+    elif not hasattr(validation, 'get'):
+        validation = {
+            'id': getattr(validation, 'id', None),
+            'run_id': getattr(validation, 'run_id', None),
+            'result_id': getattr(validation, 'result_id', None),
+            'human_score': getattr(validation, 'human_score', None)
+        }
 
     # Find the original result to get input/output
     test_run = get_test_run_from_project(project, validation.get("run_id"))
@@ -2600,13 +2978,28 @@ async def run_ab_test(project_id: str, test_id: str):
     test_index = -1
     if project.ab_tests:
         for i, t in enumerate(project.ab_tests):
-            if t.get("id") == test_id:
+            # Handle both dict and Pydantic model
+            t_id = t.get("id") if hasattr(t, 'get') else getattr(t, 'id', None)
+            if t_id == test_id:
                 ab_test = t
                 test_index = i
                 break
 
     if not ab_test:
         raise HTTPException(status_code=404, detail="A/B test not found")
+    
+    # Convert to dict if Pydantic model
+    if hasattr(ab_test, 'model_dump'):
+        ab_test = ab_test.model_dump()
+    elif not hasattr(ab_test, 'get'):
+        ab_test = {
+            'id': getattr(ab_test, 'id', test_id),
+            'version_a': getattr(ab_test, 'version_a', 1),
+            'version_b': getattr(ab_test, 'version_b', 1),
+            'sample_size': getattr(ab_test, 'sample_size', 30),
+            'confidence_level': getattr(ab_test, 'confidence_level', 0.95),
+            'status': getattr(ab_test, 'status', 'created')
+        }
 
     # Get test cases
     test_cases = project.test_cases or []
@@ -2783,12 +3176,20 @@ async def get_ab_test_results(project_id: str, test_id: str):
     ab_test = None
     if project.ab_tests:
         for t in project.ab_tests:
-            if t.get("id") == test_id:
+            # Handle both dict and Pydantic model
+            t_id = t.get("id") if hasattr(t, 'get') else getattr(t, 'id', None)
+            if t_id == test_id:
                 ab_test = t
                 break
 
     if not ab_test:
         raise HTTPException(status_code=404, detail="A/B test not found")
+    
+    # Convert to dict if Pydantic model
+    if hasattr(ab_test, 'model_dump'):
+        ab_test = ab_test.model_dump()
+    elif not hasattr(ab_test, 'get'):
+        ab_test = {k: getattr(ab_test, k) for k in ['id', 'name', 'version_a', 'version_b', 'status'] if hasattr(ab_test, k)}
 
     return ab_test
 
@@ -2804,7 +3205,11 @@ async def delete_ab_test(project_id: str, test_id: str):
         raise HTTPException(status_code=404, detail="No A/B tests found")
 
     original_len = len(project.ab_tests)
-    project.ab_tests = [t for t in project.ab_tests if t.get("id") != test_id]
+    # Handle both dict and Pydantic model
+    project.ab_tests = [
+        t for t in project.ab_tests 
+        if (t.get("id") if hasattr(t, 'get') else getattr(t, 'id', None)) != test_id
+    ]
 
     if len(project.ab_tests) == original_len:
         raise HTTPException(status_code=404, detail="A/B test not found")

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -49,7 +49,8 @@ const PromptOptimizer = () => {
   const [currentVersion, setCurrentVersion] = useState(null);
   const [versionHistory, setVersionHistory] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isRewriting, setIsRewriting] = useState(false);
+  const [isAgenticRewriting, setIsAgenticRewriting] = useState(false);
+  const [agenticDetails, setAgenticDetails] = useState(null);
   const [showPromptFeedback, setShowPromptFeedback] = useState(false);
   const [promptFeedback, setPromptFeedback] = useState("");
   const [isRefiningPrompt, setIsRefiningPrompt] = useState(false);
@@ -58,7 +59,8 @@ const PromptOptimizer = () => {
   // Section 3: Eval Prompt
   const [evalPrompt, setEvalPrompt] = useState("");
   const [evalRationale, setEvalRationale] = useState("");
-  const [isGeneratingEval, setIsGeneratingEval] = useState(false);
+  const [isAgenticGeneratingEval, setIsAgenticGeneratingEval] = useState(false);
+  const [agenticEvalDetails, setAgenticEvalDetails] = useState(null);
   const [showEvalFeedback, setShowEvalFeedback] = useState(false);
   const [evalFeedback, setEvalFeedback] = useState("");
   const [isRefiningEval, setIsRefiningEval] = useState(false);
@@ -161,6 +163,10 @@ const PromptOptimizer = () => {
     claude: ["claude-sonnet-4-5-20250929", "claude-3-7-sonnet-20250219"],
     gemini: ["gemini-2.5-pro", "gemini-2.5-flash"]
   };
+
+  // Version comparison state
+  const [selectedVersionsForCompare, setSelectedVersionsForCompare] = useState([]);
+  const [versionCompareModalOpen, setVersionCompareModalOpen] = useState(false);
 
   // Load existing settings on mount - from localStorage first, then sync to backend
   useEffect(() => {
@@ -578,6 +584,7 @@ const PromptOptimizer = () => {
       const versionToUpdate = versionOverride || currentVersion;
       if (versionToUpdate) {
         const evaluation = {
+          overall_score: results.overall_score || 0,
           requirements_alignment: results.requirements_alignment_score || 0,
           best_practices_score: results.best_practices_score || 0,
           suggestions: results.suggestions || [],
@@ -611,74 +618,85 @@ const PromptOptimizer = () => {
     }
   };
 
-  const handleRewrite = async () => {
+  const handleAgenticRewrite = async () => {
     if (!projectId || !currentVersion) return;
 
-    // Check if we have analysis results with suggestions to incorporate
-    if (!analysisResults || !analysisResults.suggestions || analysisResults.suggestions.length === 0) {
-      toast({
-        title: "No Suggestions Available",
-        description: "Please run Re-Analyze first to get suggestions to incorporate",
-        variant: "destructive"
-      });
-      return;
-    }
+    setIsAgenticRewriting(true);
+    setAgenticDetails(null);
 
-    setIsRewriting(true);
     try {
-      // Build focus areas from the analysis suggestions
-      const focusAreas = analysisResults.suggestions.slice(0, 5).map(sug => {
-        // Extract the suggestion text (remove priority prefix if present)
-        if (typeof sug === 'string') {
-          return sug;
-        }
-        return sug.suggestion || sug.text || String(sug);
-      });
+      // Build analysis context from Re-Analyze results
+      const analysisContext = {
+        score: analysisResults?.score || 0,
+        suggestions: analysisResults?.suggestions || [],
+        missing_requirements: analysisResults?.requirements_gaps || [],
+        best_practices_gaps: analysisResults?.best_practices_gaps || [],
+        categories: analysisResults?.categories || {}
+      };
 
-      // Include requirements gaps as additional focus areas
-      if (analysisResults.requirements_gaps && analysisResults.requirements_gaps.length > 0) {
-        analysisResults.requirements_gaps.slice(0, 3).forEach(gap => {
-          focusAreas.push(`Address requirement gap: ${gap}`);
-        });
-      }
-
-      const response = await fetch(`${API}/rewrite`, {
+      const response = await fetch(`${API}/step2/agentic-rewrite`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt_text: currentVersion.prompt_text,
-          focus_areas: focusAreas,
-          use_case: useCase,  // Pass the original use case
-          key_requirements: keyRequirements  // Pass the key requirements
+          project: {
+            provider: llmProvider,
+            api_key: apiKey,
+            model_name: llmModel,
+            project_name: projectName,
+            use_case: useCase,
+            requirements: Array.isArray(keyRequirements) ? keyRequirements.join("\n") : keyRequirements,
+            initial_prompt: currentVersion.prompt_text
+          },
+          current_result: {
+            optimized_prompt: currentVersion.prompt_text,
+            score: analysisResults?.score || 0,
+            analysis_context: analysisContext
+          },
+          use_thinking_model: true
         })
       });
 
-      if (!response.ok) throw new Error("Failed to rewrite prompt");
+      if (!response.ok) {
+        const errorData = await response.json();
+        // Handle FastAPI validation errors (array) and regular errors (string)
+        const errorMessage = Array.isArray(errorData.detail)
+          ? errorData.detail.map(e => e.msg || e.message || JSON.stringify(e)).join(', ')
+          : (errorData.detail || "Agentic rewrite failed");
+        throw new Error(errorMessage);
+      }
 
       const result = await response.json();
 
-      // Add new version with the changes made
-      // Backend returns "rewritten_prompt", handle both for compatibility
-      const newPrompt = result.rewritten_prompt || result.improved_prompt;
-      if (!newPrompt) {
-        throw new Error("No improved prompt returned from server");
-      }
-      const changesDescription = result.changes_made ? result.changes_made.join("; ") : "AI improvements applied";
-      await addVersion(newPrompt, changesDescription);
+      // Store agentic details for display
+      setAgenticDetails(result.agentic_details);
 
-      toast({
-        title: "Suggestions Incorporated",
-        description: `Applied ${focusAreas.length} improvements. New version is being analyzed...`
-      });
+      if (result.no_change) {
+        toast({
+          title: "No Changes Needed",
+          description: result.analysis || "Prompt is already well-optimized."
+        });
+      } else {
+        // Add new version with the improved prompt
+        const changesDescription = result.improvements?.length > 0
+          ? `Agentic improvements: ${result.improvements.join("; ")}`
+          : "Agentic optimization applied";
+        await addVersion(result.optimized_prompt, changesDescription);
+
+        const qualityDelta = result.agentic_details?.quality_delta || 0;
+        toast({
+          title: "Agentic Rewrite Complete",
+          description: `Quality ${qualityDelta >= 0 ? 'improved' : 'changed'} by ${qualityDelta.toFixed(1)} points after ${result.agentic_details?.iterations || 0} iterations.`
+        });
+      }
 
     } catch (error) {
       toast({
-        title: "Error",
+        title: "Agentic Rewrite Error",
         description: error.message,
         variant: "destructive"
       });
     } finally {
-      setIsRewriting(false);
+      setIsAgenticRewriting(false);
     }
   };
 
@@ -774,29 +792,64 @@ const PromptOptimizer = () => {
     }
   };
 
-  const handleGenerateEvalPrompt = async () => {
-    if (!projectId) return;
+  const handleAgenticGenerateEvalPrompt = async () => {
+    if (!projectId || !currentVersion) return;
 
-    setIsGeneratingEval(true);
+    setIsAgenticGeneratingEval(true);
+    setAgenticEvalDetails(null);
+
     try {
-      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/generate`, {
+      const response = await fetch(`${API}/step3/agentic-generate-eval`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({})
+        body: JSON.stringify({
+          project: {
+            provider: llmProvider,
+            api_key: apiKey,
+            model_name: llmModel,
+            project_name: projectName,
+            use_case: useCase,
+            requirements: Array.isArray(keyRequirements) ? keyRequirements.join("\n") : keyRequirements,
+            initial_prompt: currentVersion.prompt_text
+          },
+          optimized_prompt: currentVersion.prompt_text,
+          use_thinking_model: true
+        })
       });
 
-      if (!response.ok) throw new Error("Failed to generate eval prompt");
+      if (!response.ok) {
+        const errorData = await response.json();
+        // Handle FastAPI validation errors (array) and regular errors (string)
+        const errorMessage = Array.isArray(errorData.detail)
+          ? errorData.detail.map(e => e.msg || e.message || JSON.stringify(e)).join(', ')
+          : (errorData.detail || "Agentic eval generation failed");
+        throw new Error(errorMessage);
+      }
 
       const result = await response.json();
+
       setEvalPrompt(result.eval_prompt);
       setEvalRationale(result.rationale);
+      setAgenticEvalDetails(result.agentic_details);
 
-      toast({
-        title: "Eval Prompt Generated",
-        description: "Your evaluation prompt is ready"
+      // Save to project
+      await fetch(`${API}/projects/${projectId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eval_prompt: result.eval_prompt,
+          eval_rationale: result.rationale
+        })
       });
 
-      // Keep evalPrompt section expanded to show the generated prompt
+      const failureModes = result.agentic_details?.failure_modes?.length || 0;
+      const confidence = result.agentic_details?.self_test?.confidence_score || 0;
+
+      toast({
+        title: "Agentic Eval Prompt Generated",
+        description: `Identified ${failureModes} failure modes. Coverage confidence: ${(confidence * 100).toFixed(0)}%`
+      });
+
       setExpandedSections(prev => ({
         ...prev,
         evalPrompt: true
@@ -804,12 +857,12 @@ const PromptOptimizer = () => {
 
     } catch (error) {
       toast({
-        title: "Error",
+        title: "Agentic Eval Generation Error",
         description: error.message,
         variant: "destructive"
       });
     } finally {
-      setIsGeneratingEval(false);
+      setIsAgenticGeneratingEval(false);
     }
   };
 
@@ -2307,8 +2360,23 @@ const PromptOptimizer = () => {
                     >
                       {isAnalyzing ? "Analyzing..." : "Re-Analyze"}
                     </Button>
-                    <Button onClick={handleRewrite} disabled={isRewriting}>
-                      {isRewriting ? "Rewriting..." : <><RefreshCw className="w-4 h-4 mr-2" />AI Rewrite</>}
+                    <Button
+                      onClick={handleAgenticRewrite}
+                      disabled={isAgenticRewriting}
+                      className="bg-purple-600 hover:bg-purple-700 text-white"
+                      title="Multi-step agentic rewrite with thinking model"
+                    >
+                      {isAgenticRewriting ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                          Rewriting...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4 mr-2" />
+                          AI Rewrite
+                        </>
+                      )}
                     </Button>
                     <Button
                       variant="outline"
@@ -2335,8 +2403,22 @@ const PromptOptimizer = () => {
                   {/* Version History */}
                   {versionHistory.length > 1 && (
                     <div className="mt-6">
-                      <h3 className="font-semibold mb-2 text-slate-900 dark:text-slate-100">Version History</h3>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">Click on a version to load it</p>
+                      <div className="flex justify-between items-center mb-2">
+                        <div>
+                          <h3 className="font-semibold text-slate-900 dark:text-slate-100">Version History</h3>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Click on a version to load it, or select versions to compare</p>
+                        </div>
+                        {selectedVersionsForCompare.length >= 2 && (
+                          <Button
+                            size="sm"
+                            onClick={() => setVersionCompareModalOpen(true)}
+                            className="bg-purple-600 hover:bg-purple-700 text-white"
+                          >
+                            <ArrowUpDown className="w-4 h-4 mr-1" />
+                            Compare ({selectedVersionsForCompare.length})
+                          </Button>
+                        )}
+                      </div>
                       <div className="space-y-2">
                         {versionHistory.map((v, idx) => (
                           <div
@@ -2363,30 +2445,47 @@ const PromptOptimizer = () => {
                                 });
                               }
                             }}
-                            className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                            className={`p-3 rounded-lg border transition-all cursor-pointer ${
                               v.version === currentVersion?.version
                                 ? 'bg-blue-100 dark:bg-blue-900/20 border-blue-600 dark:border-blue-700'
                                 : 'bg-slate-50 dark:bg-slate-800 border-slate-300 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-100 dark:hover:bg-slate-700'
                             }`}
                           >
                             <div className="flex justify-between items-center">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-slate-900 dark:text-white">Version {v.version}</span>
-                                {v.version === currentVersion?.version && (
-                                  <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
-                                )}
-                                {v.is_final && <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded">Final</span>}
+                              <div className="flex items-center gap-3">
+                                {/* Checkbox for comparison */}
+                                <input
+                                  type="checkbox"
+                                  checked={selectedVersionsForCompare.includes(v.version)}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    if (e.target.checked) {
+                                      setSelectedVersionsForCompare(prev => [...prev, v.version]);
+                                    } else {
+                                      setSelectedVersionsForCompare(prev => prev.filter(ver => ver !== v.version));
+                                    }
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-purple-600 focus:ring-purple-500"
+                                />
+                                <div className="flex items-center gap-2 flex-1">
+                                  <span className="font-medium text-slate-900 dark:text-white">Version {v.version}</span>
+                                  {v.version === currentVersion?.version && (
+                                    <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+                                  )}
+                                  {v.is_final && <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded">Final</span>}
+                                </div>
                               </div>
                               <div className="flex items-center gap-2">
                                 {v.evaluation && (
                                   <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
-                                    ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2) >= 80
+                                    (v.evaluation.overall_score || ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2)) >= 80
                                       ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                                      : ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2) >= 60
+                                      : (v.evaluation.overall_score || ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2)) >= 60
                                         ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
                                         : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
                                   }`}>
-                                    {((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2).toFixed(1)}
+                                    {(v.evaluation.overall_score || ((v.evaluation.requirements_alignment + v.evaluation.best_practices_score) / 2)).toFixed(1)}
                                   </span>
                                 )}
                                 {v.version !== currentVersion?.version && versionHistory.length > 1 && (
@@ -2427,8 +2526,23 @@ const PromptOptimizer = () => {
               {expandedSections.evalPrompt && (
                 <CardContent className="p-6 space-y-4">
                   {!evalPrompt ? (
-                    <Button onClick={handleGenerateEvalPrompt} disabled={isGeneratingEval} className="w-full">
-                      {isGeneratingEval ? "Generating..." : "Generate Evaluation Prompt"}
+                    <Button
+                      onClick={handleAgenticGenerateEvalPrompt}
+                      disabled={isAgenticGeneratingEval}
+                      className="w-full bg-purple-600 hover:bg-purple-700 text-white"
+                      title="Generate evaluation prompt with failure mode analysis"
+                    >
+                      {isAgenticGeneratingEval ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                          Generating...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4 mr-2" />
+                          Generate Eval Prompt
+                        </>
+                      )}
                     </Button>
                   ) : (
                     <>
@@ -2528,7 +2642,7 @@ const PromptOptimizer = () => {
                         <Button
                           variant="outline"
                           onClick={handleRegenerateEvalPrompt}
-                          disabled={isRegeneratingEval || isGeneratingEval}
+                          disabled={isRegeneratingEval || isAgenticGeneratingEval}
                           className="border-green-600 text-green-600 dark:text-green-400 hover:bg-green-900/20"
                         >
                           {isRegeneratingEval ? (
@@ -2635,20 +2749,37 @@ const PromptOptimizer = () => {
 
                   {/* Generate button (shown when no dataset and not generating) */}
                   {!dataset && !isGeneratingDataset && (
-                    <Button onClick={() => handleGenerateDataset()} className="w-full">
-                      Generate Dataset
-                    </Button>
+                    <div className="space-y-3">
+                      <Button
+                        onClick={() => handleGenerateDataset()}
+                        className="w-full bg-purple-600 hover:bg-purple-700 text-white"
+                      >
+                        <Sparkles className="w-4 h-4 mr-2" />
+                        Generate Test Dataset
+                      </Button>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 text-center">
+                        Automatically detects input format and generates realistic test data (call transcripts, emails, code, etc.)
+                      </p>
+                    </div>
                   )}
 
                   {/* Dataset generated success message and preview */}
                   {dataset && (
                     <>
-                      <div className="bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg p-4">
+                      <div className={`${dataset.metadata?.generation_type === 'smart' ? 'bg-purple-50 dark:bg-purple-900/20 border-purple-300 dark:border-purple-700' : 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'} border rounded-lg p-4`}>
                         <div className="flex justify-between items-start">
                           <div>
-                            <h3 className="font-semibold text-green-600 dark:text-green-400 mb-2">Dataset Generated</h3>
+                            <h3 className={`font-semibold ${dataset.metadata?.generation_type === 'smart' ? 'text-purple-600 dark:text-purple-400' : 'text-green-600 dark:text-green-400'} mb-2 flex items-center gap-2`}>
+                              {dataset.metadata?.generation_type === 'smart' && <Sparkles className="w-4 h-4" />}
+                              {dataset.metadata?.generation_type === 'smart' ? 'Smart Dataset Generated' : 'Dataset Generated'}
+                            </h3>
                             <p className="text-sm text-slate-700 dark:text-slate-300">
                               {dataset.sample_count} test cases created
+                              {dataset.metadata?.input_type && (
+                                <span className="text-slate-500 dark:text-slate-400">
+                                  {' '}• Input type: {dataset.metadata.input_type.replace(/_/g, ' ')}
+                                </span>
+                              )}
                             </p>
                           </div>
                           <Button
@@ -3557,9 +3688,106 @@ const PromptOptimizer = () => {
             <Button variant="outline" onClick={() => setRegenerateDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleRegenerateDataset}>
-              <RefreshCw className="w-4 h-4 mr-2" />
+            <Button onClick={handleRegenerateDataset} className="bg-purple-600 hover:bg-purple-700 text-white">
+              <Sparkles className="w-4 h-4 mr-2" />
               Generate {regenerateSampleCount} Cases
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Version Comparison Modal */}
+      <Dialog open={versionCompareModalOpen} onOpenChange={(open) => {
+        setVersionCompareModalOpen(open);
+        if (!open) {
+          setSelectedVersionsForCompare([]);
+        }
+      }}>
+        <DialogContent className="max-w-[95vw] w-full max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowUpDown className="w-5 h-5" />
+              Compare Prompt Versions
+            </DialogTitle>
+            <DialogDescription>
+              Side-by-side comparison of {selectedVersionsForCompare.length} selected versions
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-auto py-4">
+            <div className={`grid gap-4 ${selectedVersionsForCompare.length === 2 ? 'grid-cols-2' : selectedVersionsForCompare.length === 3 ? 'grid-cols-3' : 'grid-cols-2 lg:grid-cols-4'}`}>
+              {selectedVersionsForCompare
+                .sort((a, b) => a - b)
+                .map((versionNum) => {
+                  const version = versionHistory.find(v => v.version === versionNum);
+                  if (!version) return null;
+                  const avgScore = version.evaluation
+                    ? ((version.evaluation.requirements_alignment || 0) + (version.evaluation.best_practices_score || 0)) / 2
+                    : null;
+                  return (
+                    <div key={versionNum} className="flex flex-col h-full border rounded-lg overflow-hidden bg-white dark:bg-slate-800">
+                      {/* Version Header */}
+                      <div className="p-3 bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-900 dark:text-white">Version {version.version}</span>
+                            {version.version === currentVersion?.version && (
+                              <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+                            )}
+                          </div>
+                          {avgScore !== null && (
+                            <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
+                              avgScore >= 80
+                                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                : avgScore >= 60
+                                  ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                  : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                            }`}>
+                              Score: {avgScore.toFixed(1)}
+                            </span>
+                          )}
+                        </div>
+                        {version.evaluation && (
+                          <div className="flex gap-4 mt-2 text-xs text-slate-600 dark:text-slate-400">
+                            <span>Req: {version.evaluation.requirements_alignment || 0}%</span>
+                            <span>Best Practices: {version.evaluation.best_practices_score || 0}%</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Prompt Content */}
+                      <div className="flex-1 p-3 overflow-auto">
+                        <pre className="text-sm whitespace-pre-wrap font-mono text-slate-800 dark:text-slate-200 leading-relaxed">
+                          {version.prompt_text}
+                        </pre>
+                      </div>
+
+                      {/* Version Footer with metadata */}
+                      {version.evaluation?.suggestions && version.evaluation.suggestions.length > 0 && (
+                        <div className="p-3 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-600">
+                          <p className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Suggestions:</p>
+                          <ul className="text-xs text-slate-600 dark:text-slate-400 space-y-1">
+                            {version.evaluation.suggestions.slice(0, 3).map((s, i) => (
+                              <li key={i} className="flex items-start gap-1">
+                                <span className="text-amber-500">•</span>
+                                <span className="line-clamp-2">{s}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+
+          <DialogFooter className="border-t pt-4">
+            <Button variant="outline" onClick={() => {
+              setVersionCompareModalOpen(false);
+              setSelectedVersionsForCompare([]);
+            }}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

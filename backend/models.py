@@ -46,6 +46,7 @@ class TestDataResult(BaseModel):
     test_cases: List[Dict[str, Any]]
     count: int
     categories: Dict[str, int]
+    metadata: Optional[Dict[str, Any]] = None  # For smart generation info (input_type, domain, etc.)
 
 
 # ============= Step 5: Test Execution =============
@@ -78,22 +79,26 @@ class FinalReport(BaseModel):
 
 class CalibrationExample(BaseModel):
     """Few-shot calibration example for eval prompt"""
+    id: Optional[str] = None
     input: str
     output: str
     score: float  # 1-5
     reasoning: str
     category: str = "general"  # e.g., "excellent", "acceptable", "poor"
+    created_at: Optional[str] = None
 
 
 class HumanValidation(BaseModel):
     """Human validation record for a test result"""
+    id: Optional[str] = None
+    run_id: Optional[str] = None
     result_id: str
     human_score: float  # 1-5
     human_feedback: str
     validator_id: Optional[str] = None
-    validated_at: datetime
-    agrees_with_llm: bool
-    score_difference: float
+    validated_at: Optional[datetime] = None
+    agrees_with_llm: Optional[bool] = None
+    score_difference: Optional[float] = None
 
 
 class ABTestConfig(BaseModel):
