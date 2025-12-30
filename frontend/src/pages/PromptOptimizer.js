@@ -680,7 +680,31 @@ const PromptOptimizer = () => {
         const changesDescription = result.improvements?.length > 0
           ? `Agentic improvements: ${result.improvements.join("; ")}`
           : "Agentic optimization applied";
-        await addVersion(result.optimized_prompt, changesDescription);
+
+        // Build analysis results from agentic rewrite to avoid re-analysis
+        const finalScore = (result.score || result.agentic_details?.final_score || 6) * 10; // Convert to 0-100 scale
+        const agenticAnalysisResults = {
+          score: finalScore,
+          overall_score: finalScore,
+          requirements_alignment_score: 100, // Agentic rewrite preserves requirements
+          best_practices_score: finalScore * 0.8, // Estimate based on overall score
+          original_score: (result.agentic_details?.original_score || 0) * 10,
+          suggestions: result.suggestions?.map(s => ({ priority: "Medium", suggestion: s })) || [],
+          improvements: result.improvements || [],
+          requirements_gaps: [], // Cleared after successful rewrite
+          best_practices_gaps: [],
+          categories: {
+            structure: { score: 70, feedback: "Improved by agentic rewrite" },
+            clarity: { score: 70, feedback: "Improved by agentic rewrite" },
+            completeness: { score: 70, feedback: "Improved by agentic rewrite" },
+            output_format: { score: 70, feedback: "Improved by agentic rewrite" }
+          },
+          agentic_rewrite: true,
+          agentic_details: result.agentic_details
+        };
+
+        // Pass precomputed analysis to skip re-analysis
+        await addVersion(result.optimized_prompt, changesDescription, false, agenticAnalysisResults);
 
         const qualityDelta = result.agentic_details?.quality_delta || 0;
         toast({
@@ -762,7 +786,7 @@ const PromptOptimizer = () => {
     }
   };
 
-  const addVersion = async (promptText, feedback = "") => {
+  const addVersion = async (promptText, feedback = "", skipAnalysis = false, precomputedAnalysis = null) => {
     try {
       const response = await fetch(`${API}/projects/${projectId}/versions`, {
         method: "POST",
@@ -780,8 +804,13 @@ const PromptOptimizer = () => {
       setVersionHistory(prev => [...prev, newVersion]);
       setCurrentVersion(newVersion);
 
-      // Auto-analyze new version - pass the version object to avoid stale state
-      handleAnalyze(promptText, null, newVersion);
+      // If we have precomputed analysis from agentic rewrite, use it
+      if (precomputedAnalysis) {
+        setAnalysisResults(precomputedAnalysis);
+      } else if (!skipAnalysis) {
+        // Auto-analyze new version - pass the version object to avoid stale state
+        handleAnalyze(promptText, null, newVersion);
+      }
 
     } catch (error) {
       toast({

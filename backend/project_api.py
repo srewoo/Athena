@@ -16,6 +16,8 @@ from models import SavedProject, ProjectListItem
 from llm_client import get_llm_client
 from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
 from prompt_analyzer import analyze_prompt as analyze_prompt_dna
+from prompt_analyzer_v2 import analyze_prompt_hybrid, enhanced_analysis_to_dict
+from llm_client_v2 import get_llm_client as get_enhanced_llm_client
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -546,7 +548,15 @@ def analyze_prompt_semantic(prompt_text: str) -> Dict[str, Any]:
 
 @router.post("/{project_id}/analyze")
 async def analyze_prompt(project_id: str, request: AnalyzeRequest):
-    """Analyze a prompt using semantic heuristics + LLM for deep insights"""
+    """
+    Analyze a prompt using enhanced hybrid Python + LLM analysis.
+
+    Uses the new prompt_analyzer_v2 for deep semantic understanding including:
+    - Intent summary and target audience
+    - Ambiguities, contradictions, missing elements
+    - Prioritized improvement areas with suggestions
+    - Suggested evaluation dimensions and test categories
+    """
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -619,20 +629,81 @@ async def analyze_prompt(project_id: str, request: AnalyzeRequest):
             })
 
     # =========================================================================
-    # STEP 2: LLM Analysis (deep insights using AI)
+    # STEP 2: Enhanced Hybrid LLM Analysis (deep semantic understanding)
     # =========================================================================
     settings = get_settings()
     provider = settings.get("provider", "openai")
     api_key = settings.get("api_key", "")
-    model_name = settings.get("model_name")
+    model_name = settings.get("model_name", "gpt-4o")
 
     llm_insights = None
     llm_suggestions = []
+    enhanced_analysis = None
     overall_score = (requirements_alignment_score + best_practices_score) / 2
 
     if api_key:
-        # Build context from heuristic analysis
-        heuristic_summary = f"""
+        # Use the enhanced hybrid analyzer for deep semantic understanding
+        try:
+            enhanced_llm_client = get_enhanced_llm_client()
+
+            # Get use case and requirements from project for context
+            use_case = project.use_case if project.use_case else ""
+            requirements = ', '.join(project.key_requirements) if project.key_requirements else ""
+
+            enhanced_result = await analyze_prompt_hybrid(
+                prompt_text=prompt_text,
+                use_case=use_case,
+                requirements=requirements,
+                llm_client=enhanced_llm_client,
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                quick_mode=False  # Full LLM-enhanced analysis
+            )
+
+            # Convert to dict for response
+            enhanced_analysis = enhanced_analysis_to_dict(enhanced_result)
+
+            # Extract insights from enhanced analysis
+            llm_insights = {
+                "strengths": enhanced_analysis.get("strengths", []),
+                "issues": enhanced_analysis.get("weaknesses", []),
+                "ambiguities": enhanced_analysis.get("ambiguities", []),
+                "contradictions": enhanced_analysis.get("contradictions", []),
+                "missing_elements": enhanced_analysis.get("missing_elements", []),
+                "intent_summary": enhanced_analysis.get("intent_summary", ""),
+                "target_audience": enhanced_analysis.get("target_audience", ""),
+                "analysis_summary": enhanced_analysis.get("intent_summary", "")
+            }
+
+            # Convert improvement_areas to suggestions format
+            for area in enhanced_analysis.get("improvement_areas", []):
+                priority = area.get("priority", "medium").capitalize()
+                llm_suggestions.append({
+                    "priority": priority,
+                    "suggestion": area.get("suggestion", "") or area.get("description", ""),
+                    "category": area.get("area", "general")
+                })
+
+            # Also add general suggestions
+            for sug in enhanced_analysis.get("suggestions", []):
+                llm_suggestions.append({
+                    "priority": sug.get("impact", "medium").capitalize(),
+                    "suggestion": sug.get("suggestion", ""),
+                    "category": sug.get("category", "general")
+                })
+
+            # Use the combined score from enhanced analysis (scaled to 100)
+            combined_score = enhanced_analysis.get("combined_score", 5.0)
+            overall_score = combined_score * 10  # Scale 1-10 to 1-100
+
+            logger.info(f"Enhanced analysis completed: score={overall_score}, method={enhanced_analysis.get('analysis_method', 'hybrid')}")
+
+        except Exception as e:
+            logger.warning(f"Enhanced analysis failed, falling back to basic: {e}")
+            # Fall back to basic LLM analysis if enhanced fails
+            try:
+                heuristic_summary = f"""
 Heuristic Analysis Results:
 - Word count: {word_count}
 - Requirements score: {requirements_alignment_score}/100
@@ -640,7 +711,7 @@ Heuristic Analysis Results:
 - Missing elements: {', '.join(requirements_gaps) if requirements_gaps else 'None detected'}
 """
 
-        system_prompt = """You are an expert prompt engineer. Analyze the given prompt and provide deep insights.
+                system_prompt = """You are an expert prompt engineer. Analyze the given prompt and provide deep insights.
 
 Given the prompt and initial heuristic analysis, provide:
 1. A refined overall score (0-100) based on prompt quality
@@ -659,7 +730,7 @@ Return a JSON object:
 
 Return ONLY valid JSON."""
 
-        user_message = f"""Analyze this prompt:
+                user_message = f"""Analyze this prompt:
 
 {prompt_text}
 
@@ -667,39 +738,36 @@ Return ONLY valid JSON."""
 
 Provide expert analysis and actionable improvements."""
 
-        try:
-            result = await llm_client.chat(
-                system_prompt=system_prompt,
-                user_message=user_message,
-                provider=provider,
-                api_key=api_key,
-                model_name=model_name,
-                temperature=0.3,
-                max_tokens=8000
-            )
-            if not result.get("error"):
-                output = result.get("output", "{}")
-                # Parse JSON from response
-                if "```json" in output:
-                    output = output.split("```json")[1].split("```")[0]
-                elif "```" in output:
-                    output = output.split("```")[1].split("```")[0]
+                result = await llm_client.chat(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    provider=provider,
+                    api_key=api_key,
+                    model_name=model_name,
+                    temperature=0.3,
+                    max_tokens=8000
+                )
+                if not result.get("error"):
+                    output = result.get("output", "{}")
+                    if "```json" in output:
+                        output = output.split("```json")[1].split("```")[0]
+                    elif "```" in output:
+                        output = output.split("```")[1].split("```")[0]
 
-                try:
-                    llm_data = json.loads(output.strip())
-                    llm_insights = {
-                        "strengths": llm_data.get("strengths", []),
-                        "issues": llm_data.get("issues", []),
-                        "analysis_summary": llm_data.get("analysis_summary", "")
-                    }
-                    llm_suggestions = llm_data.get("suggestions", [])
-                    # Use LLM's refined score if available
-                    if "refined_score" in llm_data:
-                        overall_score = llm_data["refined_score"]
-                except Exception:
-                    pass  # Keep heuristic results if JSON parsing fails
-        except Exception:
-            pass  # Keep heuristic results if LLM call fails
+                    try:
+                        llm_data = json.loads(output.strip())
+                        llm_insights = {
+                            "strengths": llm_data.get("strengths", []),
+                            "issues": llm_data.get("issues", []),
+                            "analysis_summary": llm_data.get("analysis_summary", "")
+                        }
+                        llm_suggestions = llm_data.get("suggestions", [])
+                        if "refined_score" in llm_data:
+                            overall_score = llm_data["refined_score"]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     # =========================================================================
     # STEP 3: Combine Results
@@ -716,13 +784,21 @@ Provide expert analysis and actionable improvements."""
             unique_suggestions.append(s)
     suggestions = unique_suggestions[:5]
 
+    # Determine analysis method
+    if enhanced_analysis:
+        analysis_method = enhanced_analysis.get("analysis_method", "hybrid")
+    elif llm_insights:
+        analysis_method = "llm_enhanced"
+    else:
+        analysis_method = "semantic_heuristic"
+
     response = {
         "requirements_alignment_score": round(requirements_alignment_score, 1),
         "best_practices_score": round(best_practices_score, 1),
         "overall_score": round(overall_score, 1),
         "suggestions": suggestions,
         "requirements_gaps": requirements_gaps[:5],
-        "analysis_method": "llm_enhanced" if llm_insights else "semantic_heuristic",
+        "analysis_method": analysis_method,
         # New: detailed semantic analysis by category
         "semantic_analysis": {
             "categories": {
@@ -740,6 +816,26 @@ Provide expert analysis and actionable improvements."""
 
     if llm_insights:
         response["llm_insights"] = llm_insights
+
+    # Include enhanced analysis details if available
+    if enhanced_analysis:
+        response["enhanced_analysis"] = {
+            "prompt_type": enhanced_analysis.get("prompt_type", "unknown"),
+            "prompt_types_detected": enhanced_analysis.get("prompt_types_detected", []),
+            "dna": enhanced_analysis.get("dna", {}),
+            "programmatic_score": enhanced_analysis.get("programmatic_score", 0),
+            "llm_score": enhanced_analysis.get("llm_score", 0),
+            "combined_score": enhanced_analysis.get("combined_score", 0),
+            "intent_summary": enhanced_analysis.get("intent_summary", ""),
+            "target_audience": enhanced_analysis.get("target_audience", ""),
+            "expected_input_type": enhanced_analysis.get("expected_input_type", ""),
+            "expected_output_description": enhanced_analysis.get("expected_output_description", ""),
+            "ambiguities": enhanced_analysis.get("ambiguities", []),
+            "contradictions": enhanced_analysis.get("contradictions", []),
+            "missing_elements": enhanced_analysis.get("missing_elements", []),
+            "suggested_eval_dimensions": enhanced_analysis.get("suggested_eval_dimensions", []),
+            "suggested_test_categories": enhanced_analysis.get("suggested_test_categories", [])
+        }
 
     return response
 
@@ -926,7 +1022,10 @@ async def add_version(project_id: str, request: AddVersionRequest):
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Get current version number
-    current_version = len(project.system_prompt_versions) if project.system_prompt_versions else 0
+    # Get current version number safely
+    current_version = 0
+    if project.system_prompt_versions:
+        current_version = max(v.get("version", 0) for v in project.system_prompt_versions)
 
     # Create new version
     new_version = {

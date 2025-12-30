@@ -94,6 +94,71 @@ def get_thinking_model_for_provider(provider: str) -> Optional[str]:
     return recommendations.get(provider)
 
 
+async def llm_score_prompt(
+    prompt: str,
+    use_case: str,
+    llm_client,
+    provider: str,
+    api_key: str,
+    model_name: str
+) -> float:
+    """
+    Use LLM to score a prompt's quality (1-10 scale).
+    This provides more accurate scoring than heuristic analysis.
+    """
+    system_prompt = """You are an expert prompt engineer. Score this system prompt on a scale of 1-10.
+
+## Scoring Criteria:
+- **Structure (25%)**: Clear sections, logical organization, headers/delimiters
+- **Clarity (25%)**: Specific instructions, unambiguous language, explicit expectations
+- **Completeness (25%)**: Role definition, output format, constraints, examples
+- **Robustness (25%)**: Edge case handling, safety constraints, error handling
+
+## Score Guidelines:
+- 9-10: Production-ready, comprehensive, follows all best practices
+- 7-8: Good quality, minor improvements possible
+- 5-6: Functional but needs significant improvements
+- 3-4: Weak, missing critical elements
+- 1-2: Poor, fundamentally flawed
+
+Return ONLY a JSON object: {"score": X.X, "reasoning": "brief explanation"}"""
+
+    user_message = f"""Score this prompt for use case: {use_case}
+
+PROMPT:
+```
+{prompt}
+```
+
+Return JSON with score (1-10) and brief reasoning."""
+
+    try:
+        result = await llm_client.chat(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            temperature=0.2,
+            max_tokens=500
+        )
+
+        if result.get("error"):
+            logger.warning(f"LLM scoring failed: {result['error']}")
+            return 6.0  # Default fallback
+
+        json_match = re.search(r'\{[\s\S]*\}', result.get("output", ""))
+        if json_match:
+            data = json.loads(json_match.group())
+            score = float(data.get("score", 6.0))
+            logger.info(f"LLM scored prompt: {score}/10 - {data.get('reasoning', '')[:100]}")
+            return min(10.0, max(1.0, score))
+    except Exception as e:
+        logger.warning(f"LLM scoring exception: {e}")
+
+    return 6.0  # Default fallback
+
+
 async def deep_analysis(
     prompt: str,
     use_case: str,
@@ -189,6 +254,8 @@ Return your analysis as JSON:
 - Template Variables: {analysis_dict['dna']['template_variables']}
 - Scoring Scale: {analysis_dict['dna']['scoring_scale']}
 - Sections Found: {analysis_dict['dna']['sections']}
+- Suggested Improvement Areas: {analysis_dict['improvement_areas']}
+- Identified Strengths: {analysis_dict['strengths']}
 {user_feedback_section}
 Provide your deep analysis. Incorporate the user's prior analysis feedback if provided. Be conservative - only flag genuine issues."""
 
@@ -258,24 +325,31 @@ async def plan_improvements(
             risk_areas=[]
         )
 
-    system_prompt = """You are a prompt engineering strategist. Create a SPECIFIC improvement plan.
+    system_prompt = """You are a very Experienced, Efficient and Crafty Prompt Developer who assists Developers, Product Managers alike in Creating Prompts For Their Usecase.
 
-## CRITICAL RULES
-1. Only plan changes that fix GENUINE issues
-2. Never plan changes to DNA elements (variables, format, scale)
-3. Preserve working structure
-4. Less is more - minimal effective changes
+Your goal is to create a SPECIFIC improvement plan to refine an existing prompt based on the Requirements (PRD).
+
+## YOUR PROCESS
+1.  **Analyze**: Go through the PRD (Requirements) and Existing Prompt in detail.
+2.  **Identify Contradictions**: Identify major contradictions within the prompt, PRD, or between them.
+3.  **Clarify**: Since you cannot ask real-time questions here, you must IDENTIFY what needs clarification and document it in the 'risk_areas' section as potential ambiguities.
+4.  **Plan**: State the changes you're seeking to make and tell WHY you make them.
+
+## GUIDELINES
+-   **Source of Truth**: The PRD (Requirements) is the source of truth.
+-   **Minimal Changes**: Prefer to Not Change an Existing Prompt overly much if possible. ONLY Change if there is a contradiction or a clear way to make it MORE RELIABLE.
+-   **No DNA Changes**: Never plan changes to DNA elements (variables, format, scale) unless they directly contradict the PRD.
 
 Return a JSON improvement plan:
 {
     "preserve": ["List of elements that MUST NOT change"],
     "improve": [
-        {"area": "What to improve", "current": "Current state", "target": "Target state"}
+        {"area": "What to improve", "current": "Current state", "target": "Target state", "reason": "Why this change is needed"}
     ],
-    "add": ["Elements to add (only if genuinely missing)"],
-    "remove": ["Elements to remove (rarely needed)"],
+    "add": ["Elements to add (only if genuinely missing from PRD)"],
+    "remove": ["Elements to remove (only if contradicting PRD)"],
     "priority_order": ["Order of importance"],
-    "risk_areas": ["Where we need to be careful"]
+    "risk_areas": ["Ambiguities or contradictions found that need user attention"]
 }"""
 
     user_message = f"""Create an improvement plan for this prompt:
@@ -380,7 +454,19 @@ async def execute_rewrite(
 
     additions_text = "\n".join(f"- {add}" for add in plan.add) if plan.add else "None"
 
-    system_prompt = f"""You are executing a specific improvement plan. Follow it EXACTLY.
+    system_prompt = f"""You are executing a specific improvement plan to rewrite a system prompt.
+
+## STANDARD PROMPT CREATION FRAMEWORK
+You prefer to follow this standard pattern for optimized prompts. Structure the rewritten prompt using these components where applicable:
+
+1.  **Role & Background**: Start with a Role and Give a Background to better-do the task.
+2.  **Tone**: Specify the Tone.
+3.  **Task**: Describe the Task it is performed to do.
+4.  **Examples**: Give it Examples (encapsulated in <examples> tags if possible).
+5.  **Input**: Specify the Input (encapsulated in <input> tags if possible).
+6.  **Immediate Task**: Remind LLM of the task it should perform.
+7.  **Precognition**: Add thinking/reasoning steps if it adds relevance.
+8.  **Output**: Specify the Output with Formatting (encapsulated in <output> tags).
 
 ## PRESERVATION RULES (DO NOT VIOLATE)
 {chr(10).join(preserve_rules) if preserve_rules else "None specified"}
@@ -392,13 +478,11 @@ async def execute_rewrite(
 {additions_text}
 
 ## EXECUTION RULES
-1. Make ONLY the planned changes
-2. Do not add anything not in the plan
-3. Preserve all DNA elements exactly
-4. Keep the same overall structure
-5. Do not wrap output in markdown code blocks
-
-Return ONLY the rewritten prompt, no explanations."""
+1.  **Follow the Framework**: Re-organize the prompt to follow the Standard Prompt Creation Framework defined above, while keeping the original intent.
+2.  **Execute Plan**: Apply the specific improvements and additions listed above.
+3.  **Preserve DNA**: Keep all variables, scaling factors, and specific output formats EXACTLY as requested.
+4.  **No Explanations**: Return ONLY the rewritten prompt.
+5.  **No Markdown Wrapper**: Do not wrap output in markdown code blocks."""
 
     user_message = f"""Execute this improvement plan:
 
@@ -622,12 +706,22 @@ async def agentic_rewrite(
     )
 
     steps_taken[-1]["status"] = "completed"
+
+    # Use LLM to score the original prompt for accurate comparison
+    logger.info("Scoring original prompt with LLM for accurate baseline")
+    original_score = await llm_score_prompt(
+        prompt=prompt,
+        use_case=use_case,
+        llm_client=llm_client,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name
+    )
+
     steps_taken[-1]["result"] = {
-        "quality_score": analysis.get("programmatic", {}).get("quality_score", 0),
+        "quality_score": original_score,
         "prompt_type": analysis.get("programmatic", {}).get("prompt_type", "unknown")
     }
-
-    original_score = analysis.get("programmatic", {}).get("quality_score", 0)
 
     # Check if prompt is already good enough
     deep_analysis_result = analysis.get("deep", {})
@@ -762,12 +856,24 @@ async def agentic_rewrite(
 
             steps_taken[-1]["status"] = "completed"
 
-    # Final quality check
-    final_analysis = analyze_prompt(current_prompt)
-    final_score = final_analysis.quality_score
+    # Final quality check using LLM scoring (more accurate than heuristics)
+    logger.info("Final quality check: Using LLM scoring for accurate assessment")
+    final_score = await llm_score_prompt(
+        prompt=current_prompt,
+        use_case=use_case,
+        llm_client=llm_client,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name
+    )
 
-    # If final result is worse than original, revert
-    if final_score < original_score - 0.5 or (final_validation and len(final_validation.issues) > 0):
+    # Also get heuristic score for validation
+    final_analysis = analyze_prompt(current_prompt)
+    heuristic_score = final_analysis.quality_score
+    logger.info(f"Scores - LLM: {final_score}/10, Heuristic: {heuristic_score}/10")
+
+    # If final result is worse than original, revert (but use more lenient check for LLM scoring)
+    if final_score < original_score - 1.0 or (final_validation and len(final_validation.issues) > 0):
         logger.warning("Final result is worse than original, reverting")
         return AgenticRewriteResult(
             original_prompt=prompt,

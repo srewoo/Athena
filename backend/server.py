@@ -1,9 +1,16 @@
 """
 Clean FastAPI server for Athena - 5-Step Prompt Testing Workflow
+
+Enhanced with:
+- SQLite database instead of file storage
+- Improved LLM client with retry logic
+- Best-in-class evaluator prompt generation
+- Structured logging
+- Rate limiting
+- Proper error handling
 """
 import os
 import asyncio
-import logging
 from pathlib import Path
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -12,9 +19,10 @@ from contextlib import asynccontextmanager
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(env_path)
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from fastapi.responses import JSONResponse
+from typing import List, Optional
 import json
 import re
 import uuid
@@ -28,18 +36,31 @@ from models import (
     TestExecutionResult,
     FinalReport
 )
-from llm_client import get_llm_client
+
+# Use new enhanced components
+from llm_client_v2 import get_llm_client, parse_json_response, EnhancedLLMClient
 from shared_settings import settings_store, get_settings as get_llm_settings_shared, update_settings
 import project_api
-import project_storage
+import database as db
 from prompt_analyzer import analyze_prompt, analysis_to_dict, PromptType
+from prompt_analyzer_v2 import analyze_prompt_hybrid, enhanced_analysis_to_dict, analyze_prompt_quick
 from agentic_rewrite import agentic_rewrite, result_to_dict as agentic_result_to_dict, get_thinking_model_for_provider
 from agentic_eval import agentic_eval_generation, result_to_dict as agentic_eval_result_to_dict
+from eval_generator_v2 import generate_best_eval_prompt
+from eval_generator_v3 import generate_gold_standard_eval_prompt
 from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
+from security import check_rate_limit, validate_api_key_format, mask_api_key, generate_request_id
+from logging_config import (
+    setup_logging, get_logger, set_request_id, get_request_id,
+    log_performance, metrics
+)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup structured logging
+log_level = os.getenv("LOG_LEVEL", "INFO")
+json_logs = os.getenv("JSON_LOGS", "false").lower() == "true"
+setup_logging(level=log_level, json_format=json_logs)
+
+logger = get_logger(__name__)
 
 # Cleanup configuration
 CLEANUP_INTERVAL_HOURS = 24  # Run cleanup every 24 hours
@@ -53,9 +74,9 @@ async def cleanup_scheduler():
             # Wait for the specified interval
             await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
 
-            # Run cleanup
+            # Run cleanup using database
             logger.info("Running scheduled project cleanup...")
-            result = project_storage.cleanup_old_projects(days=CLEANUP_AGE_DAYS)
+            result = db.cleanup_old_projects(days=CLEANUP_AGE_DAYS)
             logger.info(f"Cleanup completed: {result['deleted_count']} projects deleted")
 
         except asyncio.CancelledError:
@@ -70,7 +91,10 @@ async def cleanup_scheduler():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - start/stop background tasks"""
-    # Startup: Start the cleanup scheduler
+    # Startup: Initialize database and start the cleanup scheduler
+    logger.info("Initializing database...")
+    db.init_database()
+
     cleanup_task = asyncio.create_task(cleanup_scheduler())
     logger.info("Started project cleanup scheduler (runs every 24 hours, deletes projects older than 30 days)")
 
@@ -93,9 +117,57 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
+
+
+# Request middleware for logging and rate limiting
+@app.middleware("http")
+async def request_middleware(request: Request, call_next):
+    """Add request ID, logging, and rate limiting"""
+    # Generate and set request ID
+    request_id = request.headers.get("X-Request-ID") or generate_request_id()
+    set_request_id(request_id)
+
+    # Get client IP for rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Log request
+    logger.info(f"Request: {request.method} {request.url.path}")
+
+    # Check rate limit for LLM endpoints
+    if request.url.path.startswith("/api/step"):
+        allowed, remaining, reset = check_rate_limit(client_ip, "llm_call")
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded", "reset_seconds": reset},
+                headers={"X-RateLimit-Reset": str(reset)}
+            )
+
+    start_time = datetime.now()
+    try:
+        response = await call_next(request)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+
+        # Add headers
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Response-Time"] = f"{duration_ms}ms"
+
+        # Log response
+        logger.info(f"Response: {response.status_code} in {duration_ms}ms")
+
+        # Record metrics
+        metrics.increment(f"requests.{request.method}")
+        metrics.record_timing("response_time", duration_ms)
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Request failed: {e}")
+        raise
+
 
 # Initialize LLM client
 llm_client = get_llm_client()
@@ -106,7 +178,7 @@ app.include_router(project_api.router)
 
 @app.get("/")
 async def root():
-    return {"message": "Prompt Testing Application API"}
+    return {"message": "Athena - Strategic Prompt Architect API", "version": "2.0"}
 
 
 # ============================================================================
@@ -115,14 +187,20 @@ async def root():
 
 @app.get("/api/admin/storage-stats")
 async def get_storage_stats():
-    """Get storage statistics for project files"""
-    return project_storage.get_storage_stats()
+    """Get storage statistics for database"""
+    return db.get_storage_stats()
+
+
+@app.get("/api/admin/metrics")
+async def get_metrics():
+    """Get application metrics"""
+    return metrics.get_stats()
 
 
 @app.post("/api/admin/cleanup")
 async def trigger_cleanup(days: int = 30):
     """Manually trigger cleanup of old projects"""
-    result = project_storage.cleanup_old_projects(days=days)
+    result = db.cleanup_old_projects(days=days)
     logger.info(f"Manual cleanup triggered: {result['deleted_count']} projects deleted")
     return result
 
@@ -142,131 +220,12 @@ async def validate_project(project: ProjectInput):
 # ============================================================================
 # STEP 2: PROMPT OPTIMIZATION
 # ============================================================================
-
-@app.post("/api/step2/analyze")
-async def analyze_prompt_endpoint(prompt_text: str):
-    """Analyze a prompt to extract DNA, detect type, and assess quality"""
-    if not prompt_text:
-        raise HTTPException(status_code=400, detail="prompt_text is required")
-
-    analysis = analyze_prompt(prompt_text)
-    return analysis_to_dict(analysis)
-
-
-@app.post("/api/step2/optimize", response_model=PromptOptimizationResult)
-async def optimize_prompt(project: ProjectInput):
-    """Step 2: Optimize the initial prompt with DNA-aware optimization"""
-
-    # First, analyze the prompt to understand its structure
-    analysis = analyze_prompt(project.initial_prompt)
-    analysis_dict = analysis_to_dict(analysis)
-
-    # Build DNA preservation instructions
-    dna_instructions = build_dna_preservation_instructions(analysis)
-
-    # Build type-specific optimization guidance
-    type_guidance = build_type_specific_guidance(analysis.prompt_type)
-
-    # Check if prompt is already high quality
-    if analysis.quality_score >= 8.5 and not analysis.improvement_needed:
-        # Return the original with high score - no changes needed
-        return PromptOptimizationResult(
-            optimized_prompt=project.initial_prompt,
-            score=analysis.quality_score,
-            analysis=f"This prompt is already production-ready (score: {analysis.quality_score}/10). Strengths: {', '.join(analysis.strengths[:3])}. No optimization needed.",
-            improvements=[],
-            suggestions=analysis.improvement_areas if analysis.improvement_areas else ["Consider adding examples for edge cases"]
-        )
-
-    system_prompt = f"""You are an expert prompt engineer. Your task is to transform an initial prompt into a highly effective, production-ready system prompt.
-
-## PROMPT ANALYSIS RESULTS
-- **Detected Type:** {analysis.prompt_type.value}
-- **Current Quality Score:** {analysis.quality_score}/10
-- **Improvement Needed:** {analysis.improvement_needed}
-
-## AREAS TO IMPROVE
-{chr(10).join(f'- {area}' for area in analysis.improvement_areas) if analysis.improvement_areas else '- Minor refinements only'}
-
-## CURRENT STRENGTHS (PRESERVE THESE)
-{chr(10).join(f'- {strength}' for strength in analysis.strengths) if analysis.strengths else '- None identified'}
-
-{dna_instructions}
-
-{type_guidance}
-
-## OPTIMIZATION RULES
-1. **PRESERVE DNA**: Keep all template variables, output format, scoring scales, and key terminology EXACTLY as found
-2. **FIX WEAKNESSES**: Address the specific improvement areas identified above
-3. **MAINTAIN STRENGTHS**: Do not change what's already working well
-4. **ADD STRUCTURE**: If missing, add clear sections (Role, Task, Format, Constraints)
-5. **DO NOT OVER-ENGINEER**: Only add what's genuinely needed
-
-## QUALITY SCORING (1-10)
-- **9-10**: Exceptional - comprehensive, clear structure, examples, edge cases handled
-- **7-8**: Strong - well-structured, clear instructions, most requirements covered
-- **5-6**: Good - clear improvements, addresses main requirements
-- **3-4**: Adequate - some improvements but missing key elements
-- **1-2**: Poor - minimal improvement or missing critical requirements
-
-Return a JSON object with this structure:
-{{
-    "optimized_prompt": "The complete optimized system prompt",
-    "score": 8.5,
-    "analysis": "Detailed analysis of optimizations made",
-    "improvements": ["Improvement 1", "Improvement 2", "..."],
-    "suggestions": ["Additional suggestion 1", "Additional suggestion 2", "..."]
-}}"""
-
-    user_message = f"""Please optimize this prompt based on the analysis above.
-
-**Use Case:** {project.use_case}
-
-**Requirements:**
-{project.requirements}
-
-**Initial Prompt:**
-```
-{project.initial_prompt}
-```
-
-Focus on fixing the identified weaknesses while preserving the DNA elements and strengths."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.5,  # Lower temperature for more consistent optimization
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-
-            # Validate DNA preservation
-            optimized = data.get("optimized_prompt", "")
-            validation_issues = validate_dna_preservation(project.initial_prompt, optimized, analysis)
-
-            if validation_issues:
-                logger.warning(f"DNA preservation issues: {validation_issues}")
-                # Add warning to analysis
-                data["analysis"] = data.get("analysis", "") + f"\n\nWARNING: Some DNA elements may have been modified: {', '.join(validation_issues)}"
-
-            # Include analysis metadata in response
-            data["prompt_analysis"] = analysis_dict
-
-            return PromptOptimizationResult(**data)
-        else:
-            raise ValueError("No JSON found in response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse optimization result: {str(e)}")
+# NOTE: The following endpoints were removed as duplicates:
+#   - /api/step2/analyze -> use /api/projects/{id}/analyze instead
+#   - /api/step2/analyze-enhanced -> use /api/projects/{id}/analyze instead
+#   - /api/step2/optimize -> use /api/projects/{id}/rewrite instead
+#   - /api/step2/refine -> use /api/projects/{id}/rewrite instead
+# Only /api/step2/agentic-rewrite is kept as it's used by the frontend
 
 
 def build_dna_preservation_instructions(analysis) -> str:
@@ -424,66 +383,6 @@ def build_test_categories_text(analysis) -> str:
     return "\n".join(lines)
 
 
-@app.post("/api/step2/refine", response_model=PromptOptimizationResult)
-async def refine_optimization(project: ProjectInput, current_result: dict, feedback: str):
-    """Step 2 Refinement: Refine optimized prompt based on user feedback"""
-    system_prompt = """You are an expert prompt engineer. Refine an already optimized prompt based on user feedback.
-
-You will receive the CURRENT optimized prompt and USER FEEDBACK requesting specific changes.
-
-Your job is to incorporate the user's feedback while maintaining the quality of the prompt.
-
-Return a JSON object with this structure:
-{
-    "optimized_prompt": "The refined system prompt incorporating user feedback",
-    "score": 8.5,
-    "analysis": "Detailed analysis of what changed based on user feedback",
-    "improvements": ["Change 1 based on feedback", "Change 2 based on feedback", "..."],
-    "suggestions": ["Additional suggestion 1", "Additional suggestion 2", "..."]
-}"""
-
-    user_message = f"""Please refine the optimized prompt based on user feedback.
-
-**Use Case:** {project.use_case}
-
-**Requirements:** {project.requirements}
-
-**CURRENT Optimized Prompt:**
-```
-{current_result.get('optimized_prompt', '')}
-```
-
-**Current Score:** {current_result.get('score', 0)} / 10
-
-**USER FEEDBACK:**
-{feedback}
-
-Please incorporate this feedback and provide an improved version."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.7,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            return PromptOptimizationResult(**data)
-        else:
-            raise ValueError("No JSON found in response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse refinement result: {str(e)}")
-
-
 @app.post("/api/step2/agentic-rewrite")
 async def agentic_rewrite_optimization(project: ProjectInput, current_result: dict, use_thinking_model: bool = True):
     """
@@ -561,24 +460,50 @@ async def agentic_rewrite_optimization(project: ProjectInput, current_result: di
 # ============================================================================
 
 @app.post("/api/step3/agentic-generate-eval")
-async def agentic_generate_evaluation_prompt(project: ProjectInput, optimized_prompt: str = Body(...), use_thinking_model: bool = Body(True)):
+async def agentic_generate_evaluation_prompt(
+    project: ProjectInput,
+    optimized_prompt: str = Body(...),
+    use_thinking_model: bool = Body(True),
+    use_gold_standard: bool = Body(True)
+):
     """
-    Step 3 Agentic Eval Generation: Multi-step, self-validating evaluation prompt generation.
+    Step 3 Agentic Eval Generation: Gold-standard evaluation prompt generation.
 
-    This is an enhanced version of eval generation that uses:
-    1. Deep analysis with thinking model to understand what could go wrong
-    2. Systematic failure mode identification
-    3. Eval dimensions designed to catch each failure mode
-    4. Self-test validation to ensure coverage
-    5. Iterative refinement if gaps found
+    Uses the 20-point best practices framework:
+    1. Explicit Role Separation - Evaluator doesn't re-do task
+    2. Clear Success Definition - System-specific, not generic
+    3. Auto-Fail Conditions - Non-negotiable failures
+    4. Evidence-Based Judging - Observable evidence only
+    5. Strict Scope Enforcement - What NOT to judge
+    6. Dimensioned Scoring - Multiple weighted dimensions
+    7. Clear Rubrics per Dimension - 5/3/1 examples
+    8. Grounding Verification - Claims tied to inputs
+    9. Anti-Hallucination Checks - Explicit patterns
+    10. Format & Schema Enforcement - First-class failures
+    11. Severity Alignment Checks - Score-narrative consistency
+    12. False Positive/Negative Awareness - Bias warnings
+    13. Verdict Thresholds - Clear PASS/NEEDS_REVIEW/FAIL
+    14. Reasoning Without Re-Solving - Outcome-focused justification
+    15. Consistency Clause - Similar outputs = similar scores
+    16. Known Failure Mode Section - System-specific pitfalls
+    17. Evaluator Self-Check - Mandatory bias check
+    18. Downstream Consumer Awareness - Who uses this
+    19. Minimal but Sufficient Output - Concise explanations
+    20. Calibration Examples - Score calibration
 
     Parameters:
     - project: Project configuration including API keys
     - optimized_prompt: The system prompt to generate eval for
     - use_thinking_model: Whether to use a thinking model for analysis (default: True)
+    - use_gold_standard: Use v3 gold-standard generator (default: True)
     """
     if not optimized_prompt:
         raise HTTPException(status_code=400, detail="optimized_prompt is required")
+
+    # Validate API key
+    is_valid, error_msg = validate_api_key_format(project.api_key, project.provider)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
 
     # Determine thinking model to use
     thinking_model = None
@@ -587,17 +512,35 @@ async def agentic_generate_evaluation_prompt(project: ProjectInput, optimized_pr
         logger.info(f"Using thinking model: {thinking_model} for eval generation")
 
     try:
-        result = await agentic_eval_generation(
-            system_prompt=optimized_prompt,
-            use_case=project.use_case,
-            requirements=project.requirements,
-            llm_client=llm_client,
-            provider=project.provider,
-            api_key=project.api_key,
-            model_name=project.model_name,
-            thinking_model=thinking_model,
-            max_iterations=2
-        )
+        # Use gold-standard v3 generator by default
+        if use_gold_standard:
+            result = await generate_gold_standard_eval_prompt(
+                system_prompt=optimized_prompt,
+                use_case=project.use_case,
+                requirements=project.requirements,
+                llm_client=llm_client,
+                provider=project.provider,
+                api_key=project.api_key,
+                model_name=project.model_name,
+                thinking_model=thinking_model,
+                max_iterations=2
+            )
+        else:
+            # Fallback to v2
+            result = await generate_best_eval_prompt(
+                system_prompt=optimized_prompt,
+                use_case=project.use_case,
+                requirements=project.requirements,
+                llm_client=llm_client,
+                provider=project.provider,
+                api_key=project.api_key,
+                model_name=project.model_name,
+                thinking_model=thinking_model,
+                max_iterations=2
+            )
+
+        # Record metrics
+        metrics.increment("eval_prompts_generated")
 
         return {
             "eval_prompt": result.eval_prompt,
@@ -605,412 +548,43 @@ async def agentic_generate_evaluation_prompt(project: ProjectInput, optimized_pr
             "rationale": result.rationale,
             "agentic_details": {
                 "failure_modes": result.failure_modes,
-                "eval_dimensions": result.eval_dimensions,
-                "self_test": result.self_test,
-                "iterations": result.iterations,
-                "steps_taken": result.steps_taken
+                "eval_dimensions": result.dimensions,
+                "calibration_examples": result.calibration_examples,
+                "self_test": result.self_test_results,
+                "metadata": result.metadata
             }
         }
 
     except Exception as e:
         logger.error(f"Agentic eval generation failed: {str(e)}")
+        metrics.increment("eval_prompts_failed")
         raise HTTPException(status_code=500, detail=f"Agentic eval generation failed: {str(e)}")
 
 
-@app.post("/api/step3/refine", response_model=EvaluationPromptResult)
-async def refine_eval_prompt(project: ProjectInput, optimized_prompt: str, current_result: dict, feedback: str):
-    """Step 3 Refinement: Refine evaluation prompt based on user feedback"""
-    system_prompt = """You are an expert in LLM evaluation. Refine an evaluation prompt based on user feedback while maintaining the 5-section structure.
+# NOTE: /api/step3/generate-eval-v2 was removed - use /api/step3/agentic-generate-eval instead
 
-Return JSON:
-{
-    "eval_prompt": "Refined evaluation prompt",
-    "eval_criteria": ["Criterion 1", "..."],
-    "rationale": "Explanation of changes based on feedback"
-}"""
 
-    user_message = f"""Refine the evaluation prompt based on feedback.
-
-**Use Case:** {project.use_case}
-**Requirements:** {project.requirements}
-
-**System Prompt Being Evaluated:**
-```
-{optimized_prompt}
-```
-
-**CURRENT Evaluation Prompt:**
-```
-{current_result.get("eval_prompt", "")}
-```
-
-**USER FEEDBACK:**
-{feedback}
-
-Please incorporate this feedback and provide an improved evaluation prompt."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.5,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            return EvaluationPromptResult(**data)
-        else:
-            raise ValueError("No JSON found in response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse refinement: {str(e)}")
+# NOTE: /api/step3/refine was removed - use /api/projects/{id}/eval-prompt/refine instead
 
 
 # ============================================================================
 # STEP 4: TEST DATA GENERATION
 # ============================================================================
 
-@app.post("/api/step4/generate-testdata", response_model=TestDataResult)
-async def generate_test_data(project: ProjectInput, optimized_prompt: str, num_cases: int = 10):
-    """Step 4: Generate test data using smart, type-aware distribution"""
-
-    # Analyze the optimized prompt to get type-specific test categories
-    analysis = analyze_prompt(optimized_prompt)
-    analysis_dict = analysis_to_dict(analysis)
-
-    # Build dynamic test categories based on prompt type
-    test_categories_text = build_test_categories_text(analysis)
-
-    # Calculate distribution based on analysis
-    categories = analysis.suggested_test_categories
-    distribution = {}
-    for cat in categories:
-        count = max(1, int(num_cases * cat['percentage'] / 100))
-        distribution[cat['name']] = count
-
-    # Adjust to match total
-    total = sum(distribution.values())
-    if total != num_cases:
-        # Add/remove from largest category
-        largest = max(distribution, key=distribution.get)
-        distribution[largest] += (num_cases - total)
-
-    system_prompt = f"""You are an expert test data generator. Generate REALISTIC INPUT DATA (user queries/requests) tailored to test a specific type of system prompt.
-
-## PROMPT ANALYSIS
-- **Prompt Type:** {analysis.prompt_type.value}
-- **Output Format:** {analysis.dna.output_format or 'unspecified'}
-- **Template Variables:** {', '.join(analysis.dna.template_variables) if analysis.dna.template_variables else 'None'}
-- **Key Terminology:** {', '.join(analysis.dna.key_terminology[:5]) if analysis.dna.key_terminology else 'None'}
-
-## TEST CASE CATEGORIES (use these exact categories)
-{test_categories_text}
-
-## DISTRIBUTION FOR THIS RUN
-{chr(10).join(f'- {cat}: {count} cases' for cat, count in distribution.items())}
-
-## CRITICAL RULES
-1. Generate inputs that match the prompt's expected input format
-2. If template variables exist ({', '.join(analysis.dna.template_variables) if analysis.dna.template_variables else 'none'}), generate values for those variables
-3. Make adversarial cases realistic - actual prompt injection attempts, not obvious markers
-4. Edge cases should test real boundary conditions relevant to THIS prompt type
-5. Each test case must be unique and test something different
-
-## OUTPUT FORMAT
-Return a JSON object:
-{{
-    "test_cases": [
-        {{
-            "input": "The actual input text/query (or JSON if the prompt expects structured input)",
-            "category": "positive|edge_case|negative|adversarial",
-            "test_focus": "What specific aspect this test case validates",
-            "expected_behavior": "How the system should handle this input"
-        }}
-    ]
-}}"""
-
-    user_message = f"""Generate {num_cases} test input cases for this {analysis.prompt_type.value} system.
-
-**Use Case:** {project.use_case}
-
-**Requirements:** {project.requirements}
-
-**System Prompt:**
-```
-{optimized_prompt}
-```
-
-**Distribution to generate:**
-{chr(10).join(f'- {cat}: {count} cases' for cat, count in distribution.items())}
-
-Generate {num_cases} diverse, realistic INPUT cases that properly test a {analysis.prompt_type.value} prompt.
-Ensure each test case is designed to validate a specific aspect of the system's behavior."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.8,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            test_cases = data.get("test_cases", [])
-            categories = {}
-            for tc in test_cases:
-                cat = tc.get("category", "unknown")
-                categories[cat] = categories.get(cat, 0) + 1
-
-            return TestDataResult(
-                test_cases=test_cases,
-                count=len(test_cases),
-                categories=categories
-            )
-        else:
-            raise ValueError("No JSON found in response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse test data result: {str(e)}")
+# NOTE: /api/step4/generate-testdata was removed - use /api/projects/{id}/test-cases/generate instead
 
 
-@app.post("/api/step4/refine", response_model=TestDataResult)
-async def refine_test_data(project: ProjectInput, optimized_prompt: str, current_result: dict, feedback: str, num_cases: int = 10):
-    """Step 4 Refinement: Refine test data based on user feedback"""
-    system_prompt = """You are an expert test data generator. Refine test cases based on user feedback while maintaining diversity and proper distribution.
-
-Return JSON:
-{
-    "test_cases": [{
-        "input": "...",
-        "category": "positive|edge_case|negative|adversarial",
-        "test_focus": "...",
-        "expected_behavior": "..."
-    }]
-}"""
-
-    user_message = f"""Refine the test cases based on feedback.
-
-**Use Case:** {project.use_case}
-**Requirements:** {project.requirements}
-
-**System Prompt:**
-```
-{optimized_prompt}
-```
-
-**USER FEEDBACK:**
-{feedback}
-
-Generate {num_cases} improved test cases incorporating this feedback."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.8,
-        max_tokens=8000
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            test_cases = data.get("test_cases", [])
-            categories = {}
-            for tc in test_cases:
-                cat = tc.get("category", "unknown")
-                categories[cat] = categories.get(cat, 0) + 1
-            return TestDataResult(
-                test_cases=test_cases,
-                count=len(test_cases),
-                categories=categories
-            )
-        else:
-            raise ValueError("No JSON found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse refinement: {str(e)}")
+# NOTE: /api/step4/refine was removed - use /api/projects/{id}/test-cases/refine instead
 
 
-@app.post("/api/step4/smart-generate-testdata", response_model=TestDataResult)
-async def smart_generate_test_data(project: ProjectInput, optimized_prompt: str = Body(...), num_cases: int = Body(10)):
-    """
-    Step 4 Smart Test Data Generation: Context-aware test input generation.
-
-    This enhanced version:
-    1. Detects the expected input type (call transcript, email, code, etc.)
-    2. Generates realistic, domain-appropriate test inputs
-    3. Creates full, complete inputs (not placeholders)
-    4. Varies scenarios based on the input type
-    """
-
-    # Analyze the prompt to understand its structure
-    analysis = analyze_prompt(optimized_prompt)
-    analysis_dict = analysis_to_dict(analysis)
-
-    # Detect the expected input format
-    input_spec = detect_input_type(optimized_prompt, analysis.dna.template_variables)
-    logger.info(f"Detected input type: {input_spec.input_type.value}, template variable: {input_spec.template_variable}")
-
-    # Get scenario variations for this input type
-    scenarios = get_scenario_variations(input_spec, num_cases)
-
-    # Build the smart generation prompt
-    system_prompt = build_input_generation_prompt(input_spec, optimized_prompt, project.use_case, project.requirements)
-
-    # Build scenario descriptions for the user message
-    scenario_list = "\n".join([
-        f"{i+1}. [{s['category'].upper()}] {s['scenario']}: {s['description']}"
-        for i, s in enumerate(scenarios)
-    ])
-
-    user_message = f"""Generate {num_cases} COMPLETE, REALISTIC test inputs for this system prompt.
-
-**Input Type Detected:** {input_spec.input_type.value.replace('_', ' ').title()}
-**Template Variable:** {{{{{input_spec.template_variable}}}}}
-**Domain Context:** {input_spec.domain_context or 'General'}
-
-**System Prompt Being Tested:**
-```
-{optimized_prompt}
-```
-
-**Scenarios to Generate (one test case per scenario):**
-{scenario_list}
-
-## CRITICAL REQUIREMENTS:
-1. Generate FULL, COMPLETE inputs - NOT summaries or placeholders
-2. For {input_spec.input_type.value.replace('_', ' ')}, include ALL necessary details
-3. Each input should be {input_spec.expected_length} length (200-800 words for transcripts/documents)
-4. Make inputs REALISTIC with specific names, dates, numbers, and details
-5. Vary the content significantly between test cases
-
-Return JSON with complete test cases."""
-
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=project.provider,
-        api_key=project.api_key,
-        model_name=project.model_name,
-        temperature=0.8,
-        max_tokens=16000  # More tokens for full transcripts/documents
-    )
-
-    if result["error"]:
-        raise HTTPException(status_code=500, detail=f"LLM Error: {result['error']}")
-
-    try:
-        json_match = re.search(r'\{[\s\S]*\}', result["output"])
-        if json_match:
-            data = json.loads(json_match.group())
-            test_cases = data.get("test_cases", [])
-            categories = {}
-            for tc in test_cases:
-                cat = tc.get("category", "unknown")
-                categories[cat] = categories.get(cat, 0) + 1
-
-            return TestDataResult(
-                test_cases=test_cases,
-                count=len(test_cases),
-                categories=categories,
-                metadata={
-                    "input_type": input_spec.input_type.value,
-                    "template_variable": input_spec.template_variable,
-                    "domain_context": input_spec.domain_context,
-                    "expected_length": input_spec.expected_length
-                }
-            )
-        else:
-            raise ValueError("No JSON found in response")
-    except Exception as e:
-        logger.error(f"Failed to parse smart test data: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to parse test data result: {str(e)}")
+# NOTE: /api/step4/smart-generate-testdata was removed - use /api/projects/{id}/test-cases/generate instead
 
 
 # ============================================================================
 # STEP 5: TEST EXECUTION & REPORTING
 # ============================================================================
 
-@app.post("/api/step5/execute-tests", response_model=List[TestExecutionResult])
-async def execute_tests(project: ProjectInput, optimized_prompt: str, eval_prompt: str, test_cases: List[dict]):
-    """Step 5: Execute tests and evaluate results"""
-    results = []
-
-    for test_case in test_cases:
-        # Execute the optimized prompt with test input
-        prompt_result = await llm_client.chat(
-            system_prompt=optimized_prompt,
-            user_message=test_case["input"],
-            provider=project.provider,
-            api_key=project.api_key,
-            model_name=project.model_name,
-            temperature=0.7,
-            max_tokens=8000
-        )
-
-        if prompt_result["error"]:
-            continue
-
-        # Evaluate the output
-        eval_message = eval_prompt.replace("{{input}}", test_case["input"]).replace("{{output}}", prompt_result["output"])
-
-        eval_result = await llm_client.chat(
-            system_prompt="You are an evaluation assistant. Assess the provided output according to the evaluation criteria.",
-            user_message=eval_message,
-            provider=project.provider,
-            api_key=project.api_key,
-            model_name=project.model_name,
-            temperature=0.3,
-            max_tokens=8000
-        )
-
-        if eval_result["error"]:
-            continue
-
-        # Parse evaluation score
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', eval_result["output"])
-            if json_match:
-                eval_data = json.loads(json_match.group())
-                score = float(eval_data.get("score", 0))
-                reasoning = eval_data.get("reasoning", "")
-            else:
-                score = 0
-                reasoning = "Failed to parse evaluation"
-        except:
-            score = 0
-            reasoning = "Failed to parse evaluation"
-
-        results.append(TestExecutionResult(
-            test_case=test_case,
-            prompt_output=prompt_result["output"],
-            eval_score=score,
-            eval_feedback=reasoning,
-            passed=score >= 3.5,
-            latency_ms=prompt_result.get("latency_ms", 0),
-            tokens_used=prompt_result.get("tokens_used", 0)
-        ))
-
-    return results
+# NOTE: /api/step5/execute-tests was removed - use /api/projects/{id}/test-cases/execute instead
 
 
 @app.post("/api/generate-report", response_model=FinalReport)
@@ -1283,10 +857,19 @@ async def playground_test(data: dict):
 
 @app.post("/api/ab-test")
 async def ab_test(data: dict):
-    """A/B test two prompts - used by ABTesting.js"""
+    """
+    A/B test two prompts with quality evaluation - used by ABTesting.js
+
+    Enhanced to include:
+    - Quality scoring for each output
+    - Statistical significance testing
+    - Detailed comparison metrics
+    """
     prompt_a = data.get("prompt_a", "")
     prompt_b = data.get("prompt_b", "")
     test_inputs = data.get("test_inputs", ["Test input 1", "Test input 2", "Test input 3"])
+    eval_prompt = data.get("eval_prompt", "")  # Optional eval prompt for quality scoring
+    use_case = data.get("use_case", "General task")
 
     if not prompt_a or not prompt_b:
         raise HTTPException(status_code=400, detail="Both prompt_a and prompt_b are required")
@@ -1303,7 +886,21 @@ async def ab_test(data: dict):
     results_a = []
     results_b = []
 
-    for test_input in test_inputs[:5]:  # Limit to 5 tests
+    # Default eval prompt if not provided
+    if not eval_prompt:
+        eval_prompt = f"""Evaluate this output for the task: {use_case}
+
+Rate the output on a scale of 1-5 where:
+- 5: Excellent - Fully addresses the request with high quality
+- 4: Good - Addresses the request well with minor issues
+- 3: Acceptable - Addresses the request but has notable weaknesses
+- 2: Poor - Partially addresses the request with significant issues
+- 1: Unacceptable - Does not address the request or has major problems
+
+Return JSON:
+{{"score": <1-5>, "reasoning": "<brief explanation>"}}"""
+
+    for test_input in test_inputs[:10]:  # Allow up to 10 tests
         # Test prompt A
         result_a = await llm_client.chat(
             system_prompt=prompt_a,
@@ -1314,10 +911,36 @@ async def ab_test(data: dict):
             temperature=0.7,
             max_tokens=8000
         )
+
+        output_a = result_a.get("output", "") if not result_a.get("error") else ""
+        score_a = 0
+        reasoning_a = ""
+
+        # Evaluate output A
+        if output_a and not result_a.get("error"):
+            eval_result_a = await llm_client.chat(
+                system_prompt=eval_prompt,
+                user_message=f"Input: {test_input}\n\nOutput to evaluate:\n{output_a}",
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=0.1,
+                max_tokens=500
+            )
+            if not eval_result_a.get("error"):
+                parsed = parse_json_response(eval_result_a.get("output", ""), "object")
+                if parsed:
+                    score_a = parsed.get("score", 0)
+                    reasoning_a = parsed.get("reasoning", "")
+
         results_a.append({
             "input": test_input,
-            "output": result_a.get("output", "Error") if not result_a.get("error") else "Error",
-            "latency_ms": result_a.get("latency_ms", 0)
+            "output": output_a or "Error",
+            "latency_ms": result_a.get("latency_ms", 0),
+            "tokens_used": result_a.get("tokens_used", 0),
+            "quality_score": score_a,
+            "quality_reasoning": reasoning_a,
+            "error": result_a.get("error")
         })
 
         # Test prompt B
@@ -1330,24 +953,105 @@ async def ab_test(data: dict):
             temperature=0.7,
             max_tokens=8000
         )
+
+        output_b = result_b.get("output", "") if not result_b.get("error") else ""
+        score_b = 0
+        reasoning_b = ""
+
+        # Evaluate output B
+        if output_b and not result_b.get("error"):
+            eval_result_b = await llm_client.chat(
+                system_prompt=eval_prompt,
+                user_message=f"Input: {test_input}\n\nOutput to evaluate:\n{output_b}",
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=0.1,
+                max_tokens=500
+            )
+            if not eval_result_b.get("error"):
+                parsed = parse_json_response(eval_result_b.get("output", ""), "object")
+                if parsed:
+                    score_b = parsed.get("score", 0)
+                    reasoning_b = parsed.get("reasoning", "")
+
         results_b.append({
             "input": test_input,
-            "output": result_b.get("output", "Error") if not result_b.get("error") else "Error",
-            "latency_ms": result_b.get("latency_ms", 0)
+            "output": output_b or "Error",
+            "latency_ms": result_b.get("latency_ms", 0),
+            "tokens_used": result_b.get("tokens_used", 0),
+            "quality_score": score_b,
+            "quality_reasoning": reasoning_b,
+            "error": result_b.get("error")
         })
 
     # Calculate metrics
+    valid_a = [r for r in results_a if r["quality_score"] > 0]
+    valid_b = [r for r in results_b if r["quality_score"] > 0]
+
     avg_latency_a = sum(r["latency_ms"] for r in results_a) / len(results_a) if results_a else 0
     avg_latency_b = sum(r["latency_ms"] for r in results_b) / len(results_b) if results_b else 0
+
+    avg_quality_a = sum(r["quality_score"] for r in valid_a) / len(valid_a) if valid_a else 0
+    avg_quality_b = sum(r["quality_score"] for r in valid_b) / len(valid_b) if valid_b else 0
+
+    avg_tokens_a = sum(r["tokens_used"] for r in results_a) / len(results_a) if results_a else 0
+    avg_tokens_b = sum(r["tokens_used"] for r in results_b) / len(results_b) if results_b else 0
+
+    # Calculate statistical significance (simple t-test approximation)
+    def calculate_stats(scores):
+        if len(scores) < 2:
+            return {"mean": 0, "std": 0, "n": 0}
+        mean = sum(scores) / len(scores)
+        variance = sum((x - mean) ** 2 for x in scores) / (len(scores) - 1) if len(scores) > 1 else 0
+        return {"mean": mean, "std": variance ** 0.5, "n": len(scores)}
+
+    stats_a = calculate_stats([r["quality_score"] for r in valid_a])
+    stats_b = calculate_stats([r["quality_score"] for r in valid_b])
+
+    # Determine winner based on quality (primary) and latency (secondary)
+    quality_diff = avg_quality_a - avg_quality_b
+    if abs(quality_diff) >= 0.5:
+        winner = "A" if quality_diff > 0 else "B"
+        winner_reason = f"Higher quality score ({max(avg_quality_a, avg_quality_b):.2f} vs {min(avg_quality_a, avg_quality_b):.2f})"
+    elif abs(avg_latency_a - avg_latency_b) > 100:
+        winner = "A" if avg_latency_a < avg_latency_b else "B"
+        winner_reason = f"Lower latency ({min(avg_latency_a, avg_latency_b):.0f}ms vs {max(avg_latency_a, avg_latency_b):.0f}ms)"
+    else:
+        winner = "TIE"
+        winner_reason = "No significant difference in quality or latency"
+
+    # Calculate effect size (Cohen's d)
+    pooled_std = ((stats_a["std"]**2 + stats_b["std"]**2) / 2) ** 0.5 if stats_a["std"] or stats_b["std"] else 1
+    effect_size = quality_diff / pooled_std if pooled_std > 0 else 0
 
     return {
         "prompt_a_results": results_a,
         "prompt_b_results": results_b,
         "summary": {
-            "prompt_a_avg_latency": round(avg_latency_a, 2),
-            "prompt_b_avg_latency": round(avg_latency_b, 2),
-            "tests_run": len(test_inputs[:5]),
-            "winner": "A" if avg_latency_a < avg_latency_b else "B"
+            "tests_run": len(test_inputs[:10]),
+            "prompt_a": {
+                "avg_latency_ms": round(avg_latency_a, 2),
+                "avg_quality_score": round(avg_quality_a, 2),
+                "avg_tokens": round(avg_tokens_a, 0),
+                "valid_tests": len(valid_a),
+                "stats": stats_a
+            },
+            "prompt_b": {
+                "avg_latency_ms": round(avg_latency_b, 2),
+                "avg_quality_score": round(avg_quality_b, 2),
+                "avg_tokens": round(avg_tokens_b, 0),
+                "valid_tests": len(valid_b),
+                "stats": stats_b
+            },
+            "comparison": {
+                "winner": winner,
+                "winner_reason": winner_reason,
+                "quality_difference": round(quality_diff, 2),
+                "latency_difference_ms": round(avg_latency_a - avg_latency_b, 2),
+                "effect_size": round(effect_size, 3),
+                "is_significant": abs(effect_size) >= 0.5  # Medium effect size
+            }
         }
     }
 

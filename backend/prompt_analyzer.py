@@ -363,6 +363,8 @@ def detect_prompt_type(text: str) -> tuple[PromptType, List[PromptType]]:
 def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str, float]]:
     """Calculate quality score and breakdown"""
     breakdown = {}
+    text_lower = text.lower()
+    word_count = len(text.split())
 
     # Structure score (0-10)
     structure_score = 5.0
@@ -374,11 +376,15 @@ def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str,
         structure_score += 1
     if dna.output_format:
         structure_score += 1
+    # Bonus for structural markers
+    if any(marker in text for marker in ['##', '**', '###', '---', '===', '```']):
+        structure_score += 0.5
+    if re.search(r'^\s*[\d]+\.|\*\s|-\s', text, re.MULTILINE):
+        structure_score += 0.5
     breakdown['structure'] = min(10, structure_score)
 
     # Clarity score (0-10)
     clarity_score = 5.0
-    word_count = len(text.split())
     if 100 < word_count < 2000:
         clarity_score += 1
     if len(dna.constraints) > 0:
@@ -386,10 +392,13 @@ def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str,
     if dna.scoring_scale:
         clarity_score += 1
     # Check for clear instructions
-    if any(word in text.lower() for word in ['must', 'should', 'always', 'never']):
+    if any(word in text_lower for word in ['must', 'should', 'always', 'never']):
         clarity_score += 1
-    if '1.' in text or 'step 1' in text.lower():
+    if '1.' in text or 'step 1' in text_lower:
         clarity_score += 1
+    # Bonus for explicit task definition
+    if any(phrase in text_lower for phrase in ['your task', 'you will', 'you are']):
+        clarity_score += 0.5
     breakdown['clarity'] = min(10, clarity_score)
 
     # Completeness score (0-10)
@@ -404,6 +413,9 @@ def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str,
         completeness_score += 1
     if len(dna.template_variables) > 0:
         completeness_score += 1
+    # Bonus for input/output specification
+    if any(word in text_lower for word in ['input', 'output', 'return', 'respond']):
+        completeness_score += 0.5
     breakdown['completeness'] = min(10, completeness_score)
 
     # Output format score (0-10)
@@ -412,8 +424,11 @@ def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str,
         format_score += 2
     if dna.output_schema:
         format_score += 2
-    if 'example' in text.lower() or 'sample' in text.lower():
+    if 'example' in text_lower or 'sample' in text_lower:
         format_score += 1
+    # Bonus for format specifications
+    if any(fmt in text_lower for fmt in ['json', 'xml', 'markdown', 'yaml']):
+        format_score += 0.5
     breakdown['output_format'] = min(10, format_score)
 
     # Calculate overall

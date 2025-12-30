@@ -80,23 +80,66 @@ fi
 # Check if .env exists
 if [ ! -f "$BACKEND_DIR/.env" ]; then
     echo -e "${YELLOW}Warning: .env file not found in backend directory${NC}"
-    echo -e "${YELLOW}Please create a .env file with your configuration${NC}"
+    echo -e "${YELLOW}Creating a default .env from .env.example if it exists...${NC}"
+    if [ -f "$BACKEND_DIR/env.example" ]; then
+        cp "$BACKEND_DIR/env.example" "$BACKEND_DIR/.env"
+        echo -e "${GREEN}Created .env from env.example${NC}"
+    elif [ -f "$SCRIPT_DIR/env.example" ]; then
+        cp "$SCRIPT_DIR/env.example" "$BACKEND_DIR/.env"
+        echo -e "${GREEN}Created .env from root env.example${NC}"
+    else
+        echo -e "${RED}No .env.example found. Please configure .env manually.${NC}"
+    fi
 fi
 
-# Start backend in background
+# Start backend in background with logging
+BE_LOG="$BACKEND_DIR/server.log"
 (
     cd "$BACKEND_DIR"
     source venv/bin/activate
     echo -e "${GREEN}✓ Backend virtual environment activated${NC}"
     echo -e "${GREEN}✓ Starting FastAPI server on http://localhost:8000${NC}"
-    uvicorn server:app --reload --host 0.0.0.0 --port 8000
+    # Use tee to show output and save to log
+    uvicorn server:app --reload --host 0.0.0.0 --port 8000 > "$BE_LOG" 2>&1
 ) &
 
 BACKEND_PID=$!
-echo -e "${GREEN}✓ Backend server started (PID: $BACKEND_PID)${NC}\n"
+echo -e "${GREEN}✓ Backend server process spawned (PID: $BACKEND_PID)${NC}"
 
-# Wait a bit for backend to start
-sleep 3
+# Health check
+echo -e "${BLUE}Waiting for backend to become healthy...${NC}"
+MAX_RETRIES=30
+COUNT=0
+HEALTHY=0
+
+while [ $COUNT -lt $MAX_RETRIES ]; do
+    if curl -s http://localhost:8000/docs > /dev/null; then
+        HEALTHY=1
+        break
+    fi
+    # Check if process is still running
+    if ! kill -0 $BACKEND_PID 2>/dev/null; then
+        echo -e "${RED}Backend process died unexpectedly!${NC}"
+        echo -e "${RED}Last 10 lines of log ($BE_LOG):${NC}"
+        tail -n 10 "$BE_LOG"
+        exit 1
+    fi
+    sleep 1
+    echo -n "."
+    COUNT=$((COUNT+1))
+done
+echo ""
+
+if [ $HEALTHY -eq 1 ]; then
+    echo -e "${GREEN}✓ Backend is healthy and responding!${NC}\n"
+else
+    echo -e "${RED}Backend failed to start within $MAX_RETRIES seconds.${NC}"
+    echo -e "${RED}Check logs at $BE_LOG${NC}"
+    kill $BACKEND_PID 2>/dev/null || true
+    echo -e "${RED}Last 10 lines of log:${NC}"
+    tail -n 10 "$BE_LOG"
+    exit 1
+fi
 
 # Start Frontend Server
 echo -e "${GREEN}[2/2] Starting Frontend Server...${NC}"

@@ -398,7 +398,7 @@ Example:
 You are a helpful AI assistant. Analyze the following text and provide insights..."
                 value={promptText}
                 onChange={(e) => setPromptText(e.target.value)}
-                className="min-h-[400px] bg-slate-900/50 border-slate-600/50 text-white placeholder:text-slate-500 font-mono text-sm resize-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
+                className="min-h-[400px] bg-white border-slate-300 text-black placeholder:text-slate-400 font-mono text-sm resize-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
                 data-testid="prompt-input"
               />
               <Button
