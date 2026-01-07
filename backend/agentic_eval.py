@@ -20,6 +20,31 @@ from prompt_analyzer import analyze_prompt, analysis_to_dict, PromptAnalysis
 logger = logging.getLogger(__name__)
 
 
+def extract_template_variables(prompt_text: str) -> List[str]:
+    """Extract template variables like {{callTranscript}} from the prompt"""
+    pattern = r'\{\{(\w+)\}\}'
+    matches = re.findall(pattern, prompt_text)
+    return list(set(matches))  # Remove duplicates
+
+
+def get_primary_input_variable(system_prompt: str) -> str:
+    """
+    Get the primary input variable name from the system prompt.
+    Returns the extracted variable name or 'input' as fallback.
+    """
+    variables = extract_template_variables(system_prompt)
+    if variables:
+        # Prefer variables that look like inputs
+        input_keywords = ['input', 'transcript', 'text', 'content', 'data', 'query', 'message', 'code', 'email', 'document']
+        for var in variables:
+            var_lower = var.lower()
+            for keyword in input_keywords:
+                if keyword in var_lower:
+                    return var
+        return variables[0]
+    return "input"
+
+
 @dataclass
 class FailureMode:
     """A specific way the system prompt's output could fail"""
@@ -521,8 +546,16 @@ async def build_eval_prompt(
 ) -> str:
     """
     Step 5: Build the final evaluation prompt from the dimensions.
+    Uses the actual template variable names from the system prompt (e.g., {{callTranscript}})
+    instead of generic {{input}}/{{output}}.
     """
     deep = analysis.get("deep", {})
+
+    # Extract the primary input variable from the system prompt
+    input_var_name = get_primary_input_variable(system_prompt)
+    output_var_name = "output"  # Response is always 'output'
+
+    logger.info(f"Using input variable: {{{{{input_var_name}}}}} (extracted from system prompt)")
 
     # Build dimension sections
     dimension_sections = []
@@ -556,8 +589,8 @@ Your goal is to evaluate the OUTPUT QUALITY - not to re-do the task yourself. Fo
 ## II. Information Provided for Evaluation
 
 You will receive:
-- **{{{{input}}}}**: The user's input/query that was sent to the system
-- **{{{{output}}}}**: The system's response that you must evaluate
+- **{{{{{input_var_name}}}}}**: The user's input/query that was sent to the system
+- **{{{{{output_var_name}}}}}**: The system's response that you must evaluate
 
 ## III. Core Expectations
 
@@ -580,8 +613,8 @@ The following issues should result in a FAIL verdict:
 ## VI. Evaluation Task
 
 Follow these steps:
-1. Read the {{{{input}}}} carefully to understand what was requested
-2. Read the {{{{output}}}} and assess it against each dimension
+1. Read the {{{{{input_var_name}}}}} carefully to understand what was requested
+2. Read the {{{{{output_var_name}}}}} and assess it against each dimension
 3. Check for any critical failure modes (auto-fail)
 4. Assign a score (1-5) for each dimension with brief rationale
 5. Calculate overall score and determine verdict

@@ -26,6 +26,31 @@ from llm_client_v2 import EnhancedLLMClient, parse_json_response
 logger = logging.getLogger(__name__)
 
 
+def extract_template_variables(prompt_text: str) -> List[str]:
+    """Extract template variables like {{callTranscript}} from the prompt"""
+    pattern = r'\{\{(\w+)\}\}'
+    matches = re.findall(pattern, prompt_text)
+    return list(set(matches))  # Remove duplicates
+
+
+def get_primary_input_variable(system_prompt: str) -> str:
+    """
+    Get the primary input variable name from the system prompt.
+    Returns the extracted variable name or 'input' as fallback.
+    """
+    variables = extract_template_variables(system_prompt)
+    if variables:
+        # Prefer variables that look like inputs
+        input_keywords = ['input', 'transcript', 'text', 'content', 'data', 'query', 'message', 'code', 'email', 'document']
+        for var in variables:
+            var_lower = var.lower()
+            for keyword in input_keywords:
+                if keyword in var_lower:
+                    return var
+        return variables[0]
+    return "input"
+
+
 # ============================================================================
 # Data Models
 # ============================================================================
@@ -1098,10 +1123,18 @@ def build_eval_prompt(
     use_case: str
 ) -> str:
     """
-    Build the final evaluation prompt with all components
+    Build the final evaluation prompt with all components.
+    Uses the actual template variable names from the system prompt (e.g., {{callTranscript}})
+    instead of generic {{input}}/{{output}}.
     """
     deep = analysis.get("deep", {})
     programmatic = analysis.get("programmatic", {})
+
+    # Extract the primary input variable from the system prompt
+    input_var_name = get_primary_input_variable(system_prompt)
+    output_var_name = "output"  # Response is always 'output'
+
+    logger.info(f"Using input variable: {{{{{input_var_name}}}}} (extracted from system prompt)")
 
     # Group failure modes by severity
     critical_failures = [fm for fm in failure_modes if fm.severity == FailureSeverity.CRITICAL]
@@ -1171,8 +1204,8 @@ You are an EXPERT EVALUATOR assessing LLM outputs for quality and correctness.
 ## III. Information You Will Receive
 
 For each evaluation, you receive:
-- **{{{{input}}}}**: The original input/query sent to the system
-- **{{{{output}}}}**: The system's response that you must evaluate
+- **{{{{{input_var_name}}}}}**: The original input/query sent to the system
+- **{{{{{output_var_name}}}}}**: The system's response that you must evaluate
 
 ## IV. Critical Failure Modes (AUTO-FAIL)
 
@@ -1242,11 +1275,11 @@ Return your evaluation as valid JSON:
 
 Now evaluate the output below:
 
-**Input:**
-{{{{input}}}}
+**Input ({input_var_name}):**
+{{{{{input_var_name}}}}}
 
-**Output to Evaluate:**
-{{{{output}}}}"""
+**Output to Evaluate ({output_var_name}):**
+{{{{{output_var_name}}}}}"""
 
     return eval_prompt
 

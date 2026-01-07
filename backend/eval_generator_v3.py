@@ -37,6 +37,33 @@ from llm_client_v2 import EnhancedLLMClient, parse_json_response
 logger = logging.getLogger(__name__)
 
 
+def extract_template_variables(prompt_text: str) -> List[str]:
+    """Extract template variables like {{callTranscript}} from the prompt"""
+    pattern = r'\{\{(\w+)\}\}'
+    matches = re.findall(pattern, prompt_text)
+    return list(set(matches))  # Remove duplicates
+
+
+def get_primary_input_variable(system_prompt: str) -> str:
+    """
+    Get the primary input variable name from the system prompt.
+    Returns the extracted variable name or 'input' as fallback.
+    """
+    variables = extract_template_variables(system_prompt)
+    if variables:
+        # Return the first variable (most likely the main input)
+        # Prefer variables that look like inputs over outputs
+        input_keywords = ['input', 'transcript', 'text', 'content', 'data', 'query', 'message', 'code', 'email', 'document']
+        for var in variables:
+            var_lower = var.lower()
+            for keyword in input_keywords:
+                if keyword in var_lower:
+                    return var
+        # If no keyword match, return first variable
+        return variables[0]
+    return "input"
+
+
 # ============================================================================
 # Data Models (Enhanced)
 # ============================================================================
@@ -855,10 +882,18 @@ def build_gold_standard_eval_prompt(
 ) -> str:
     """
     Build the gold-standard evaluation prompt incorporating ALL 20 best practices.
+    Uses the actual template variable names from the system prompt (e.g., {{callTranscript}})
+    instead of generic {{input}}/{{output}}.
     """
 
     deep = analysis.get("deep", {})
     programmatic = analysis.get("programmatic", {})
+
+    # Extract the primary input variable from the system prompt
+    input_var_name = get_primary_input_variable(system_prompt)
+    output_var_name = "output"  # Response is always 'output'
+
+    logger.info(f"Using input variable: {{{{{input_var_name}}}}} (extracted from system prompt)")
 
     # Build dimension sections with full rubrics and NOT-to-check
     dimension_sections = []
@@ -954,8 +989,8 @@ Your evaluation must be **strict, evidence-based, and consistent**.
 
 For each evaluation, you are given:
 
-- **{{{{input}}}}**: The exact prompt/data sent to the system
-- **{{{{output}}}}**: The system's response that you must evaluate
+- **{{{{{input_var_name}}}}}**: The exact prompt/data sent to the system
+- **{{{{{output_var_name}}}}}**: The system's response that you must evaluate
 
 **CRITICAL:** You must not assume any information outside these two artifacts.
 
@@ -1073,11 +1108,11 @@ Similar outputs should receive similar scores. If you've evaluated similar outpu
 
 Now evaluate the output below:
 
-**Input:**
-{{{{input}}}}
+**Input ({input_var_name}):**
+{{{{{input_var_name}}}}}
 
-**Output to Evaluate:**
-{{{{output}}}}"""
+**Output to Evaluate ({output_var_name}):**
+{{{{{output_var_name}}}}}"""
 
     return eval_prompt
 
