@@ -433,146 +433,106 @@ async def execute_rewrite(
     user_analysis_context: Optional[Dict[str, Any]] = None
 ) -> str:
     """
-    Step 3: Execute the rewrite according to the plan.
-    Will retry up to 2 times if LLM returns unchanged prompt.
+    Step 3: Execute the rewrite using a TWO-PHASE approach for guaranteed changes.
 
-    Args:
-        user_analysis_context: Optional dict with user's analysis feedback to incorporate
+    Phase 1: DECOMPOSE - Extract components from original prompt
+    Phase 2: RECONSTRUCT - Build new prompt from components + improvements
+
+    This approach guarantees structural changes because we're rebuilding, not editing.
     """
-    # If no improvements planned, return original
-    if not plan.improve and not plan.add:
-        logger.info("No improvements or additions planned, returning original prompt")
-        return prompt
+    logger.info(f"Executing rewrite (attempt {retry_count + 1})")
 
     programmatic = analysis.get("programmatic", {})
     dna = programmatic.get("dna", {})
 
-    # Build preservation rules
-    preserve_rules = []
-    if dna.get("template_variables"):
-        preserve_rules.append(f"Template variables: {dna['template_variables']} - KEEP EXACTLY")
-    if dna.get("scoring_scale"):
-        preserve_rules.append(f"Scoring scale: {dna['scoring_scale']} - KEEP EXACTLY")
-    if dna.get("output_format"):
-        preserve_rules.append(f"Output format: {dna['output_format']} - KEEP EXACTLY")
+    # Extract template variables to preserve
+    template_vars = dna.get("template_variables", [])
+    template_vars_str = ", ".join([f"{{{{{v}}}}}" for v in template_vars]) if template_vars else "None"
 
-    # Build improvement instructions - be very explicit
-    improvements_text = ""
-    for i, imp in enumerate(plan.improve, 1):
-        area = imp.get('area', 'Unknown')
-        current = imp.get('current', '')
-        target = imp.get('target', '')
-        reason = imp.get('reason', '')
-        improvements_text += f"\n{i}. **{area}**"
-        if current:
-            improvements_text += f"\n   - CURRENT: {current}"
-        improvements_text += f"\n   - CHANGE TO: {target}"
-        if reason:
-            improvements_text += f"\n   - REASON: {reason}"
+    # Build improvements list
+    improvements_list = []
+    for imp in plan.improve:
+        improvements_list.append(f"- {imp.get('area', 'General')}: {imp.get('target', 'Improve')}")
+    for add in plan.add:
+        improvements_list.append(f"- ADD: {add}")
 
-    additions_text = ""
-    if plan.add:
-        for i, add in enumerate(plan.add, 1):
-            additions_text += f"\n{i}. {add}"
-    else:
-        additions_text = "None"
-
-    # Build user analysis feedback section (from Re-Analyze results)
-    user_feedback_text = ""
+    # Add user feedback
     if user_analysis_context:
-        suggestions = user_analysis_context.get("suggestions", [])
-        missing_reqs = user_analysis_context.get("missing_requirements", [])
-        best_practices = user_analysis_context.get("best_practices_gaps", [])
+        for req in user_analysis_context.get("missing_requirements", [])[:3]:
+            improvements_list.append(f"- FIX: {req}")
+        for sug in user_analysis_context.get("suggestions", [])[:3]:
+            if isinstance(sug, dict):
+                improvements_list.append(f"- {sug.get('suggestion', str(sug))}")
+            else:
+                improvements_list.append(f"- {sug}")
 
-        if suggestions or missing_reqs or best_practices:
-            user_feedback_text = "\n\n## USER ANALYSIS FEEDBACK (MUST ADDRESS THESE):\n"
-            if missing_reqs:
-                user_feedback_text += "\n**MISSING REQUIREMENTS (FIX THESE):**\n"
-                for req in missing_reqs[:5]:
-                    user_feedback_text += f"- {req}\n"
-            if suggestions:
-                user_feedback_text += "\n**TOP SUGGESTIONS TO IMPLEMENT:**\n"
-                for sug in suggestions[:5]:
-                    if isinstance(sug, dict):
-                        priority = sug.get('priority', 'Medium')
-                        text = sug.get('suggestion', sug.get('text', str(sug)))
-                        user_feedback_text += f"- [{priority}] {text}\n"
-                    else:
-                        user_feedback_text += f"- {sug}\n"
-            if best_practices:
-                user_feedback_text += "\n**BEST PRACTICES TO ADD:**\n"
-                for bp in best_practices[:5]:
-                    user_feedback_text += f"- {bp}\n"
+    improvements_str = "\n".join(improvements_list) if improvements_list else "- Add clear structure\n- Improve clarity"
 
-    # More forceful system prompt
-    system_prompt = f"""You are an expert prompt engineer. Your ONLY task is to rewrite the given prompt.
+    # PHASE 1 & 2 COMBINED: Decompose and reconstruct in one call
+    system_prompt = f"""You are a prompt engineering expert. Your task is to COMPLETELY REWRITE a prompt.
 
-## CRITICAL INSTRUCTION - READ CAREFULLY
-You MUST produce a COMPLETELY REWRITTEN version of the prompt.
-DO NOT return the original prompt.
-DO NOT return a slightly modified version.
-You MUST restructure and rewrite the ENTIRE prompt from scratch while preserving template variables.
+## YOUR PROCESS
+1. First, mentally extract the CORE INTENT from the original prompt
+2. Then, BUILD A NEW PROMPT from scratch using proper structure
+3. The new prompt should achieve the same goal but be structured professionally
 
-## REQUIRED STRUCTURE FOR YOUR REWRITE
-Your rewritten prompt MUST follow this structure:
+## REQUIRED OUTPUT STRUCTURE
+You MUST output a prompt with ALL of these sections:
 
 ```
 # Role
-[Define a clear role for the AI]
+You are a [specific role] specialized in [domain].
 
 ## Context
-[Explain the background and purpose]
+[Why this task matters, background information]
 
 ## Task
-[Clearly state what the AI must do]
+[Clear, specific description of what to do]
 
-## Input Format
+## Input
+The input will be provided in the following format:
 <input>
-[Define expected input format]
+[Describe expected input structure]
 </input>
 
 ## Requirements
-[List numbered requirements/constraints]
+1. [First requirement]
+2. [Second requirement]
+3. [Continue as needed]
+
+## Constraints
+- [What NOT to do]
+- [Limitations to respect]
 
 ## Output Format
 <output>
-[Specify exact output format]
+[Exact format specification with field names]
 </output>
-
-## Examples (if applicable)
-<examples>
-[Add helpful examples]
-</examples>
 ```
 
-## CHANGES YOU MUST APPLY
-{improvements_text if improvements_text else "Add structure, clarity, and organization"}
+## IMPROVEMENTS TO INCORPORATE
+{improvements_str}
 
-## ELEMENTS TO ADD
-{additions_text}
-{user_feedback_text}
-## PRESERVATION RULES
-{chr(10).join(preserve_rules) if preserve_rules else "None specified"}
+## TEMPLATE VARIABLES TO PRESERVE
+{template_vars_str}
+These must appear EXACTLY as written (with double curly braces) in your output.
 
-## FINAL INSTRUCTIONS
-1. Your output must be the COMPLETE rewritten prompt
-2. DO NOT include any explanations before or after
-3. DO NOT wrap in markdown code blocks
-4. The structure should be visibly different from the input
-5. Keep any {{{{variable}}}} placeholders exactly as written"""
+## CRITICAL RULES
+1. DO NOT copy sentences from the original - rephrase everything
+2. DO NOT skip any section - include ALL sections listed above
+3. DO NOT add explanations before or after the prompt
+4. DO NOT wrap in markdown code blocks
+5. The output should be 2-3x longer than the input due to added structure"""
 
-    user_message = f"""REWRITE THIS PROMPT COMPLETELY:
-
----BEGIN ORIGINAL PROMPT---
+    user_message = f"""ORIGINAL PROMPT TO REWRITE:
+\"\"\"
 {prompt}
----END ORIGINAL PROMPT---
+\"\"\"
 
-Use Case: {use_case}
-Requirements: {requirements}
+USE CASE: {use_case}
+REQUIREMENTS: {requirements}
 
-NOW OUTPUT THE COMPLETELY REWRITTEN PROMPT (no explanations, no code blocks):"""
-
-    logger.info(f"Executing rewrite with {len(plan.improve)} improvements and {len(plan.add)} additions (attempt {retry_count + 1})")
+Now output the COMPLETE rewritten prompt with all sections. Start directly with "# Role":"""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -580,41 +540,49 @@ NOW OUTPUT THE COMPLETELY REWRITTEN PROMPT (no explanations, no code blocks):"""
         provider=provider,
         api_key=api_key,
         model_name=model_name,
-        temperature=0.5 + (retry_count * 0.2),  # Increase temperature on retries
+        temperature=0.7,  # Higher temperature for creativity
         max_tokens=8000
     )
 
-    if result.get("error"):
-        logger.error(f"Execution failed: {result['error']}")
+    if not result or result.get("error"):
+        error_msg = result.get("error") if result else "No response"
+        logger.error(f"Rewrite failed: {error_msg}")
         return prompt
 
     rewritten = result.get("output", "").strip()
 
-    # Remove markdown wrapper if present
-    if rewritten.startswith("```"):
-        # Find the end of the code block
-        lines = rewritten.split("\n")
-        if lines[-1].strip() == "```":
-            # Remove first line (```...) and last line (```)
-            rewritten = "\n".join(lines[1:-1]).strip()
-        elif "```" in rewritten[3:]:
-            # Code block somewhere in the middle, extract it
-            start = rewritten.find("\n") + 1
-            end = rewritten.rfind("```")
-            if start < end:
-                rewritten = rewritten[start:end].strip()
+    # Clean up output
+    rewritten = _clean_rewrite_output(rewritten)
 
-    # Check if the prompt was actually changed
-    original_normalized = ' '.join(prompt.lower().split())
-    rewritten_normalized = ' '.join(rewritten.lower().split())
+    # Validate the rewrite has actual structure
+    has_structure = any(marker in rewritten for marker in ["# Role", "## Task", "## Output", "## Requirements"])
 
-    # Calculate similarity (simple approach)
-    similarity = _calculate_similarity(original_normalized, rewritten_normalized)
-    logger.info(f"Rewrite similarity to original: {similarity:.1%}")
+    if not has_structure and retry_count < 2:
+        logger.warning("Rewrite lacks required structure, retrying...")
+        return await execute_rewrite(
+            prompt=prompt,
+            plan=plan,
+            analysis=analysis,
+            use_case=use_case,
+            requirements=requirements,
+            llm_client=llm_client,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            retry_count=retry_count + 1,
+            user_analysis_context=user_analysis_context
+        )
 
-    # If too similar (>90% same), retry with higher temperature
-    if similarity > 0.9 and retry_count < 2:
-        logger.warning(f"Rewritten prompt is {similarity:.1%} similar to original, retrying with higher temperature")
+    # Check similarity
+    similarity = _calculate_similarity(
+        ' '.join(prompt.lower().split()),
+        ' '.join(rewritten.lower().split())
+    )
+    logger.info(f"Rewrite complete. Similarity: {similarity:.1%}, Length: {len(prompt)} -> {len(rewritten)}")
+
+    # If still too similar, try once more with even higher temperature
+    if similarity > 0.85 and retry_count < 2:
+        logger.warning(f"Rewrite too similar ({similarity:.1%}), retrying...")
         return await execute_rewrite(
             prompt=prompt,
             plan=plan,
@@ -635,6 +603,46 @@ NOW OUTPUT THE COMPLETELY REWRITTEN PROMPT (no explanations, no code blocks):"""
 
     logger.info(f"Rewrite complete. Original length: {len(prompt)}, New length: {len(rewritten)}")
     return rewritten
+
+
+def _clean_rewrite_output(text: str) -> str:
+    """Clean up LLM output from rewrite - remove code blocks, explanations, etc."""
+    if not text:
+        return text
+
+    text = text.strip()
+
+    # Remove markdown code blocks
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Remove first line (```markdown or ```)
+        if lines:
+            lines = lines[1:]
+        # Remove last line if it's ```
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # Remove common preambles
+    preambles = [
+        "Here is the rewritten prompt:",
+        "Here's the rewritten prompt:",
+        "Here is your rewritten prompt:",
+        "Below is the rewritten prompt:",
+        "The rewritten prompt:",
+        "Rewritten prompt:",
+    ]
+    for preamble in preambles:
+        if text.lower().startswith(preamble.lower()):
+            text = text[len(preamble):].strip()
+
+    # If text starts with quotes, remove them
+    if text.startswith('"""') and text.endswith('"""'):
+        text = text[3:-3].strip()
+    elif text.startswith('"') and text.endswith('"'):
+        text = text[1:-1].strip()
+
+    return text
 
 
 def _calculate_similarity(text1: str, text2: str) -> float:

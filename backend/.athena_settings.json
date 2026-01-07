@@ -1,0 +1,5 @@
+{
+  "llm_provider": "openai",
+  "api_key": "test-key-123",
+  "model_name": "gpt-4o"
+}

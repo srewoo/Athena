@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, PlayCircle, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -65,6 +65,14 @@ const PromptOptimizer = () => {
   const [evalFeedback, setEvalFeedback] = useState("");
   const [isRefiningEval, setIsRefiningEval] = useState(false);
   const [evalChanges, setEvalChanges] = useState([]);
+
+  // Eval Prompt Testing
+  const [showEvalTest, setShowEvalTest] = useState(false);
+  const [evalTestInput, setEvalTestInput] = useState("");
+  const [evalTestOutput, setEvalTestOutput] = useState("");
+  const [evalTestExpectedScore, setEvalTestExpectedScore] = useState("");
+  const [evalTestResult, setEvalTestResult] = useState(null);
+  const [isTestingEval, setIsTestingEval] = useState(false);
 
   // Section 4: Dataset
   const [dataset, setDataset] = useState(null);
@@ -167,6 +175,13 @@ const PromptOptimizer = () => {
   // Version comparison state
   const [selectedVersionsForCompare, setSelectedVersionsForCompare] = useState([]);
   const [versionCompareModalOpen, setVersionCompareModalOpen] = useState(false);
+  const [diffViewMode, setDiffViewMode] = useState("side-by-side"); // "side-by-side" or "unified"
+  const [versionDiffData, setVersionDiffData] = useState(null);
+  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+
+  // Regression detection state
+  const [regressionAlert, setRegressionAlert] = useState(null);
+  const [isCheckingRegression, setIsCheckingRegression] = useState(false);
 
   // Load existing settings on mount - from localStorage first, then sync to backend
   useEffect(() => {
@@ -948,6 +963,86 @@ const PromptOptimizer = () => {
     }
   };
 
+  // Test the eval prompt with a sample input/output
+  const handleTestEvalPrompt = async () => {
+    if (!projectId || !evalPrompt.trim()) {
+      toast({
+        title: "Eval Prompt Required",
+        description: "Please generate an eval prompt first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (!evalTestInput.trim() || !evalTestOutput.trim()) {
+      toast({
+        title: "Sample Input/Output Required",
+        description: "Please provide both a sample input and sample output to test",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (!settingsLoaded || !apiKey) {
+      toast({
+        title: "Settings Required",
+        description: "Please configure your LLM settings first (click the gear icon)",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsTestingEval(true);
+    setEvalTestResult(null);
+
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eval_prompt: evalPrompt,
+          sample_input: evalTestInput,
+          sample_output: evalTestOutput,
+          expected_score: evalTestExpectedScore ? parseInt(evalTestExpectedScore) : null
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || "Failed to test eval prompt");
+      }
+
+      const result = await response.json();
+      setEvalTestResult(result);
+
+      if (result.success) {
+        toast({
+          title: "Eval Prompt Test Complete",
+          description: `Score: ${result.score}/5 - ${result.parsing_status === "success" ? "Parsing successful" : "Partial parsing"}`
+        });
+      } else {
+        toast({
+          title: "Eval Prompt Issues Detected",
+          description: result.error || "Could not parse score from output",
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Test Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+      setEvalTestResult({
+        success: false,
+        error: error.message,
+        parsing_status: "failed"
+      });
+    } finally {
+      setIsTestingEval(false);
+    }
+  };
+
   const handleGenerateDataset = async (overrideSampleCount = null) => {
     if (!projectId) return;
 
@@ -1074,6 +1169,64 @@ const PromptOptimizer = () => {
       });
     }
   };
+
+  // Fetch version diff when comparing exactly 2 versions
+  const fetchVersionDiff = async (versionA, versionB) => {
+    if (!projectId) return;
+    setIsLoadingDiff(true);
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/versions/diff`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version_a: versionA, version_b: versionB })
+      });
+      if (!response.ok) throw new Error("Failed to fetch diff");
+      const data = await response.json();
+      setVersionDiffData(data);
+    } catch (error) {
+      console.error("Error fetching diff:", error);
+      setVersionDiffData(null);
+    } finally {
+      setIsLoadingDiff(false);
+    }
+  };
+
+  // Check for regression when version changes
+  const checkRegression = async (versionNum = null) => {
+    if (!projectId) return;
+    setIsCheckingRegression(true);
+    try {
+      const url = versionNum
+        ? `${API}/projects/${projectId}/versions/regression-check?version=${versionNum}`
+        : `${API}/projects/${projectId}/versions/regression-check`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed to check regression");
+      const data = await response.json();
+      setRegressionAlert(data);
+
+      // Show toast if regression detected
+      if (data.has_regression) {
+        toast({
+          title: "Regression Detected",
+          description: data.recommendation,
+          variant: "destructive",
+          duration: 10000
+        });
+      }
+    } catch (error) {
+      console.error("Error checking regression:", error);
+      setRegressionAlert(null);
+    } finally {
+      setIsCheckingRegression(false);
+    }
+  };
+
+  // Check regression after analysis completes
+  useEffect(() => {
+    if (analysisResults && versionHistory.length >= 2 && currentVersion) {
+      checkRegression(currentVersion.version);
+    }
+  }, [analysisResults]);
 
   // ============= Regenerate Handlers =============
 
@@ -2338,6 +2491,70 @@ const PromptOptimizer = () => {
                     </Button>
                   </div>
 
+                  {/* Regression Alert Banner */}
+                  {regressionAlert && regressionAlert.has_regression && (
+                    <div className="mt-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg">
+                      <div className="flex items-start gap-3">
+                        <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-red-700 dark:text-red-400">Regression Detected</h4>
+                          <p className="text-sm text-red-600 dark:text-red-300 mt-1">
+                            Version {regressionAlert.current_version} scored {regressionAlert.current_score} vs Version {regressionAlert.previous_version}'s {regressionAlert.previous_score} ({regressionAlert.score_change > 0 ? '+' : ''}{regressionAlert.score_change} points)
+                          </p>
+                          <p className="text-xs text-red-500 dark:text-red-400 mt-2">{regressionAlert.recommendation}</p>
+                          <div className="flex gap-2 mt-3">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                // Load the previous (better) version
+                                const prevVersion = versionHistory.find(v => v.version === regressionAlert.previous_version);
+                                if (prevVersion) {
+                                  setCurrentVersion(prevVersion);
+                                  toast({ title: "Reverted", description: `Switched to Version ${regressionAlert.previous_version}` });
+                                }
+                              }}
+                              className="border-red-500 text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30"
+                            >
+                              Revert to Version {regressionAlert.previous_version}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setRegressionAlert(null)}
+                              className="text-slate-600 dark:text-slate-400"
+                            >
+                              Dismiss
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Improvement Alert Banner */}
+                  {regressionAlert && !regressionAlert.has_regression && regressionAlert.score_change > 5 && (
+                    <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg">
+                      <div className="flex items-start gap-3">
+                        <TrendingUp className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-green-700 dark:text-green-400">Improvement Detected</h4>
+                          <p className="text-sm text-green-600 dark:text-green-300 mt-1">
+                            Version {regressionAlert.current_version} scored {regressionAlert.current_score} vs Version {regressionAlert.previous_version}'s {regressionAlert.previous_score} (+{regressionAlert.score_change} points)
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setRegressionAlert(null)}
+                            className="text-slate-600 dark:text-slate-400 mt-2"
+                          >
+                            Dismiss
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Version History */}
                   {versionHistory.length > 1 && (
                     <div className="mt-6">
@@ -2349,7 +2566,14 @@ const PromptOptimizer = () => {
                         {selectedVersionsForCompare.length >= 2 && (
                           <Button
                             size="sm"
-                            onClick={() => setVersionCompareModalOpen(true)}
+                            onClick={() => {
+                              setVersionCompareModalOpen(true);
+                              // Fetch diff if exactly 2 versions selected
+                              if (selectedVersionsForCompare.length === 2) {
+                                const sorted = [...selectedVersionsForCompare].sort((a, b) => a - b);
+                                fetchVersionDiff(sorted[0], sorted[1]);
+                              }
+                            }}
                             className="bg-purple-600 hover:bg-purple-700 text-white"
                           >
                             <ArrowUpDown className="w-4 h-4 mr-1" />
@@ -2604,6 +2828,14 @@ const PromptOptimizer = () => {
                           Review & Refine
                         </Button>
                         <Button
+                          variant="outline"
+                          onClick={() => setShowEvalTest(!showEvalTest)}
+                          className="border-orange-600 text-orange-600 dark:text-orange-400 hover:bg-orange-900/20"
+                        >
+                          <PlayCircle className="w-4 h-4 mr-2" />
+                          Test Eval Prompt
+                        </Button>
+                        <Button
                           onClick={() => {
                             setExpandedSections(prev => ({
                               ...prev,
@@ -2616,6 +2848,166 @@ const PromptOptimizer = () => {
                           Continue to Dataset
                         </Button>
                       </div>
+
+                      {/* Eval Prompt Testing UI */}
+                      {showEvalTest && (
+                        <div className="bg-orange-50 dark:bg-orange-900/20 border border-orange-300 dark:border-orange-700 rounded-lg p-4 space-y-4 mt-4">
+                          <div className="flex items-center justify-between">
+                            <h3 className="font-semibold text-orange-600 dark:text-orange-400 flex items-center gap-2">
+                              <PlayCircle className="w-4 h-4" />
+                              Test Your Evaluation Prompt
+                            </h3>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setShowEvalTest(false);
+                                setEvalTestResult(null);
+                              }}
+                              className="text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                            >
+                              <X className="w-4 h-4" />
+                            </Button>
+                          </div>
+                          <p className="text-sm text-slate-600 dark:text-slate-400">
+                            Test your eval prompt with a sample input/output pair to ensure it produces valid scores.
+                          </p>
+
+                          <div className="grid gap-4">
+                            <div>
+                              <Label className="text-slate-700 dark:text-slate-300">Sample User Input</Label>
+                              <Textarea
+                                value={evalTestInput}
+                                onChange={(e) => setEvalTestInput(e.target.value)}
+                                placeholder="Enter a sample user input that would be sent to your system prompt..."
+                                className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[80px]"
+                              />
+                            </div>
+                            <div>
+                              <Label className="text-slate-700 dark:text-slate-300">Sample AI Output</Label>
+                              <Textarea
+                                value={evalTestOutput}
+                                onChange={(e) => setEvalTestOutput(e.target.value)}
+                                placeholder="Enter a sample AI response to evaluate..."
+                                className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[80px]"
+                              />
+                            </div>
+                            <div>
+                              <Label className="text-slate-700 dark:text-slate-300">Expected Score (optional, 1-5)</Label>
+                              <Input
+                                type="number"
+                                min="1"
+                                max="5"
+                                value={evalTestExpectedScore}
+                                onChange={(e) => setEvalTestExpectedScore(e.target.value)}
+                                placeholder="Enter expected score to validate..."
+                                className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 w-32"
+                              />
+                            </div>
+                          </div>
+
+                          <Button
+                            onClick={handleTestEvalPrompt}
+                            disabled={isTestingEval || !evalTestInput.trim() || !evalTestOutput.trim()}
+                            className="bg-orange-600 hover:bg-orange-700 text-white"
+                          >
+                            {isTestingEval ? (
+                              <>
+                                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                                Testing...
+                              </>
+                            ) : (
+                              <>
+                                <PlayCircle className="w-4 h-4 mr-2" />
+                                Run Test
+                              </>
+                            )}
+                          </Button>
+
+                          {/* Test Results */}
+                          {evalTestResult && (
+                            <div className={`rounded-lg p-4 space-y-3 ${
+                              evalTestResult.success
+                                ? 'bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700'
+                                : 'bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700'
+                            }`}>
+                              <div className="flex items-center justify-between">
+                                <h4 className={`font-semibold ${
+                                  evalTestResult.success
+                                    ? 'text-green-600 dark:text-green-400'
+                                    : 'text-red-600 dark:text-red-400'
+                                }`}>
+                                  {evalTestResult.success ? 'Test Passed' : 'Test Failed'}
+                                </h4>
+                                {evalTestResult.score && (
+                                  <span className="text-2xl font-bold text-slate-700 dark:text-slate-200">
+                                    {evalTestResult.score}/5
+                                  </span>
+                                )}
+                              </div>
+
+                              {evalTestResult.reasoning && (
+                                <div>
+                                  <Label className="text-slate-700 dark:text-slate-300">Reasoning</Label>
+                                  <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+                                    {evalTestResult.reasoning}
+                                  </p>
+                                </div>
+                              )}
+
+                              {evalTestResult.validation && (
+                                <div className="flex flex-wrap gap-2">
+                                  <span className={`px-2 py-1 rounded text-xs ${
+                                    evalTestResult.validation.score_found
+                                      ? 'bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300'
+                                      : 'bg-red-100 dark:bg-red-800 text-red-700 dark:text-red-300'
+                                  }`}>
+                                    Score: {evalTestResult.validation.score_found ? 'Found' : 'Missing'}
+                                  </span>
+                                  <span className={`px-2 py-1 rounded text-xs ${
+                                    evalTestResult.validation.reasoning_found
+                                      ? 'bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300'
+                                      : 'bg-yellow-100 dark:bg-yellow-800 text-yellow-700 dark:text-yellow-300'
+                                  }`}>
+                                    Reasoning: {evalTestResult.validation.reasoning_found ? 'Found' : 'Missing'}
+                                  </span>
+                                  {evalTestResult.validation.expected_score && (
+                                    <span className={`px-2 py-1 rounded text-xs ${
+                                      evalTestResult.validation.score_match
+                                        ? 'bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300'
+                                        : evalTestResult.validation.score_close
+                                          ? 'bg-yellow-100 dark:bg-yellow-800 text-yellow-700 dark:text-yellow-300'
+                                          : 'bg-red-100 dark:bg-red-800 text-red-700 dark:text-red-300'
+                                    }`}>
+                                      Expected: {evalTestResult.validation.expected_score}, Got: {evalTestResult.validation.actual_score}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+
+                              {evalTestResult.suggestions && evalTestResult.suggestions.length > 0 && (
+                                <div>
+                                  <Label className="text-slate-700 dark:text-slate-300">Suggestions</Label>
+                                  <ul className="text-sm text-slate-600 dark:text-slate-400 mt-1 space-y-1">
+                                    {evalTestResult.suggestions.map((suggestion, idx) => (
+                                      <li key={idx} className="flex items-start gap-2">
+                                        <span className="text-orange-500">•</span>
+                                        <span>{suggestion}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {evalTestResult.error && (
+                                <div className="text-sm text-red-600 dark:text-red-400">
+                                  Error: {evalTestResult.error}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </CardContent>
@@ -3639,6 +4031,7 @@ const PromptOptimizer = () => {
         setVersionCompareModalOpen(open);
         if (!open) {
           setSelectedVersionsForCompare([]);
+          setVersionDiffData(null);
         }
       }}>
         <DialogContent className="max-w-[95vw] w-full max-h-[90vh] overflow-hidden flex flex-col">
@@ -3647,83 +4040,195 @@ const PromptOptimizer = () => {
               <ArrowUpDown className="w-5 h-5" />
               Compare Prompt Versions
             </DialogTitle>
-            <DialogDescription>
-              Side-by-side comparison of {selectedVersionsForCompare.length} selected versions
+            <DialogDescription className="flex items-center justify-between">
+              <span>Side-by-side comparison of {selectedVersionsForCompare.length} selected versions</span>
+              {selectedVersionsForCompare.length === 2 && (
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant={diffViewMode === "side-by-side" ? "default" : "outline"}
+                    onClick={() => setDiffViewMode("side-by-side")}
+                    className="text-xs h-7"
+                  >
+                    Side by Side
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={diffViewMode === "unified" ? "default" : "outline"}
+                    onClick={() => setDiffViewMode("unified")}
+                    className="text-xs h-7"
+                  >
+                    Unified Diff
+                  </Button>
+                </div>
+              )}
             </DialogDescription>
           </DialogHeader>
 
+          {/* Diff Stats Banner */}
+          {versionDiffData && selectedVersionsForCompare.length === 2 && (
+            <div className="flex items-center gap-4 px-4 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-sm">
+              <span className="text-slate-600 dark:text-slate-400">
+                Similarity: <span className="font-semibold text-slate-900 dark:text-white">{versionDiffData.similarity_percent}%</span>
+              </span>
+              <span className="text-green-600 dark:text-green-400">
+                +{versionDiffData.stats?.added || 0} added
+              </span>
+              <span className="text-red-600 dark:text-red-400">
+                -{versionDiffData.stats?.removed || 0} removed
+              </span>
+              <span className="text-slate-500 dark:text-slate-400">
+                {versionDiffData.stats?.unchanged || 0} unchanged
+              </span>
+            </div>
+          )}
+
           <div className="flex-1 overflow-auto py-4">
-            <div className={`grid gap-4 ${selectedVersionsForCompare.length === 2 ? 'grid-cols-2' : selectedVersionsForCompare.length === 3 ? 'grid-cols-3' : 'grid-cols-2 lg:grid-cols-4'}`}>
-              {selectedVersionsForCompare
-                .sort((a, b) => a - b)
-                .map((versionNum) => {
-                  const version = versionHistory.find(v => v.version === versionNum);
-                  if (!version) return null;
-                  const avgScore = version.evaluation
-                    ? ((version.evaluation.requirements_alignment || 0) + (version.evaluation.best_practices_score || 0)) / 2
-                    : null;
-                  return (
-                    <div key={versionNum} className="flex flex-col h-full border rounded-lg overflow-hidden bg-white dark:bg-slate-800">
-                      {/* Version Header */}
-                      <div className="p-3 bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-slate-900 dark:text-white">Version {version.version}</span>
-                            {version.version === currentVersion?.version && (
-                              <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+            {/* Unified Diff View (for 2 versions) */}
+            {selectedVersionsForCompare.length === 2 && diffViewMode === "unified" && versionDiffData ? (
+              <div className="border rounded-lg overflow-hidden bg-white dark:bg-slate-800">
+                <div className="p-3 bg-slate-100 dark:bg-slate-700 border-b flex justify-between items-center">
+                  <span className="font-semibold text-slate-900 dark:text-white">
+                    Version {versionDiffData.version_a} → Version {versionDiffData.version_b}
+                  </span>
+                </div>
+                <div className="p-3 overflow-auto font-mono text-sm">
+                  {isLoadingDiff ? (
+                    <div className="flex items-center justify-center py-8">
+                      <RefreshCw className="w-5 h-5 animate-spin text-slate-400" />
+                      <span className="ml-2 text-slate-500">Loading diff...</span>
+                    </div>
+                  ) : (
+                    versionDiffData.diff_lines?.map((line, idx) => (
+                      <div
+                        key={idx}
+                        className={`py-0.5 px-2 -mx-2 ${
+                          line.type === 'added'
+                            ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'
+                            : line.type === 'removed'
+                              ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300'
+                              : 'text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <span className="inline-block w-8 text-slate-400 select-none">
+                          {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
+                        </span>
+                        <span className="whitespace-pre-wrap">
+                          {line.content_a || line.content_b || ''}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* Side-by-Side View */
+              <div className={`grid gap-4 ${selectedVersionsForCompare.length === 2 ? 'grid-cols-2' : selectedVersionsForCompare.length === 3 ? 'grid-cols-3' : 'grid-cols-2 lg:grid-cols-4'}`}>
+                {selectedVersionsForCompare
+                  .sort((a, b) => a - b)
+                  .map((versionNum, colIdx) => {
+                    const version = versionHistory.find(v => v.version === versionNum);
+                    if (!version) return null;
+                    const avgScore = version.evaluation
+                      ? ((version.evaluation.requirements_alignment || 0) + (version.evaluation.best_practices_score || 0)) / 2
+                      : null;
+
+                    // For side-by-side diff highlighting (when 2 versions)
+                    const isLeftColumn = colIdx === 0;
+                    const diffLines = versionDiffData?.diff_lines || [];
+
+                    return (
+                      <div key={versionNum} className="flex flex-col h-full border rounded-lg overflow-hidden bg-white dark:bg-slate-800">
+                        {/* Version Header */}
+                        <div className="p-3 bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-900 dark:text-white">Version {version.version}</span>
+                              {version.version === currentVersion?.version && (
+                                <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+                              )}
+                            </div>
+                            {avgScore !== null && (
+                              <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
+                                avgScore >= 80
+                                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                  : avgScore >= 60
+                                    ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                    : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                              }`}>
+                                Score: {avgScore.toFixed(1)}
+                              </span>
                             )}
                           </div>
-                          {avgScore !== null && (
-                            <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
-                              avgScore >= 80
-                                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                                : avgScore >= 60
-                                  ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
-                                  : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                            }`}>
-                              Score: {avgScore.toFixed(1)}
-                            </span>
+                          {version.evaluation && (
+                            <div className="flex gap-4 mt-2 text-xs text-slate-600 dark:text-slate-400">
+                              <span>Req: {version.evaluation.requirements_alignment || 0}%</span>
+                              <span>Best Practices: {version.evaluation.best_practices_score || 0}%</span>
+                            </div>
                           )}
                         </div>
-                        {version.evaluation && (
-                          <div className="flex gap-4 mt-2 text-xs text-slate-600 dark:text-slate-400">
-                            <span>Req: {version.evaluation.requirements_alignment || 0}%</span>
-                            <span>Best Practices: {version.evaluation.best_practices_score || 0}%</span>
+
+                        {/* Prompt Content with Diff Highlighting */}
+                        <div className="flex-1 p-3 overflow-auto">
+                          {selectedVersionsForCompare.length === 2 && versionDiffData && diffLines.length > 0 ? (
+                            <div className="font-mono text-sm">
+                              {diffLines.map((line, idx) => {
+                                // Show removed lines only in left column, added only in right
+                                if (isLeftColumn && line.type === 'added') return null;
+                                if (!isLeftColumn && line.type === 'removed') return null;
+
+                                const content = isLeftColumn ? line.content_a : line.content_b;
+                                if (content === null && line.type !== 'unchanged') return null;
+
+                                return (
+                                  <div
+                                    key={idx}
+                                    className={`py-0.5 px-1 -mx-1 ${
+                                      line.type === 'added'
+                                        ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'
+                                        : line.type === 'removed'
+                                          ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300'
+                                          : 'text-slate-700 dark:text-slate-300'
+                                    }`}
+                                  >
+                                    <span className="whitespace-pre-wrap">{content || ''}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <pre className="text-sm whitespace-pre-wrap font-mono text-slate-800 dark:text-slate-200 leading-relaxed">
+                              {version.prompt_text}
+                            </pre>
+                          )}
+                        </div>
+
+                        {/* Version Footer with metadata */}
+                        {version.evaluation?.suggestions && version.evaluation.suggestions.length > 0 && (
+                          <div className="p-3 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-600">
+                            <p className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Suggestions:</p>
+                            <ul className="text-xs text-slate-600 dark:text-slate-400 space-y-1">
+                              {version.evaluation.suggestions.slice(0, 3).map((s, i) => (
+                                <li key={i} className="flex items-start gap-1">
+                                  <span className="text-amber-500">•</span>
+                                  <span className="line-clamp-2">{typeof s === 'string' ? s : s.suggestion}</span>
+                                </li>
+                              ))}
+                            </ul>
                           </div>
                         )}
                       </div>
-
-                      {/* Prompt Content */}
-                      <div className="flex-1 p-3 overflow-auto">
-                        <pre className="text-sm whitespace-pre-wrap font-mono text-slate-800 dark:text-slate-200 leading-relaxed">
-                          {version.prompt_text}
-                        </pre>
-                      </div>
-
-                      {/* Version Footer with metadata */}
-                      {version.evaluation?.suggestions && version.evaluation.suggestions.length > 0 && (
-                        <div className="p-3 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-600">
-                          <p className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Suggestions:</p>
-                          <ul className="text-xs text-slate-600 dark:text-slate-400 space-y-1">
-                            {version.evaluation.suggestions.slice(0, 3).map((s, i) => (
-                              <li key={i} className="flex items-start gap-1">
-                                <span className="text-amber-500">•</span>
-                                <span className="line-clamp-2">{typeof s === 'string' ? s : s.suggestion}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-            </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
 
           <DialogFooter className="border-t pt-4">
             <Button variant="outline" onClick={() => {
               setVersionCompareModalOpen(false);
               setSelectedVersionsForCompare([]);
+              setVersionDiffData(null);
             }}>
               Close
             </Button>

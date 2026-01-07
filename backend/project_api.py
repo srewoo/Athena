@@ -1071,6 +1071,312 @@ async def add_version(project_id: str, request: AddVersionRequest):
     return new_version
 
 
+# ============================================================================
+# VERSION DIFF AND REGRESSION DETECTION (MUST BE BEFORE /{version_number})
+# ============================================================================
+
+class VersionDiffRequest(BaseModel):
+    """Request model for version diff"""
+    version_a: int = Field(..., description="First version number")
+    version_b: int = Field(..., description="Second version number")
+
+
+class DiffLine(BaseModel):
+    """A single line in the diff output"""
+    type: str  # "unchanged", "added", "removed", "modified"
+    line_number_a: Optional[int] = None
+    line_number_b: Optional[int] = None
+    content_a: Optional[str] = None
+    content_b: Optional[str] = None
+
+
+class VersionDiffResponse(BaseModel):
+    """Response model for version diff"""
+    version_a: int
+    version_b: int
+    prompt_a: str
+    prompt_b: str
+    diff_lines: List[Dict[str, Any]]
+    stats: Dict[str, int]
+    similarity_percent: float
+
+
+def compute_line_diff(text_a: str, text_b: str) -> tuple:
+    """
+    Compute a line-by-line diff between two texts.
+    Returns diff_lines list and statistics.
+    """
+    import difflib
+
+    lines_a = text_a.splitlines(keepends=True)
+    lines_b = text_b.splitlines(keepends=True)
+
+    # Use SequenceMatcher for similarity calculation
+    matcher = difflib.SequenceMatcher(None, text_a, text_b)
+    similarity = matcher.ratio() * 100
+
+    # Use unified diff for line-by-line comparison
+    diff = list(difflib.unified_diff(lines_a, lines_b, lineterm=''))
+
+    diff_lines = []
+    stats = {"added": 0, "removed": 0, "unchanged": 0}
+
+    line_num_a = 0
+    line_num_b = 0
+
+    # Skip the header lines (---, +++, @@)
+    i = 0
+    while i < len(diff):
+        line = diff[i]
+
+        # Skip header lines
+        if line.startswith('---') or line.startswith('+++'):
+            i += 1
+            continue
+
+        # Parse hunk header to get line numbers
+        if line.startswith('@@'):
+            import re
+            match = re.match(r'@@ -(\d+)', line)
+            if match:
+                line_num_a = int(match.group(1)) - 1
+            match = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
+            if match:
+                line_num_b = int(match.group(1)) - 1
+            i += 1
+            continue
+
+        # Process diff lines
+        if line.startswith('-'):
+            line_num_a += 1
+            diff_lines.append({
+                "type": "removed",
+                "line_number_a": line_num_a,
+                "line_number_b": None,
+                "content_a": line[1:].rstrip('\n'),
+                "content_b": None
+            })
+            stats["removed"] += 1
+        elif line.startswith('+'):
+            line_num_b += 1
+            diff_lines.append({
+                "type": "added",
+                "line_number_a": None,
+                "line_number_b": line_num_b,
+                "content_a": None,
+                "content_b": line[1:].rstrip('\n')
+            })
+            stats["added"] += 1
+        elif line.startswith(' '):
+            line_num_a += 1
+            line_num_b += 1
+            diff_lines.append({
+                "type": "unchanged",
+                "line_number_a": line_num_a,
+                "line_number_b": line_num_b,
+                "content_a": line[1:].rstrip('\n'),
+                "content_b": line[1:].rstrip('\n')
+            })
+            stats["unchanged"] += 1
+
+        i += 1
+
+    # If no diff lines were generated, texts might be identical
+    if not diff_lines and lines_a:
+        for idx, line in enumerate(lines_a):
+            diff_lines.append({
+                "type": "unchanged",
+                "line_number_a": idx + 1,
+                "line_number_b": idx + 1,
+                "content_a": line.rstrip('\n'),
+                "content_b": line.rstrip('\n')
+            })
+            stats["unchanged"] += 1
+
+    return diff_lines, stats, similarity
+
+
+@router.post("/{project_id}/versions/diff")
+async def get_version_diff(project_id: str, request: VersionDiffRequest):
+    """
+    Compute a diff between two prompt versions.
+    Returns line-by-line differences with change types.
+    """
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.system_prompt_versions:
+        raise HTTPException(status_code=404, detail="No versions found")
+
+    # Find both versions
+    version_a = None
+    version_b = None
+    for v in project.system_prompt_versions:
+        if v.get("version") == request.version_a:
+            version_a = v
+        if v.get("version") == request.version_b:
+            version_b = v
+
+    if not version_a:
+        raise HTTPException(status_code=404, detail=f"Version {request.version_a} not found")
+    if not version_b:
+        raise HTTPException(status_code=404, detail=f"Version {request.version_b} not found")
+
+    prompt_a = version_a.get("prompt_text", "")
+    prompt_b = version_b.get("prompt_text", "")
+
+    diff_lines, stats, similarity = compute_line_diff(prompt_a, prompt_b)
+
+    return VersionDiffResponse(
+        version_a=request.version_a,
+        version_b=request.version_b,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        diff_lines=diff_lines,
+        stats=stats,
+        similarity_percent=round(similarity, 1)
+    )
+
+
+class RegressionCheckResponse(BaseModel):
+    """Response model for regression check"""
+    has_regression: bool
+    current_version: int
+    previous_version: Optional[int] = None
+    current_score: Optional[float] = None
+    previous_score: Optional[float] = None
+    score_change: Optional[float] = None
+    score_change_percent: Optional[float] = None
+    regression_details: Optional[Dict[str, Any]] = None
+    recommendation: Optional[str] = None
+
+
+@router.get("/{project_id}/versions/regression-check")
+async def check_version_regression(project_id: str, version: int = None):
+    """
+    Check if the current (or specified) version has regressed compared to previous version.
+
+    Regression is detected when:
+    - Overall score decreased by more than 5%
+    - Requirements alignment decreased
+    - Best practices score decreased significantly
+
+    Returns regression status and recommendations.
+    """
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.system_prompt_versions or len(project.system_prompt_versions) < 2:
+        return RegressionCheckResponse(
+            has_regression=False,
+            current_version=version or 1,
+            recommendation="Not enough versions to check for regression. Need at least 2 versions."
+        )
+
+    # Sort versions by version number
+    sorted_versions = sorted(project.system_prompt_versions, key=lambda v: v.get("version", 0))
+
+    # Find current version (specified or latest)
+    if version:
+        current_idx = next(
+            (i for i, v in enumerate(sorted_versions) if v.get("version") == version),
+            None
+        )
+        if current_idx is None:
+            raise HTTPException(status_code=404, detail=f"Version {version} not found")
+        if current_idx == 0:
+            return RegressionCheckResponse(
+                has_regression=False,
+                current_version=version,
+                recommendation="This is the first version. No previous version to compare."
+            )
+    else:
+        current_idx = len(sorted_versions) - 1
+
+    current_v = sorted_versions[current_idx]
+    previous_v = sorted_versions[current_idx - 1]
+
+    # Extract scores
+    def get_score(v):
+        eval_data = v.get("evaluation", {})
+        if not eval_data:
+            return None
+        req_align = eval_data.get("requirements_alignment", 0)
+        best_prac = eval_data.get("best_practices_score", 0)
+        overall = eval_data.get("overall_score")
+        if overall is not None:
+            return overall
+        return (req_align + best_prac) / 2 if (req_align or best_prac) else None
+
+    current_score = get_score(current_v)
+    previous_score = get_score(previous_v)
+
+    # If either version lacks evaluation, can't determine regression
+    if current_score is None or previous_score is None:
+        return RegressionCheckResponse(
+            has_regression=False,
+            current_version=current_v.get("version"),
+            previous_version=previous_v.get("version"),
+            current_score=current_score,
+            previous_score=previous_score,
+            recommendation="One or both versions haven't been analyzed yet. Run analysis on both versions to check for regression."
+        )
+
+    score_change = current_score - previous_score
+    score_change_percent = (score_change / previous_score * 100) if previous_score != 0 else 0
+
+    # Detailed regression analysis
+    current_eval = current_v.get("evaluation", {})
+    previous_eval = previous_v.get("evaluation", {})
+
+    regression_details = {
+        "requirements_alignment": {
+            "current": current_eval.get("requirements_alignment", 0),
+            "previous": previous_eval.get("requirements_alignment", 0),
+            "change": current_eval.get("requirements_alignment", 0) - previous_eval.get("requirements_alignment", 0)
+        },
+        "best_practices_score": {
+            "current": current_eval.get("best_practices_score", 0),
+            "previous": previous_eval.get("best_practices_score", 0),
+            "change": current_eval.get("best_practices_score", 0) - previous_eval.get("best_practices_score", 0)
+        }
+    }
+
+    # Determine if regression occurred (score dropped by more than 5%)
+    has_regression = score_change < -5  # 5% threshold
+
+    # Generate recommendation
+    if has_regression:
+        if regression_details["requirements_alignment"]["change"] < 0:
+            recommendation = f"REGRESSION DETECTED: Score dropped by {abs(score_change):.1f} points ({abs(score_change_percent):.1f}%). Requirements alignment decreased. Consider reverting to Version {previous_v.get('version')} or addressing the requirements gaps."
+        elif regression_details["best_practices_score"]["change"] < 0:
+            recommendation = f"REGRESSION DETECTED: Score dropped by {abs(score_change):.1f} points ({abs(score_change_percent):.1f}%). Best practices score decreased. Review the suggestions in the analysis."
+        else:
+            recommendation = f"REGRESSION DETECTED: Overall score dropped by {abs(score_change):.1f} points ({abs(score_change_percent):.1f}%). Consider reverting to Version {previous_v.get('version')}."
+    elif score_change > 5:
+        recommendation = f"IMPROVEMENT: Score increased by {score_change:.1f} points ({score_change_percent:.1f}%). Good progress!"
+    else:
+        recommendation = f"Score is stable (changed by {score_change:.1f} points). No significant regression detected."
+
+    return RegressionCheckResponse(
+        has_regression=has_regression,
+        current_version=current_v.get("version"),
+        previous_version=previous_v.get("version"),
+        current_score=round(current_score, 1),
+        previous_score=round(previous_score, 1),
+        score_change=round(score_change, 1),
+        score_change_percent=round(score_change_percent, 1),
+        regression_details=regression_details,
+        recommendation=recommendation
+    )
+
+
+# ============================================================================
+# VERSION CRUD ENDPOINTS (with {version_number} parameter)
+# ============================================================================
+
 @router.get("/{project_id}/versions/{version_number}")
 async def get_version(project_id: str, version_number: int):
     """Get a specific version"""
@@ -1179,6 +1485,7 @@ async def delete_version(project_id: str, version_number: int):
 
 class RewriteRequest(BaseModel):
     prompt_text: str = None
+    current_prompt: str = None  # Alias for frontend compatibility
     feedback: str = None
     focus_areas: List[str] = None
 
@@ -1190,8 +1497,8 @@ async def rewrite_project_prompt(project_id: str, request: RewriteRequest):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get current prompt
-    current_prompt = request.prompt_text
+    # Get current prompt (support both field names)
+    current_prompt = request.prompt_text or request.current_prompt
     if not current_prompt and project.system_prompt_versions:
         current_prompt = project.system_prompt_versions[-1]["prompt_text"]
 
@@ -1215,7 +1522,8 @@ async def rewrite_project_prompt(project_id: str, request: RewriteRequest):
             improved_prompt = f"## Task\n{improved_prompt}"
             improvements.append("Added structure")
         return {
-            "rewritten_prompt": improved_prompt,
+            "improved_prompt": improved_prompt,
+            "rewritten_prompt": improved_prompt,  # For backwards compatibility
             "changes_made": improvements
         }
 
@@ -1285,12 +1593,18 @@ Improve this prompt following the best practices. Return only the improved promp
     if result.get("error"):
         raise HTTPException(status_code=500, detail=result["error"])
 
+    improved_prompt = result.get("output", "").strip()
+
+    if not improved_prompt:
+        raise HTTPException(status_code=500, detail="LLM returned empty response")
+
     improvements = request.focus_areas[:3] if request.focus_areas else ["Applied AI improvements"]
     if request.feedback:
         improvements.insert(0, f"Incorporated: {request.feedback[:50]}...")
 
     return {
-        "rewritten_prompt": result.get("output", "").strip(),
+        "improved_prompt": improved_prompt,
+        "rewritten_prompt": improved_prompt,  # For backwards compatibility
         "changes_made": improvements
     }
 
@@ -1300,37 +1614,51 @@ Improve this prompt following the best practices. Return only the improved promp
 # ============================================================================
 
 class RefineEvalRequest(BaseModel):
-    feedback: str
+    feedback: str = None
+    user_feedback: str = None  # Alias for frontend compatibility
+    current_eval_prompt: str = None  # Optional: current eval prompt
 
 
 @router.post("/{project_id}/eval-prompt/refine")
 async def refine_eval_prompt(project_id: str, request: RefineEvalRequest):
     """Refine the evaluation prompt based on feedback using LLM"""
-    project = project_storage.load_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    logger.info(f"Refine eval prompt request for project {project_id}")
+    logger.info(f"Request data: feedback={request.feedback}, user_feedback={request.user_feedback}")
 
-    # Get current prompt
-    current_prompt = project.system_prompt_versions[-1]["prompt_text"] if project.system_prompt_versions else ""
+    try:
+        project = project_storage.load_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get LLM settings
-    settings = get_settings()
-    provider = settings.get("provider", "openai")
-    api_key = settings.get("api_key", "")
-    model_name = settings.get("model_name")
+        # Support both feedback field names (frontend sends user_feedback)
+        feedback_text = request.feedback or request.user_feedback
+        if not feedback_text:
+            raise HTTPException(status_code=400, detail="Feedback is required")
 
-    # If no API key, return template-based refinement
-    if not api_key:
-        eval_prompt = f"""Evaluate the following AI-generated response based on these criteria:
+        # Get current eval prompt (from request or project)
+        current_eval = request.current_eval_prompt or getattr(project, 'eval_prompt', '') or ""
+
+        # Get current system prompt
+        current_prompt = project.system_prompt_versions[-1]["prompt_text"] if project.system_prompt_versions else ""
+
+        # Get LLM settings
+        settings = get_settings()
+        provider = settings.get("provider", "openai")
+        api_key = settings.get("api_key", "")
+        model_name = settings.get("model_name")
+
+        # If no API key, return template-based refinement
+        if not api_key:
+            refined_eval_prompt = f"""Evaluate the following AI-generated response based on these criteria:
 
 **Task Context:**
 Use Case: {project.use_case}
 Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
 
 **User Feedback to Consider:**
-{request.feedback}
+{feedback_text}
 
-**Original Prompt:**
+**Original System Prompt:**
 {current_prompt}
 
 **Evaluation Criteria (Refined):**
@@ -1342,63 +1670,281 @@ Requirements: {', '.join(project.key_requirements) if project.key_requirements e
 
 **Rating:** Provide a score from 1-5 with justification."""
 
-        rationale = "Template-based refinement. Configure API key for AI refinement."
+            rationale = "Template-based refinement. Configure API key for AI refinement."
+            changes = [f"Incorporated feedback: {feedback_text[:50]}..."]
 
-        # Persist refined eval prompt to project
-        project.eval_prompt = eval_prompt
-        project.eval_rationale = rationale
-        project.updated_at = datetime.now()
-        project_storage.save_project(project)
+            # Persist refined eval prompt to project
+            project.eval_prompt = refined_eval_prompt
+            project.eval_rationale = rationale
+            project.updated_at = datetime.now()
+            project_storage.save_project(project)
 
-        return {
-            "eval_prompt": eval_prompt,
-            "rationale": rationale
-        }
+            return {
+                "refined_prompt": refined_eval_prompt,
+                "eval_prompt": refined_eval_prompt,  # For backwards compatibility
+                "rationale": rationale,
+                "changes_made": changes
+            }
 
-    # Use LLM to refine eval prompt
-    system_prompt = """You are an expert at refining evaluation prompts based on user feedback.
+        # Use LLM to refine eval prompt
+        system_prompt = """You are an expert at refining evaluation prompts based on user feedback.
 Improve the evaluation prompt to better address the user's concerns while maintaining comprehensive coverage.
 
 Return ONLY the refined evaluation prompt, no explanations."""
 
-    user_message = f"""Refine this evaluation prompt based on the feedback:
+        user_message = f"""Refine this evaluation prompt based on the feedback:
 
-User Feedback: {request.feedback}
+User Feedback: {feedback_text}
 
 Current Use Case: {project.use_case}
 Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
+
+Current Evaluation Prompt:
+{current_eval if current_eval else 'No existing eval prompt - create one based on the system prompt below'}
 
 System Prompt Being Evaluated:
 {current_prompt}
 
 Create an improved evaluation prompt that addresses the feedback."""
 
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
-        provider=provider,
-        api_key=api_key,
-        model_name=model_name,
-        temperature=0.5,
-        max_tokens=8000
-    )
+        result = await llm_client.chat(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            temperature=0.5,
+            max_tokens=8000
+        )
 
-    if result.get("error"):
-        raise HTTPException(status_code=500, detail=result["error"])
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result["error"])
 
-    refined_eval_prompt = result.get("output", "").strip()
-    rationale = f"AI-refined evaluation prompt incorporating: {request.feedback[:100]}"
+        refined_eval_prompt = result.get("output", "").strip()
 
-    # Persist refined eval prompt to project
-    project.eval_prompt = refined_eval_prompt
-    project.eval_rationale = rationale
-    project.updated_at = datetime.now()
-    project_storage.save_project(project)
+        if not refined_eval_prompt:
+            raise HTTPException(status_code=500, detail="LLM returned empty response")
 
-    return {
-        "eval_prompt": refined_eval_prompt,
-        "rationale": rationale
-    }
+        rationale = f"AI-refined evaluation prompt incorporating: {feedback_text[:100]}"
+        changes = [f"Incorporated feedback: {feedback_text[:50]}...", "AI refinement applied"]
+
+        # Persist refined eval prompt to project
+        project.eval_prompt = refined_eval_prompt
+        project.eval_rationale = rationale
+        project.updated_at = datetime.now()
+        project_storage.save_project(project)
+
+        return {
+            "refined_prompt": refined_eval_prompt,
+            "eval_prompt": refined_eval_prompt,  # For backwards compatibility
+            "rationale": rationale,
+            "changes_made": changes
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refining eval prompt: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# EVAL PROMPT TESTING ENDPOINT
+# ============================================================================
+
+class TestEvalPromptRequest(BaseModel):
+    """Request model for testing the evaluation prompt"""
+    eval_prompt: str = Field(..., description="The evaluation prompt to test")
+    sample_input: str = Field(..., description="Sample user input to test with")
+    sample_output: str = Field(..., description="Sample AI output to evaluate")
+    expected_score: Optional[int] = Field(None, ge=1, le=5, description="Expected score (1-5) for validation")
+
+
+class EvalPromptTestResult(BaseModel):
+    """Result of testing an evaluation prompt"""
+    success: bool
+    score: Optional[int] = None
+    reasoning: Optional[str] = None
+    raw_output: Optional[str] = None
+    parsing_status: str  # "success", "partial", "failed"
+    validation: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    suggestions: Optional[List[str]] = None
+
+
+@router.post("/{project_id}/eval-prompt/test")
+async def test_eval_prompt(project_id: str, request: TestEvalPromptRequest):
+    """
+    Test an evaluation prompt with a sample input/output pair.
+
+    This endpoint allows users to validate their evaluation prompt works correctly
+    by testing it against a sample response before running full test suites.
+
+    The endpoint will:
+    1. Run the eval prompt against the sample input/output
+    2. Parse the LLM judge's response
+    3. Validate the score format and reasoning
+    4. Compare against expected score if provided
+    5. Return detailed feedback about the eval prompt quality
+    """
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get LLM settings
+    settings = get_settings()
+    provider = settings.get("provider", "openai")
+    api_key = settings.get("api_key", "")
+    model_name = settings.get("model_name")
+
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="API key not configured. Please add your API key in Settings to test evaluation prompts."
+        )
+
+    logger.info(f"Testing eval prompt for project {project_id}")
+
+    # Build the evaluation message
+    eval_message = f"""Evaluate the following AI response:
+
+**User Input:**
+{request.sample_input}
+
+**AI Response:**
+{request.sample_output}
+
+Please evaluate based on the criteria above and provide your assessment."""
+
+    # Run the evaluation
+    try:
+        result = await llm_client.chat(
+            system_prompt=request.eval_prompt,
+            user_message=eval_message,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            temperature=0.3,  # Low temperature for consistent evaluation
+            max_tokens=2000
+        )
+
+        if result.get("error"):
+            return EvalPromptTestResult(
+                success=False,
+                parsing_status="failed",
+                error=f"LLM error: {result['error']}",
+                suggestions=["Check your API key and model settings"]
+            )
+
+        raw_output = result.get("output", "").strip()
+        logger.info(f"Eval prompt test raw output: {raw_output[:500]}...")
+
+        # Try to parse the score and reasoning
+        score = None
+        reasoning = None
+        parsing_status = "failed"
+        suggestions = []
+
+        # Try multiple patterns to extract score
+        score_patterns = [
+            r'"score"\s*:\s*(\d+)',  # JSON format
+            r'\*\*Score\*\*:\s*(\d+)',  # Markdown bold
+            r'Score:\s*(\d+)',  # Plain format
+            r'Rating:\s*(\d+)',  # Alternative
+            r'\bscore\b[:\s]+(\d+)',  # Loose match
+            r'(\d+)\s*/\s*5',  # X/5 format
+            r'(\d+)\s*out\s*of\s*5',  # X out of 5
+        ]
+
+        for pattern in score_patterns:
+            match = re.search(pattern, raw_output, re.IGNORECASE)
+            if match:
+                try:
+                    parsed_score = int(match.group(1))
+                    if 1 <= parsed_score <= 5:
+                        score = parsed_score
+                        parsing_status = "success"
+                        break
+                except ValueError:
+                    continue
+
+        # Try to extract reasoning
+        reasoning_patterns = [
+            r'"reasoning"\s*:\s*"([^"]+)"',  # JSON format
+            r'\*\*Reasoning\*\*:\s*(.+?)(?=\*\*|$)',  # Markdown
+            r'Reasoning:\s*(.+?)(?=Score|Rating|$)',  # Plain
+            r'Justification:\s*(.+?)(?=Score|Rating|$)',  # Alternative
+        ]
+
+        for pattern in reasoning_patterns:
+            match = re.search(pattern, raw_output, re.IGNORECASE | re.DOTALL)
+            if match:
+                reasoning = match.group(1).strip()[:500]  # Limit length
+                break
+
+        # If no structured reasoning, use the first paragraph
+        if not reasoning and raw_output:
+            paragraphs = raw_output.split('\n\n')
+            if paragraphs:
+                reasoning = paragraphs[0][:500]
+
+        # Update parsing status
+        if score is not None and reasoning:
+            parsing_status = "success"
+        elif score is not None:
+            parsing_status = "partial"
+            suggestions.append("Consider adding a 'Reasoning:' section to your eval prompt output format")
+        else:
+            parsing_status = "failed"
+            suggestions.append("Could not parse score from output. Ensure your eval prompt specifies a clear output format with 'Score: X' or JSON format")
+
+        # Build validation results
+        validation = {
+            "score_found": score is not None,
+            "reasoning_found": reasoning is not None,
+            "score_in_range": score is not None and 1 <= score <= 5,
+        }
+
+        # Check against expected score if provided
+        if request.expected_score is not None:
+            score_diff = abs((score or 0) - request.expected_score)
+            validation["expected_score"] = request.expected_score
+            validation["actual_score"] = score
+            validation["score_match"] = score == request.expected_score
+            validation["score_close"] = score_diff <= 1
+
+            if not validation["score_match"]:
+                if score_diff > 1:
+                    suggestions.append(f"Score differs by {score_diff} from expected. Consider adding calibration examples to your eval prompt.")
+                else:
+                    suggestions.append(f"Score is close but not exact ({score} vs {request.expected_score}). This may be acceptable variance.")
+
+        # Provide suggestions based on parsing issues
+        if parsing_status == "failed":
+            suggestions.extend([
+                "Add explicit output format instructions to your eval prompt",
+                "Example format: 'Score: X/5' followed by 'Reasoning: ...'",
+                "Or use JSON: {\"score\": X, \"reasoning\": \"...\"}",
+            ])
+
+        return EvalPromptTestResult(
+            success=parsing_status in ["success", "partial"],
+            score=score,
+            reasoning=reasoning,
+            raw_output=raw_output,
+            parsing_status=parsing_status,
+            validation=validation,
+            suggestions=suggestions if suggestions else None
+        )
+
+    except Exception as e:
+        logger.error(f"Error testing eval prompt: {e}")
+        return EvalPromptTestResult(
+            success=False,
+            parsing_status="failed",
+            error=str(e),
+            suggestions=["An unexpected error occurred. Check server logs for details."]
+        )
 
 
 # ============================================================================
@@ -1480,52 +2026,66 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
         for i, s in enumerate(scenarios)
     ])
 
-    system_prompt = f"""You are an expert test data generator creating REALISTIC test inputs.
+    system_prompt = f"""You are an expert QA engineer creating test cases for an AI system.
 
-## INPUT TYPE DETECTED: {input_spec.input_type.value.replace('_', ' ').title()}
+## YOUR TASK
+Generate realistic test inputs that will thoroughly test the system prompt below.
+Each test case should be a COMPLETE, REALISTIC input that a real user would provide.
 
-## CONTEXT
-- **Template Variable:** {{{{{input_spec.template_variable}}}}}
-- **Domain:** {input_spec.domain_context or 'General'}
-- **Use Case:** {use_case}
-
-## CRITICAL INSTRUCTIONS FOR {input_spec.input_type.value.upper()}
-{_get_input_type_instructions(input_spec.input_type)}
-
-## OUTPUT FORMAT
-Return a JSON object with test_cases array:
-{{
-    "test_cases": [
-        {{
-            "input": "THE COMPLETE, REALISTIC INPUT - NOT A SUMMARY OR PLACEHOLDER",
-            "category": "positive|edge_case|negative|adversarial",
-            "test_focus": "What this test case validates",
-            "expected_behavior": "How the system should handle this"
-        }}
-    ]
-}}
-
-## RULES
-1. Generate COMPLETE inputs - if it's a call transcript, write the FULL conversation
-2. Each input should be realistic with specific names, dates, numbers
-3. Vary length and complexity across test cases
-4. Include natural elements (filler words for transcripts, typos for chats, etc.)
-5. Make edge cases and adversarial inputs subtle and realistic"""
-
-    user_message = f"""Generate {num_examples} COMPLETE, REALISTIC test inputs for this system.
-
-**System Prompt Being Tested:**
+## SYSTEM PROMPT TO TEST
 ```
 {current_prompt}
 ```
 
-**Use Case:** {use_case}
-**Requirements:** {requirements}
+## USE CASE
+{use_case}
 
-**Scenarios to Cover (generate one test case per scenario):**
-{scenario_list}
+## REQUIREMENTS TO VERIFY
+{requirements}
 
-Generate {num_examples} FULL, REALISTIC inputs. For {input_spec.input_type.value.replace('_', ' ')}, each input should be complete and detailed (200-800 words for transcripts/documents)."""
+## TEST CASE CATEGORIES
+- **positive**: Normal, expected inputs that should work well
+- **edge_case**: Boundary conditions, unusual but valid inputs
+- **negative**: Inputs that should be handled gracefully (missing data, wrong format)
+- **adversarial**: Tricky inputs that might confuse the system
+
+## OUTPUT FORMAT
+Return ONLY valid JSON:
+{{
+    "test_cases": [
+        {{
+            "input": "Complete realistic input text here...",
+            "category": "positive|edge_case|negative|adversarial",
+            "test_focus": "Specific aspect being tested",
+            "expected_behavior": "What the system should do",
+            "difficulty": "easy|medium|hard"
+        }}
+    ]
+}}
+
+## CRITICAL RULES
+1. Each input must be COMPLETE and REALISTIC - no placeholders like "[insert here]"
+2. Inputs should match the format expected by the system prompt
+3. Include specific details: real names, dates, numbers, scenarios
+4. Test cases should expose potential weaknesses in the prompt
+5. Vary complexity: some simple, some complex
+6. For transcripts/documents: write 100-500 words of realistic content"""
+
+    user_message = f"""Generate {num_examples} test cases for the system prompt above.
+
+Distribution:
+- {max(1, num_examples // 3)} positive cases (normal usage)
+- {max(1, num_examples // 4)} edge cases (boundary conditions)
+- {max(1, num_examples // 4)} negative cases (error handling)
+- {max(1, num_examples // 6)} adversarial cases (tricky inputs)
+
+Focus on testing:
+1. Does the prompt handle the main use case well?
+2. What happens with incomplete or malformed inputs?
+3. Can the prompt be confused by ambiguous inputs?
+4. Are there edge cases the prompt doesn't handle?
+
+Return the test cases as JSON:"""
 
     logger.info(f"Generating dataset with LLM: provider={provider}, model={model_name}, num_examples={num_examples}")
 
