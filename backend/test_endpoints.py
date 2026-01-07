@@ -20,7 +20,9 @@ TEST_PROJECT_NAMES = [
     "Unit Test Project",
     "Project To Delete",
     "Single Version Project",
-    "Integration Test"
+    "Integration Test",
+    "Call Summarizer Test",
+    "Code Reviewer Test"
 ]
 
 
@@ -693,6 +695,78 @@ def test_generate_eval_prompt(test_project):
     if response.status_code == 200:
         data = response.json()
         assert "eval_prompt" in data
+
+
+def test_generate_eval_prompt_with_call_transcript():
+    """Test eval prompt generation extracts variables and detects call transcript type"""
+    # Clear API key to use template mode (avoids LLM call)
+    client.post("/api/settings", json={
+        "llm_provider": "openai",
+        "api_key": "",
+        "model_name": "gpt-4o"
+    })
+
+    # Create a project with call transcript system prompt
+    create_response = client.post("/api/projects", json={
+        "name": "Call Summarizer Test",
+        "use_case": "Summarize sales calls",
+        "key_requirements": ["Extract action items", "Identify speakers"],
+        "initial_prompt": "Summarize the following call transcript: {{callTranscript}}"
+    })
+    assert create_response.status_code == 200
+    project_id = create_response.json()["id"]
+    _track_project(project_id)
+
+    # Generate eval prompt
+    response = client.post(f"/api/projects/{project_id}/eval-prompt/generate")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify the eval prompt is tailored
+    assert "eval_prompt" in data
+    assert "detected_type" in data
+    assert "input_variable" in data
+
+    # Should detect call_transcript type
+    assert data["detected_type"] == "call_transcript"
+    # Should use the actual variable name from system prompt
+    assert data["input_variable"] == "callTranscript"
+    # The eval prompt should contain the variable
+    assert "{{callTranscript}}" in data["eval_prompt"]
+    # Should have domain-specific criteria
+    assert "Key Information Extraction" in data["eval_prompt"] or "Speaker Attribution" in data["eval_prompt"]
+
+
+def test_generate_eval_prompt_with_code():
+    """Test eval prompt generation detects code review type"""
+    # Clear API key to use template mode (avoids LLM call)
+    client.post("/api/settings", json={
+        "llm_provider": "openai",
+        "api_key": "",
+        "model_name": "gpt-4o"
+    })
+
+    # Create a project with code review system prompt
+    create_response = client.post("/api/projects", json={
+        "name": "Code Reviewer Test",
+        "use_case": "Review Python code for bugs",
+        "key_requirements": ["Find bugs", "Suggest improvements"],
+        "initial_prompt": "Review the following code and identify issues: {{sourceCode}}"
+    })
+    assert create_response.status_code == 200
+    project_id = create_response.json()["id"]
+    _track_project(project_id)
+
+    # Generate eval prompt
+    response = client.post(f"/api/projects/{project_id}/eval-prompt/generate")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Should detect code type
+    assert data["detected_type"] == "code"
+    assert data["input_variable"] == "sourceCode"
+    # Should have code-specific criteria
+    assert "Technical Accuracy" in data["eval_prompt"] or "Issue Identification" in data["eval_prompt"]
 
 
 def test_refine_eval_prompt(test_project):

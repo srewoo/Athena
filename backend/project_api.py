@@ -865,9 +865,135 @@ Provide expert analysis and actionable improvements."""
     return response
 
 
+def _extract_template_variables(prompt_text: str) -> List[str]:
+    """Extract template variables like {{callTranscript}} from the prompt"""
+    # Match {{variableName}} pattern
+    pattern = r'\{\{(\w+)\}\}'
+    matches = re.findall(pattern, prompt_text)
+    return list(set(matches))  # Remove duplicates
+
+
+def _get_system_type_description(input_type: InputType, use_case: str) -> str:
+    """Get a human-readable description of what the system does"""
+    type_descriptions = {
+        InputType.CALL_TRANSCRIPT: "call transcript analyzer/summarizer",
+        InputType.CONVERSATION: "conversation/chat analyzer",
+        InputType.EMAIL: "email processor/responder",
+        InputType.CODE: "code analyzer/reviewer",
+        InputType.DOCUMENT: "document analyzer/processor",
+        InputType.TICKET: "support ticket handler",
+        InputType.REVIEW: "review/feedback analyzer",
+        InputType.MEDICAL_RECORD: "medical record processor",
+        InputType.FINANCIAL_DATA: "financial data analyzer",
+        InputType.STRUCTURED_DATA: "structured data processor",
+        InputType.SIMPLE_TEXT: "text processor",
+        InputType.MULTI_PARAGRAPH: "document processor",
+    }
+    base_type = type_descriptions.get(input_type, "AI assistant")
+
+    # Enhance with use case if available
+    if use_case:
+        return f"{base_type} for {use_case}"
+    return base_type
+
+
+def _get_domain_specific_criteria(input_type: InputType) -> str:
+    """Get domain-specific evaluation criteria based on input type"""
+    criteria = {
+        InputType.CALL_TRANSCRIPT: """
+1. Key Information Extraction (30%) - Does it capture all important topics, decisions, and action items from the call?
+2. Speaker Attribution (20%) - Are statements correctly attributed to the right speakers?
+3. Completeness (20%) - Does it cover the entire call without missing critical segments?
+4. Clarity & Conciseness (15%) - Is the output well-structured and easy to scan?
+5. Accuracy (15%) - Are names, numbers, dates, and commitments accurately captured?""",
+
+        InputType.CONVERSATION: """
+1. Context Understanding (25%) - Does it correctly understand the conversation flow and intent?
+2. Completeness (25%) - Are all relevant points from the conversation addressed?
+3. Tone Appropriateness (20%) - Does the response match the conversational tone?
+4. Accuracy (15%) - Are facts and details from the conversation correctly captured?
+5. Actionability (15%) - Are any required actions or next steps clearly identified?""",
+
+        InputType.EMAIL: """
+1. Intent Recognition (25%) - Does it correctly identify the purpose of the email?
+2. Response Appropriateness (25%) - Is the response/analysis appropriate for the email type?
+3. Completeness (20%) - Are all questions/requests in the email addressed?
+4. Professional Tone (15%) - Is the language and tone professionally appropriate?
+5. Accuracy (15%) - Are details like dates, names, and facts correctly handled?""",
+
+        InputType.CODE: """
+1. Technical Accuracy (30%) - Is the code analysis/review technically correct?
+2. Issue Identification (25%) - Are bugs, vulnerabilities, or improvements correctly identified?
+3. Explanation Quality (20%) - Are explanations clear and actionable for developers?
+4. Best Practices (15%) - Does it reference relevant coding standards and practices?
+5. Completeness (10%) - Does it cover all relevant aspects of the code?""",
+
+        InputType.DOCUMENT: """
+1. Comprehension (25%) - Does it demonstrate understanding of the document's content and purpose?
+2. Key Point Extraction (25%) - Are the main points correctly identified and summarized?
+3. Accuracy (20%) - Are facts, figures, and quotes accurately represented?
+4. Structure (15%) - Is the output well-organized and easy to follow?
+5. Completeness (15%) - Does it cover all significant sections of the document?""",
+
+        InputType.TICKET: """
+1. Issue Understanding (30%) - Does it correctly identify the reported problem?
+2. Solution Relevance (25%) - Is the response/solution appropriate for the issue?
+3. Completeness (20%) - Does it address all aspects of the ticket?
+4. Clarity (15%) - Is the response clear and actionable for the user?
+5. Empathy & Tone (10%) - Is the response appropriately supportive?""",
+
+        InputType.REVIEW: """
+1. Sentiment Analysis (25%) - Does it correctly identify the sentiment and key concerns?
+2. Issue Extraction (25%) - Are specific issues or praise points correctly identified?
+3. Response Appropriateness (20%) - Is the analysis/response suitable for the review?
+4. Actionability (15%) - Are actionable insights provided?
+5. Accuracy (15%) - Are quotes and details from the review correctly captured?""",
+    }
+
+    return criteria.get(input_type, """
+1. Task Completion (30%) - Does the response fully address the input?
+2. Accuracy (25%) - Is the information factually correct?
+3. Relevance (20%) - Does it stay on topic and address the core request?
+4. Quality (15%) - Is it well-written and clear?
+5. Completeness (10%) - Is it comprehensive without being verbose?""")
+
+
+def _get_domain_specific_rubric(input_type: InputType) -> str:
+    """Get domain-specific scoring rubric based on input type"""
+    rubrics = {
+        InputType.CALL_TRANSCRIPT: """
+- Score 5: Captures all key points, action items, and decisions. Perfect speaker attribution. Clear structure.
+- Score 4: Captures most important points. Minor omissions that don't affect understanding. Good structure.
+- Score 3: Covers main topics but misses some details or action items. Acceptable structure.
+- Score 2: Missing significant information. Incorrect attributions. Poor organization.
+- Score 1: Fails to capture the call's essence. Major errors or completely wrong interpretation.""",
+
+        InputType.CODE: """
+- Score 5: Identifies all issues/patterns correctly. Clear explanations with actionable suggestions. References best practices.
+- Score 4: Identifies most issues. Good explanations. Minor omissions in edge cases.
+- Score 3: Identifies obvious issues but misses subtle bugs or improvements. Basic explanations.
+- Score 2: Misses significant issues or provides incorrect analysis. Poor explanations.
+- Score 1: Completely wrong analysis. Suggests harmful changes or misunderstands the code.""",
+
+        InputType.EMAIL: """
+- Score 5: Perfect understanding of email intent. Complete, professional response addressing all points.
+- Score 4: Good understanding. Addresses main points with appropriate tone. Minor gaps.
+- Score 3: Basic understanding. Addresses core request but may miss secondary points.
+- Score 2: Misunderstands intent or misses key requests. Inappropriate tone.
+- Score 1: Completely misses the point. Unprofessional or irrelevant response.""",
+    }
+
+    return rubrics.get(input_type, """
+- Score 5: Exceeds expectations. Perfect execution addressing all aspects of the input.
+- Score 4: Good quality. Meets all major requirements with minor room for improvement.
+- Score 3: Acceptable. Addresses the core request but has noticeable gaps or issues.
+- Score 2: Poor quality. Missing key elements or significant errors.
+- Score 1: Fails completely. Does not address the request or contains critical errors.""")
+
+
 @router.post("/{project_id}/eval-prompt/generate")
 async def generate_eval_prompt(project_id: str):
-    """Generate an evaluation prompt using LLM with best practices"""
+    """Generate an evaluation prompt using LLM with best practices, tailored to the system prompt"""
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -878,6 +1004,27 @@ async def generate_eval_prompt(project_id: str):
 
     current_prompt = project.system_prompt_versions[-1]["prompt_text"]
 
+    # Extract template variables from the system prompt (e.g., {{callTranscript}})
+    template_vars = _extract_template_variables(current_prompt)
+    logger.info(f"Extracted template variables: {template_vars}")
+
+    # Detect the input type based on system prompt and variables
+    input_spec = detect_input_type(current_prompt, template_vars)
+    detected_type = input_spec.input_type
+    logger.info(f"Detected input type: {detected_type}")
+
+    # Determine variable names to use in eval prompt
+    # Use the actual variable name from system prompt, or fall back to INPUT/OUTPUT
+    input_var_name = template_vars[0] if template_vars else "INPUT"
+    output_var_name = "OUTPUT"  # Response is always OUTPUT
+
+    # Get system type description
+    system_description = _get_system_type_description(detected_type, project.use_case)
+
+    # Get domain-specific criteria and rubric
+    domain_criteria = _get_domain_specific_criteria(detected_type)
+    domain_rubric = _get_domain_specific_rubric(detected_type)
+
     # Get LLM settings
     settings = get_settings()
     provider = settings.get("provider", "openai")
@@ -887,60 +1034,48 @@ async def generate_eval_prompt(project_id: str):
     # Build requirements string
     requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
 
-    # Template-based eval prompt with {{INPUT}} and {{OUTPUT}} placeholders
-    # Plain text format for readability
+    # Template-based eval prompt - now tailored to the detected type
     if not api_key:
         eval_prompt = f"""**Evaluator Role:**
-You are an expert evaluator assessing AI-generated responses. Your task is to evaluate how well the response meets the specified requirements.
+You are an expert evaluator specializing in assessing {system_description} outputs. Your task is to evaluate how well the AI response meets the requirements for this specific use case.
 
-**Context:**
+**System Under Test:**
+Type: {system_description}
 Use Case: {project.use_case}
 Requirements: {requirements_str}
 
-**System Prompt Being Evaluated:**
+**Original System Prompt:**
 {current_prompt}
 
 ---
 
-**User Input:**
-{{{{INPUT}}}}
+**Input ({input_var_name}):**
+{{{{{input_var_name}}}}}
 
-**Response to Evaluate:**
-{{{{OUTPUT}}}}
+**Response to Evaluate ({output_var_name}):**
+{{{{{output_var_name}}}}}
 
 ---
 
-**Evaluation Criteria:**
-
-1. Task Completion (30%) - Does the response fully address the user's input? Are all requested elements present?
-
-2. Requirement Adherence (25%) - Does it follow all specified requirements: {requirements_str}? Are there any violations?
-
-3. Quality & Coherence (20%) - Is the response well-structured and easy to understand? Is the language appropriate?
-
-4. Accuracy & Safety (15%) - Is the information factually correct? Are there any harmful or inappropriate elements?
-
-5. Completeness (10%) - Is the response comprehensive without being unnecessarily verbose?
+**Evaluation Criteria (Domain-Specific):**
+{domain_criteria}
 
 **Scoring Rubric:**
-- Score 5 (Excellent): Exceeds all expectations. Perfectly addresses the input, follows all requirements.
-- Score 4 (Good): Meets all requirements well. Minor issues that don't significantly impact quality.
-- Score 3 (Acceptable): Meets basic requirements. Some noticeable issues but still functional.
-- Score 2 (Poor): Significant issues. Missing requirements, quality problems, or inaccuracies.
-- Score 1 (Fail): Does not meet requirements. Major failures, harmful content, or completely off-topic.
+{domain_rubric}
 
 **Instructions:**
-1. Identify what the user asked for in the input
-2. Evaluate the response against each criterion
-3. Provide a score and specific feedback
+1. Read the input {input_var_name.lower()} carefully to understand what needs to be processed
+2. Evaluate the {output_var_name} against each criterion above
+3. Consider the specific requirements: {requirements_str}
+4. Provide a score and detailed reasoning
 
 **Return your evaluation as JSON:**
 {{
     "score": <number from 1-5>,
-    "reasoning": "<2-3 sentences explaining the score with specific examples>"
+    "reasoning": "<2-3 sentences explaining the score with specific examples from the {output_var_name.lower()}>"
 }}"""
 
-        rationale = "Template-based evaluation prompt with {{INPUT}}/{{OUTPUT}} placeholders. Configure API key for AI-customized eval prompts."
+        rationale = f"Template-based evaluation prompt tailored for {system_description}. Uses {{{{{input_var_name}}}}} variable from system prompt. Configure API key for AI-customized eval prompts."
 
         # Persist eval prompt to project
         project.eval_prompt = eval_prompt
@@ -950,36 +1085,46 @@ Requirements: {requirements_str}
 
         return {
             "eval_prompt": eval_prompt,
-            "rationale": rationale
+            "rationale": rationale,
+            "detected_type": detected_type.value,
+            "input_variable": input_var_name
         }
 
     # Use LLM to generate sophisticated eval prompt with best practices
-    system_prompt = """You are an expert prompt engineer specializing in LLM-as-Judge evaluation systems.
+    system_prompt = f"""You are an expert prompt engineer specializing in LLM-as-Judge evaluation systems.
 
-Your task is to create a comprehensive evaluation prompt in PLAIN TEXT format (no XML tags).
+Your task is to create a comprehensive evaluation prompt for a {system_description}.
+
+## CRITICAL: Variable Naming
+The system prompt being evaluated uses these template variables: {template_vars if template_vars else ['INPUT']}
+You MUST use the EXACT same variable names in your evaluation prompt:
+- Use {{{{{input_var_name}}}}} for the input (NOT {{{{INPUT}}}} unless that's the actual variable name)
+- Use {{{{{output_var_name}}}}} for the AI response to evaluate
+
+## System Context
+This is a {system_description}. The evaluation criteria should be specific to this domain.
 
 ## Structure Requirements:
-1. Use markdown-style headers with ** for sections (e.g., **Evaluator Role:**, **Context:**, **Evaluation Criteria:**)
-2. Include {{INPUT}} and {{OUTPUT}} placeholders that will be replaced with actual test data
-3. Define a clear evaluator role with specific expertise relevant to the use case
+1. Use markdown-style headers with ** for sections
+2. Include {{{{{input_var_name}}}}} and {{{{{output_var_name}}}}} placeholders (EXACT variable names!)
+3. Define a clear evaluator role with expertise in {detected_type.value} analysis
 4. Create evaluation criteria weighted by importance (must sum to 100%)
-5. Use --- as section dividers where appropriate
+5. Make criteria SPECIFIC to evaluating {detected_type.value} outputs
+
+## Domain-Specific Requirements for {detected_type.value}:
+{domain_criteria}
 
 ## Rubric Requirements:
-6. Create a detailed 1-5 scoring rubric with:
-   - Score 5: Specific excellence indicators
-   - Score 4: What "good" looks like with minor issues
-   - Score 3: Baseline acceptable behavior
-   - Score 2: Clear failure modes
-   - Score 1: Critical failures and deal-breakers
+Create a detailed 1-5 scoring rubric with domain-specific indicators:
+{domain_rubric}
 
 ## Instructions:
-7. Include brief evaluation instructions
-8. Require JSON output with "score" (1-5 number) and "reasoning" (specific explanation)
+Include evaluation instructions specific to {detected_type.value} analysis.
+Require JSON output with "score" (1-5 number) and "reasoning" (specific explanation).
 
 Return ONLY the evaluation prompt text in plain text format. No XML tags. No explanations."""
 
-    user_message = f"""Create an evaluation prompt for this use case:
+    user_message = f"""Create an evaluation prompt for this {system_description}:
 
 Use Case: {project.use_case}
 
@@ -988,12 +1133,14 @@ Requirements: {requirements_str}
 System Prompt Being Evaluated:
 {current_prompt}
 
-Generate a comprehensive evaluation prompt in plain text that:
-- Uses {{{{INPUT}}}} placeholder for the user's test input
-- Uses {{{{OUTPUT}}}} placeholder for the AI's response to evaluate
-- Has criteria specifically tailored to the use case and requirements
-- Includes domain-specific failure modes in the rubric
-- Uses markdown headers (**Header:**) instead of XML tags"""
+Template Variables Found: {template_vars if template_vars else ['INPUT']}
+
+Generate a comprehensive evaluation prompt that:
+- Uses {{{{{input_var_name}}}}} placeholder (matching the system prompt's variable)
+- Uses {{{{{output_var_name}}}}} placeholder for the response
+- Has criteria specifically tailored to evaluating {detected_type.value} outputs
+- Includes domain-specific failure modes for {detected_type.value}
+- References the specific requirements: {requirements_str}"""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -1010,13 +1157,18 @@ Generate a comprehensive evaluation prompt in plain text that:
 
     eval_prompt = result.get("output", "").strip()
 
-    # Ensure the eval prompt has the required placeholders
-    if "{{INPUT}}" not in eval_prompt:
-        eval_prompt = eval_prompt.replace("{INPUT}", "{{INPUT}}")
-    if "{{OUTPUT}}" not in eval_prompt:
-        eval_prompt = eval_prompt.replace("{OUTPUT}", "{{OUTPUT}}")
+    # Ensure the eval prompt has the required placeholders with correct variable names
+    # Only add fallback if the specific variable is missing
+    if f"{{{{{input_var_name}}}}}" not in eval_prompt and "{{INPUT}}" not in eval_prompt:
+        # Try to fix common variations
+        eval_prompt = eval_prompt.replace(f"{{{input_var_name}}}", f"{{{{{input_var_name}}}}}")
+        eval_prompt = eval_prompt.replace("{INPUT}", f"{{{{{input_var_name}}}}}")
 
-    rationale = f"AI-generated evaluation prompt with {{{{INPUT}}}}/{{{{OUTPUT}}}} placeholders, weighted criteria, detailed rubric, and chain-of-thought instructions. Tailored for: {project.use_case[:50]}..."
+    if f"{{{{{output_var_name}}}}}" not in eval_prompt and "{{OUTPUT}}" not in eval_prompt:
+        eval_prompt = eval_prompt.replace(f"{{{output_var_name}}}", f"{{{{{output_var_name}}}}}")
+        eval_prompt = eval_prompt.replace("{OUTPUT}", f"{{{{{output_var_name}}}}}")
+
+    rationale = f"AI-generated evaluation prompt tailored for {system_description}. Uses {{{{{input_var_name}}}}} variable matching system prompt. Domain-specific criteria for {detected_type.value} evaluation."
 
     # Persist eval prompt to project
     project.eval_prompt = eval_prompt
@@ -1026,7 +1178,9 @@ Generate a comprehensive evaluation prompt in plain text that:
 
     return {
         "eval_prompt": eval_prompt,
-        "rationale": rationale
+        "rationale": rationale,
+        "detected_type": detected_type.value,
+        "input_variable": input_var_name
     }
 
 
