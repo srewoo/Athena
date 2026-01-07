@@ -159,3 +159,4 @@ BKP/
 .claude/
 backend/saved_projects/
 saved_projects
+backend/.athena_settings.json

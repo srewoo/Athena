@@ -11,11 +11,67 @@ from server import app
 
 client = TestClient(app)
 
+# Track all project IDs created during tests for cleanup
+_created_project_ids = []
+
+# Test project name patterns to identify test-created projects
+TEST_PROJECT_NAMES = [
+    "Test Project",
+    "Unit Test Project",
+    "Project To Delete",
+    "Single Version Project",
+    "Integration Test"
+]
+
+
+def _track_project(project_id: str):
+    """Track a project ID for cleanup"""
+    if project_id and project_id not in _created_project_ids:
+        _created_project_ids.append(project_id)
+
+
+def _cleanup_all_projects():
+    """Delete all tracked projects"""
+    global _created_project_ids
+    for project_id in _created_project_ids:
+        try:
+            client.delete(f"/api/projects/{project_id}")
+        except Exception:
+            pass  # Ignore errors during cleanup
+    _created_project_ids = []
+
+
+def _cleanup_orphaned_test_projects():
+    """Clean up any orphaned test projects from previous runs"""
+    try:
+        response = client.get("/api/projects")
+        if response.status_code == 200:
+            projects = response.json()
+            for project in projects:
+                project_name = project.get("project_name", "")
+                if project_name in TEST_PROJECT_NAMES:
+                    try:
+                        client.delete(f"/api/projects/{project['id']}")
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_orphaned_projects_at_start():
+    """Clean up orphaned test projects at the start of test session"""
+    _cleanup_orphaned_test_projects()
+    yield
+    # Final cleanup at end of session
+    _cleanup_orphaned_test_projects()
+
 
 @pytest.fixture(autouse=True)
 def cleanup_projects():
-    """Clean up saved_projects directory before and after each test"""
+    """Clean up all test projects after each test"""
     yield
+    _cleanup_all_projects()
 
 
 @pytest.fixture
@@ -71,6 +127,7 @@ def test_project():
     })
     assert response.status_code == 200
     project_id = response.json()["id"]
+    _track_project(project_id)
 
     # Add a system prompt version for tests that need it
     client.post(f"/api/projects/{project_id}/versions", json={
@@ -92,6 +149,7 @@ def test_create_project():
     assert response.status_code == 200
     data = response.json()
     assert "id" in data
+    _track_project(data["id"])
     assert data["project_name"] == "Unit Test Project"
     assert data["use_case"] == "Unit testing"
 
@@ -126,6 +184,7 @@ def test_delete_project():
     })
     assert create_response.status_code == 200
     project_id = create_response.json()["id"]
+    # Don't track - we're deleting it in this test
 
     response = client.delete(f"/api/projects/{project_id}")
     assert response.status_code == 200
@@ -727,6 +786,7 @@ def test_delete_only_version(test_project):
         "initial_prompt": "Test prompt"
     })
     project_id = create_response.json()["id"]
+    _track_project(project_id)
 
     response = client.delete(f"/api/projects/{project_id}/versions/1")
     assert response.status_code == 400
@@ -773,6 +833,7 @@ def test_full_workflow():
     })
     assert create_response.status_code == 200
     project_id = create_response.json()["id"]
+    _track_project(project_id)  # Track for cleanup (in case test fails before manual cleanup)
 
     # 2. Analyze prompt
     analyze_response = client.post(f"/api/projects/{project_id}/analyze", json={
@@ -797,9 +858,7 @@ def test_full_workflow():
         "version_b": 2
     })
     assert diff_response.status_code == 200
-
-    # Cleanup
-    client.delete(f"/api/projects/{project_id}")
+    # Cleanup handled by fixture
 
 
 # ============================================================================
