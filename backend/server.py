@@ -117,7 +117,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
@@ -1331,14 +1331,19 @@ async def get_settings():
 @app.post("/api/settings")
 async def save_settings(settings: dict):
     """Save LLM settings - accepts frontend format"""
+    api_key = settings.get("api_key", "")
+    logger.info(f"Saving settings: provider={settings.get('llm_provider')}, model={settings.get('model_name')}, api_key={'[SET]' if api_key else '[EMPTY]'}")
+
     updated = update_settings(
         llm_provider=settings.get("llm_provider", "openai"),
-        api_key=settings.get("api_key", ""),
+        api_key=api_key,
         model_name=settings.get("model_name", "")
     )
+
+    logger.info(f"Settings saved successfully. Provider: {updated['llm_provider']}, Model: {updated['model_name']}")
     return {"message": "Settings saved successfully", "settings": {
         "llm_provider": updated["llm_provider"],
-        "api_key": updated["api_key"],
+        "api_key": "[REDACTED]" if updated["api_key"] else "",
         "model_name": updated["model_name"]
     }}
 

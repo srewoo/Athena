@@ -1450,33 +1450,13 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
 
     categories = ["positive", "edge_case", "negative", "adversarial"]
 
-    # If no API key, return template test cases
+    # If no API key, raise an error instead of returning template data
     if not api_key:
-        test_cases = []
-        for i in range(num_examples):
-            category = categories[i % len(categories)]
-            test_case = {
-                "id": str(uuid.uuid4()),
-                "input": f"Test input {i+1} for {project.use_case}",
-                "expected_behavior": f"Should handle {category} case appropriately",
-                "category": category,
-                "created_at": datetime.now().isoformat()
-            }
-            test_cases.append(test_case)
-
-        dataset_obj = {
-            "test_cases": test_cases,
-            "sample_count": len(test_cases),
-            "preview": test_cases,
-            "count": len(test_cases),
-            "categories": {cat: sum(1 for tc in test_cases if tc["category"] == cat) for cat in categories},
-            "generated_at": datetime.now().isoformat()
-        }
-        project.dataset = dataset_obj
-        project.test_cases = test_cases
-        project.updated_at = datetime.now()
-        project_storage.save_project(project)
-        return dataset_obj
+        logger.error(f"No API key configured for dataset generation. Provider: {provider}")
+        raise HTTPException(
+            status_code=400,
+            detail="API key not configured. Please add your API key in Settings to generate test cases."
+        )
 
     # ========== SMART CONTEXT-AWARE GENERATION ==========
 
@@ -1547,6 +1527,8 @@ Return a JSON object with test_cases array:
 
 Generate {num_examples} FULL, REALISTIC inputs. For {input_spec.input_type.value.replace('_', ' ')}, each input should be complete and detailed (200-800 words for transcripts/documents)."""
 
+    logger.info(f"Generating dataset with LLM: provider={provider}, model={model_name}, num_examples={num_examples}")
+
     result = await llm_client.chat(
         system_prompt=system_prompt,
         user_message=user_message,
@@ -1557,7 +1539,12 @@ Generate {num_examples} FULL, REALISTIC inputs. For {input_spec.input_type.value
         max_tokens=16000  # More tokens for complete inputs
     )
 
+    if not result:
+        logger.error("LLM returned None for dataset generation")
+        raise HTTPException(status_code=500, detail="LLM call failed - no response")
+
     if result.get("error"):
+        logger.error(f"LLM error for dataset generation: {result['error']}")
         raise HTTPException(status_code=500, detail=result["error"])
 
     # Parse JSON from LLM response
@@ -1601,22 +1588,13 @@ Generate {num_examples} FULL, REALISTIC inputs. For {input_spec.input_type.value
             categories_count[category] = categories_count.get(category, 0) + 1
 
     except (json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Failed to parse LLM response, using fallback: {e}")
-        # Fallback to template if parsing fails
-        test_cases = []
-        categories_count = {}
-        for i in range(num_examples):
-            category = categories[i % len(categories)]
-            test_case = {
-                "id": str(uuid.uuid4()),
-                "input": f"Test input {i+1} for {project.use_case}",
-                "expected_behavior": f"Should handle {category} case appropriately",
-                "category": category,
-                "test_focus": "",
-                "created_at": datetime.now().isoformat()
-            }
-            test_cases.append(test_case)
-            categories_count[category] = categories_count.get(category, 0) + 1
+        logger.error(f"Failed to parse LLM response for dataset generation: {e}")
+        logger.error(f"Raw LLM output was: {result.get('output', '')[:500]}...")
+        # Re-raise error instead of silently falling back to templates
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate test cases: LLM response parsing failed - {str(e)}"
+        )
 
     # Build dataset object with smart generation metadata
     dataset_obj = {
@@ -1687,6 +1665,43 @@ class CreateTestRunRequest(BaseModel):
     batch_size: int = 5
     max_concurrent: int = 3
     test_cases: List[Dict[str, Any]] = None
+
+
+def build_eval_prompt_with_calibration(base_eval_prompt: str, calibration_examples: List[Dict[str, Any]]) -> str:
+    """
+    Build evaluation prompt with calibration examples injected.
+
+    Calibration examples help the LLM judge understand the scoring expectations
+    by showing examples of inputs, outputs, and their expected scores.
+    """
+    if not calibration_examples:
+        return base_eval_prompt
+
+    # Build calibration section
+    calibration_section = "\n\n## CALIBRATION EXAMPLES\nUse these examples to calibrate your scoring:\n"
+
+    for i, example in enumerate(calibration_examples[:5], 1):  # Limit to 5 examples
+        calibration_section += f"\n### Example {i}\n"
+        if example.get("input"):
+            calibration_section += f"**Input:** {example['input'][:200]}...\n" if len(str(example.get('input', ''))) > 200 else f"**Input:** {example.get('input')}\n"
+        if example.get("output"):
+            calibration_section += f"**Output:** {example['output'][:200]}...\n" if len(str(example.get('output', ''))) > 200 else f"**Output:** {example.get('output')}\n"
+        if example.get("score"):
+            calibration_section += f"**Expected Score:** {example['score']}/5\n"
+        if example.get("rationale"):
+            calibration_section += f"**Rationale:** {example['rationale']}\n"
+
+    # Insert calibration before the output format section if it exists
+    if "## OUTPUT" in base_eval_prompt.upper() or "OUTPUT FORMAT" in base_eval_prompt.upper():
+        # Find where output section starts and insert before it
+        import re
+        match = re.search(r'(##\s*OUTPUT|OUTPUT\s*FORMAT)', base_eval_prompt, re.IGNORECASE)
+        if match:
+            insert_pos = match.start()
+            return base_eval_prompt[:insert_pos] + calibration_section + "\n" + base_eval_prompt[insert_pos:]
+
+    # Otherwise append at the end
+    return base_eval_prompt + calibration_section
 
 
 async def run_single_test_case(

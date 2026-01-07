@@ -958,9 +958,9 @@ const PromptOptimizer = () => {
     setDatasetProgress({ progress: 0, batch: 0, total_batches: 0, status: 'starting' });
 
     try {
-      // Use streaming endpoint for large datasets with heartbeat
+      // Use regular endpoint for dataset generation
       // Include current version number so test cases are relevant to selected prompt
-      const response = await fetch(`${API}/projects/${projectId}/dataset/generate-stream`, {
+      const response = await fetch(`${API}/projects/${projectId}/dataset/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -970,102 +970,20 @@ const PromptOptimizer = () => {
       });
 
       if (!response.ok) {
-        // Fall back to regular endpoint if streaming fails
-        const fallbackResponse = await fetch(`${API}/projects/${projectId}/dataset/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sample_count: countToGenerate,
-            version: currentVersion?.version
-          })
-        });
-
-        if (!fallbackResponse.ok) throw new Error("Failed to generate dataset");
-
-        const result = await fallbackResponse.json();
-        setDataset(result);
-        setIsCurrentSessionDataset(true); // Mark as current session dataset
-        setDatasetProgress({ progress: 100, batch: 0, total_batches: 0, status: 'completed' });
-
-        toast({
-          title: "Dataset Generated",
-          description: `${result.sample_count} test cases created`
-        });
-        return;
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Failed to generate dataset");
       }
 
-      // Check if response is SSE or regular JSON
-      const contentType = response.headers.get('content-type') || '';
+      // Parse JSON response
+      const result = await response.json();
+      setDataset(result);
+      setIsCurrentSessionDataset(true);
+      setDatasetProgress({ progress: 100, batch: 0, total_batches: 0, status: 'completed' });
 
-      if (contentType.includes('application/json')) {
-        // Regular JSON response (streaming not implemented on backend)
-        const result = await response.json();
-        setDataset(result);
-        setIsCurrentSessionDataset(true);
-        setDatasetProgress({ progress: 100, batch: 0, total_batches: 0, status: 'completed' });
-
-        toast({
-          title: "Dataset Generated",
-          description: `${result.sample_count} test cases created`
-        });
-        return;
-      }
-
-      // Process SSE stream
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-
-              // Handle different message types
-              if (data.type === 'heartbeat') {
-                // Heartbeat received - connection is alive
-                console.log('Heartbeat received:', data.timestamp);
-              } else if (data.status === 'completed') {
-                // Generation complete
-                setDataset({
-                  dataset_id: data.dataset_id,
-                  csv_content: data.csv_content,
-                  sample_count: data.sample_count,
-                  preview: data.preview
-                });
-                setIsCurrentSessionDataset(true); // Mark as current session dataset
-                setDatasetProgress({ progress: 100, batch: 0, total_batches: 0, status: 'completed' });
-
-                toast({
-                  title: "Dataset Generated",
-                  description: `${data.sample_count} test cases created`
-                });
-              } else if (data.status === 'error') {
-                throw new Error(data.message || 'Dataset generation failed');
-              } else if (data.status === 'generating') {
-                // Progress update
-                setDatasetProgress({
-                  progress: data.progress || 0,
-                  batch: data.batch || 0,
-                  total_batches: data.total_batches || 0,
-                  status: 'generating'
-                });
-              }
-            } catch (parseError) {
-              console.error('Error parsing SSE data:', parseError);
-            }
-          }
-        }
-      }
+      toast({
+        title: "Dataset Generated",
+        description: `${result.sample_count || result.count} test cases created`
+      });
 
     } catch (error) {
       toast({
