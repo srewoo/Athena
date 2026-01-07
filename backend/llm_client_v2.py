@@ -91,8 +91,10 @@ class LLMResponse:
 
 
 # Model configurations
+# Models that require max_completion_tokens instead of max_tokens
+# and may not support system messages or temperature
 REASONING_MODELS = {
-    "openai": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"],
+    "openai": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-4o", "gpt-4o-mini"],
     "claude": ["claude-sonnet-4-5", "claude-opus-4"],
     "gemini": ["gemini-3", "gemini-2.0-flash-thinking"]
 }

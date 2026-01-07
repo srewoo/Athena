@@ -45,6 +45,54 @@ kill_port() {
     fi
 }
 
+# Function to clear caches and logs
+clear_caches() {
+    echo -e "${BLUE}Clearing caches and logs...${NC}"
+    
+    # Clear backend caches
+    if [ -d "$BACKEND_DIR" ]; then
+        echo -e "${YELLOW}  - Clearing backend Python cache...${NC}"
+        find "$BACKEND_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find "$BACKEND_DIR" -type f -name "*.pyc" -delete 2>/dev/null || true
+        find "$BACKEND_DIR" -type f -name "*.pyo" -delete 2>/dev/null || true
+        
+        # Clear backend log
+        if [ -f "$BACKEND_DIR/server.log" ]; then
+            rm -f "$BACKEND_DIR/server.log"
+            echo -e "${YELLOW}  - Cleared backend server.log${NC}"
+        fi
+        
+        echo -e "${GREEN}  ✓ Backend cache cleared${NC}"
+    fi
+    
+    # Clear frontend caches
+    if [ -d "$FRONTEND_DIR" ]; then
+        echo -e "${YELLOW}  - Clearing frontend cache...${NC}"
+        
+        # Clear node_modules cache
+        if [ -d "$FRONTEND_DIR/node_modules/.cache" ]; then
+            rm -rf "$FRONTEND_DIR/node_modules/.cache"
+            echo -e "${YELLOW}  - Cleared node_modules/.cache${NC}"
+        fi
+        
+        # Clear build directory
+        if [ -d "$FRONTEND_DIR/build" ]; then
+            rm -rf "$FRONTEND_DIR/build"
+            echo -e "${YELLOW}  - Cleared build directory${NC}"
+        fi
+        
+        # Clear yarn cache (optional, only if .yarn/cache exists)
+        if [ -d "$FRONTEND_DIR/.yarn/cache" ]; then
+            rm -rf "$FRONTEND_DIR/.yarn/cache"
+            echo -e "${YELLOW}  - Cleared .yarn/cache${NC}"
+        fi
+        
+        echo -e "${GREEN}  ✓ Frontend cache cleared${NC}"
+    fi
+    
+    echo -e "${GREEN}✓ All caches and logs cleared!${NC}\n"
+}
+
 # Check if backend directory exists
 if [ ! -d "$BACKEND_DIR" ]; then
     echo -e "${RED}Error: Backend directory not found at $BACKEND_DIR${NC}"
@@ -56,6 +104,9 @@ if [ ! -d "$FRONTEND_DIR" ]; then
     echo -e "${RED}Error: Frontend directory not found at $FRONTEND_DIR${NC}"
     exit 1
 fi
+
+# Clear all caches and logs
+clear_caches
 
 # Kill any processes on ports 8000 and 3000
 echo -e "${BLUE}Checking for processes on ports 8000 and 3000...${NC}"

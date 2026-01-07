@@ -176,45 +176,12 @@ llm_client = get_llm_client()
 app.include_router(project_api.router)
 
 
-@app.get("/")
-async def root():
-    return {"message": "Athena - Strategic Prompt Architect API", "version": "2.0"}
-
-
-# ============================================================================
-# ADMIN/MAINTENANCE ENDPOINTS
-# ============================================================================
-
-@app.get("/api/admin/storage-stats")
-async def get_storage_stats():
-    """Get storage statistics for database"""
-    return db.get_storage_stats()
-
-
-@app.get("/api/admin/metrics")
-async def get_metrics():
-    """Get application metrics"""
-    return metrics.get_stats()
-
-
-@app.post("/api/admin/cleanup")
-async def trigger_cleanup(days: int = 30):
-    """Manually trigger cleanup of old projects"""
-    result = db.cleanup_old_projects(days=days)
-    logger.info(f"Manual cleanup triggered: {result['deleted_count']} projects deleted")
-    return result
-
-
-# ============================================================================
-# STEP 1: VALIDATION
-# ============================================================================
-
-@app.post("/api/step1/validate")
-async def validate_project(project: ProjectInput):
-    """Validate project input"""
-    if not all([project.project_name, project.use_case, project.requirements, project.initial_prompt]):
-        raise HTTPException(status_code=400, detail="All fields are required")
-    return {"message": "Validation successful"}
+# NOTE: The following endpoints were removed as they are not used by the UI:
+#   - GET / (root endpoint)
+#   - GET /api/admin/storage-stats
+#   - GET /api/admin/metrics
+#   - POST /api/admin/cleanup
+#   - POST /api/step1/validate
 
 
 # ============================================================================
@@ -394,6 +361,10 @@ async def agentic_rewrite_optimization(project: ProjectInput, current_result: di
     3. Careful execution with DNA preservation
     4. Validation and iteration loop
 
+    NOTE: This endpoint is used for ad-hoc prompt optimization with provided API keys.
+    For project-based rewriting, use POST /api/projects/{id}/rewrite which uses stored
+    project context and saved settings.
+
     Parameters:
     - project: Project configuration including API keys
     - current_result: Current optimization result with optimized_prompt
@@ -429,6 +400,12 @@ async def agentic_rewrite_optimization(project: ProjectInput, current_result: di
             user_analysis_context=analysis_context
         )
 
+        # Log key details for debugging
+        prompt_changed = result.original_prompt != result.final_prompt
+        logger.info(f"Agentic rewrite result: no_change={result.no_change}, prompt_changed={prompt_changed}, "
+                    f"original_len={len(result.original_prompt)}, final_len={len(result.final_prompt)}, "
+                    f"score: {result.original_score:.1f} -> {result.final_score:.1f}")
+
         # Convert to the expected response format
         return {
             "optimized_prompt": result.final_prompt,
@@ -446,7 +423,8 @@ async def agentic_rewrite_optimization(project: ProjectInput, current_result: di
                 "original_score": result.original_score,
                 "final_score": result.final_score,
                 "quality_delta": result.final_score - result.original_score,
-                "validation": result.validation
+                "validation": result.validation,
+                "prompt_changed": prompt_changed
             }
         }
 
@@ -468,6 +446,10 @@ async def agentic_generate_evaluation_prompt(
 ):
     """
     Step 3 Agentic Eval Generation: Gold-standard evaluation prompt generation.
+
+    NOTE: This endpoint is used for ad-hoc eval prompt generation with provided API keys.
+    For project-based generation, use POST /api/projects/{id}/eval-prompt/generate which
+    uses stored project context and saved settings.
 
     Uses the 20-point best practices framework:
     1. Explicit Role Separation - Evaluator doesn't re-do task
@@ -587,47 +569,96 @@ async def agentic_generate_evaluation_prompt(
 # NOTE: /api/step5/execute-tests was removed - use /api/projects/{id}/test-cases/execute instead
 
 
-@app.post("/api/generate-report", response_model=FinalReport)
-async def generate_report(project_name: str, optimized_prompt: str, optimization_score: float, test_results: List[dict]):
-    """Generate final test report with statistics"""
-    total_tests = len(test_results)
-    passed_tests = sum(1 for r in test_results if r.get("passed", False))
-    pass_rate = (passed_tests / total_tests * 100) if total_tests > 0 else 0
+# NOTE: POST /api/generate-report was removed as it is not used by the UI
 
-    avg_score = sum(r.get("eval_score", 0) for r in test_results) / total_tests if total_tests > 0 else 0
 
-    # Category breakdown
-    category_stats = {}
-    for result in test_results:
-        category = result.get("test_case", {}).get("category", "unknown")
-        if category not in category_stats:
-            category_stats[category] = {"total": 0, "passed": 0}
-        category_stats[category]["total"] += 1
-        if result.get("passed", False):
-            category_stats[category]["passed"] += 1
+# ============================================================================
+# REWRITE API - Used by EvaluationDetail.js
+# ============================================================================
 
-    category_breakdown = {
-        cat: {
-            "pass_rate": (stats["passed"] / stats["total"] * 100) if stats["total"] > 0 else 0,
-            "total_tests": stats["total"]
-        }
-        for cat, stats in category_stats.items()
-    }
+@app.post("/api/rewrite")
+async def rewrite_prompt(data: dict):
+    """
+    Rewrite/improve a prompt based on evaluation feedback.
+    Used by EvaluationDetail.js to improve prompts after evaluation.
+    """
+    prompt_text = data.get("prompt_text", "")
+    suggestions = data.get("suggestions", [])
+    evaluation_id = data.get("evaluation_id", "")
 
-    total_tokens = sum(r.get("tokens_used", 0) for r in test_results)
-    avg_latency = sum(r.get("latency_ms", 0) for r in test_results) / total_tests if total_tests > 0 else 0
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="prompt_text is required")
 
-    return FinalReport(
-        project_name=project_name,
-        optimization_score=optimization_score,
-        pass_rate=pass_rate,
-        avg_score=avg_score,
-        total_tests=total_tests,
-        passed_tests=passed_tests,
-        category_breakdown=category_breakdown,
-        total_tokens=total_tokens,
-        avg_latency_ms=avg_latency
+    # Get LLM settings
+    settings = get_llm_settings()
+    provider = settings["provider"]
+    api_key = settings["api_key"]
+    model_name = settings["model_name"]
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key not configured. Please configure settings first.")
+
+    # Build improvement context from suggestions
+    improvements_context = ""
+    if suggestions:
+        improvements_context = "\n\nSuggested improvements to incorporate:\n"
+        for i, sug in enumerate(suggestions[:5], 1):
+            if isinstance(sug, dict):
+                improvements_context += f"{i}. [{sug.get('priority', 'Medium')}] {sug.get('suggestion', sug.get('text', str(sug)))}\n"
+            else:
+                improvements_context += f"{i}. {sug}\n"
+
+    system_prompt = """You are an expert prompt engineer. Your task is to improve the given prompt while preserving its core intent and any template variables.
+
+RULES:
+1. Preserve ALL template variables exactly as written (e.g., {{variable_name}}, {variable}, <<var>>)
+2. Improve clarity, structure, and specificity
+3. Add appropriate delimiters and sections
+4. Ensure the output format is clearly specified
+5. Add edge case handling if missing
+6. Maintain the original task/goal
+
+Return ONLY the improved prompt text, no explanations or meta-commentary."""
+
+    user_message = f"""Improve this prompt:
+
+{prompt_text}
+{improvements_context}
+
+Return the improved prompt:"""
+
+    result = await llm_client.chat(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name,
+        temperature=0.7,
+        max_tokens=8000
     )
+
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    rewritten_prompt = result.get("output", "").strip()
+
+    # Clean up any markdown code blocks if present
+    if rewritten_prompt.startswith("```"):
+        lines = rewritten_prompt.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        rewritten_prompt = "\n".join(lines)
+
+    return {
+        "original_prompt": prompt_text,
+        "rewritten_prompt": rewritten_prompt,
+        "evaluation_id": evaluation_id,
+        "improvements_applied": len(suggestions) if suggestions else 0,
+        "provider": provider,
+        "model": model_name or "default"
+    }
 
 
 # ============================================================================
@@ -640,7 +671,13 @@ evaluations_store = {}
 
 @app.post("/api/evaluate")
 async def evaluate_prompt(data: dict):
-    """Evaluate a prompt using LLM - used by Dashboard.js"""
+    """
+    Evaluate a prompt using LLM - used by Dashboard.js.
+
+    NOTE: This endpoint evaluates a prompt against general quality criteria.
+    For project-based analysis that considers project context, requirements, and
+    provides improvement suggestions, use POST /api/projects/{id}/analyze.
+    """
     prompt_text = data.get("prompt_text", "")
     evaluation_mode = data.get("evaluation_mode", "quick")
 
@@ -859,6 +896,9 @@ async def playground_test(data: dict):
 async def ab_test(data: dict):
     """
     A/B test two prompts with quality evaluation - used by ABTesting.js
+
+    NOTE: This is the canonical A/B testing endpoint. It compares two prompts directly
+    with provided test inputs. Project-based A/B testing endpoints have been removed.
 
     Enhanced to include:
     - Quality scoring for each output

@@ -600,6 +600,18 @@ const PromptOptimizer = () => {
 
         // Also update current version
         setCurrentVersion(prev => ({ ...prev, evaluation }));
+
+        // Persist evaluation to backend so it survives page reload
+        try {
+          await fetch(`${API}/projects/${projectId}/versions/${versionToUpdate.version}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ evaluation })
+          });
+        } catch (saveError) {
+          console.error('Failed to persist evaluation:', saveError);
+          // Don't show error to user - local state still has the data
+        }
       }
 
       toast({
@@ -681,35 +693,14 @@ const PromptOptimizer = () => {
           ? `Agentic improvements: ${result.improvements.join("; ")}`
           : "Agentic optimization applied";
 
-        // Build analysis results from agentic rewrite to avoid re-analysis
-        const finalScore = (result.score || result.agentic_details?.final_score || 6) * 10; // Convert to 0-100 scale
-        const agenticAnalysisResults = {
-          score: finalScore,
-          overall_score: finalScore,
-          requirements_alignment_score: 100, // Agentic rewrite preserves requirements
-          best_practices_score: finalScore * 0.8, // Estimate based on overall score
-          original_score: (result.agentic_details?.original_score || 0) * 10,
-          suggestions: result.suggestions?.map(s => ({ priority: "Medium", suggestion: s })) || [],
-          improvements: result.improvements || [],
-          requirements_gaps: [], // Cleared after successful rewrite
-          best_practices_gaps: [],
-          categories: {
-            structure: { score: 70, feedback: "Improved by agentic rewrite" },
-            clarity: { score: 70, feedback: "Improved by agentic rewrite" },
-            completeness: { score: 70, feedback: "Improved by agentic rewrite" },
-            output_format: { score: 70, feedback: "Improved by agentic rewrite" }
-          },
-          agentic_rewrite: true,
-          agentic_details: result.agentic_details
-        };
-
-        // Pass precomputed analysis to skip re-analysis
-        await addVersion(result.optimized_prompt, changesDescription, false, agenticAnalysisResults);
+        // Add version WITHOUT precomputed analysis - let addVersion trigger real analysis
+        // This ensures the version tile shows accurate score from the analyze API
+        await addVersion(result.optimized_prompt, changesDescription, false, null);
 
         const qualityDelta = result.agentic_details?.quality_delta || 0;
         toast({
           title: "Agentic Rewrite Complete",
-          description: `Quality ${qualityDelta >= 0 ? 'improved' : 'changed'} by ${qualityDelta.toFixed(1)} points after ${result.agentic_details?.iterations || 0} iterations.`
+          description: `Prompt rewritten. Analyzing quality...`
         });
       }
 
