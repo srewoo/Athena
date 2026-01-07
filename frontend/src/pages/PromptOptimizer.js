@@ -852,9 +852,9 @@ const PromptOptimizer = () => {
       setEvalRationale(result.rationale);
       setAgenticEvalDetails(result.agentic_details);
 
-      // Save to project
+      // Save to project (use PATCH for partial update)
       await fetch(`${API}/projects/${projectId}`, {
-        method: "PUT",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           eval_prompt: result.eval_prompt,

@@ -383,6 +383,31 @@ async def delete_project(project_id: str):
     return {"message": "Project deleted successfully"}
 
 
+class ProjectPatchRequest(BaseModel):
+    """Request model for partial project updates"""
+    eval_prompt: Optional[str] = None
+    eval_rationale: Optional[str] = None
+    test_dataset: Optional[List[Dict[str, Any]]] = None
+    model_config = {"extra": "allow"}  # Allow additional fields
+
+
+@router.patch("/{project_id}")
+async def patch_project(project_id: str, updates: ProjectPatchRequest):
+    """Partially update a project (only specified fields)"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Apply only the fields that were provided
+    update_dict = updates.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        if hasattr(project, field):
+            setattr(project, field, value)
+
+    project_storage.save_project(project)
+    return project
+
+
 class AnalyzeRequest(BaseModel):
     prompt_text: str
 
