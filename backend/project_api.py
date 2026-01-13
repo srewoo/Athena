@@ -18,6 +18,13 @@ from smart_test_generator import detect_input_type, build_input_generation_promp
 from prompt_analyzer import analyze_prompt as analyze_prompt_dna
 from prompt_analyzer_v2 import analyze_prompt_hybrid, enhanced_analysis_to_dict
 from llm_client_v2 import get_llm_client as get_enhanced_llm_client
+from eval_best_practices import (
+    get_anthropic_system_prompt_for_generation,
+    get_anthropic_system_prompt_for_improvement,
+    get_eval_improvement_user_prompt,
+    get_fresh_eval_generation_prompt,
+    apply_best_practices_check
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -318,7 +325,16 @@ class CreateProjectRequest(BaseModel):
     key_requirements: list = None
     requirements: str = None
     target_provider: str = None
-    initial_prompt: str
+    initial_prompt: str = ""  # Optional for eval imports
+    eval_prompt: Optional[str] = None  # For imported eval prompts
+    project_type: Optional[str] = None  # "eval" for imported eval prompts
+
+
+class GenerateEvalPromptRequest(BaseModel):
+    regenerate: bool = False  # True when regenerating existing eval prompt
+    current_eval_prompt: Optional[str] = None  # Existing eval prompt to improve upon
+    current_rationale: Optional[str] = None  # Existing rationale
+    eval_changes: Optional[list] = None  # History of changes made to eval prompt
 
 
 @router.post("", response_model=SavedProject)
@@ -341,7 +357,9 @@ async def create_project(request: CreateProjectRequest):
         use_case=request.use_case,
         requirements=requirements_obj,
         key_requirements=key_reqs,
-        initial_prompt=request.initial_prompt
+        initial_prompt=request.initial_prompt,
+        eval_prompt=request.eval_prompt,
+        project_type=request.project_type
     )
     return project
 
@@ -866,11 +884,22 @@ Provide expert analysis and actionable improvements."""
 
 
 def _extract_template_variables(prompt_text: str) -> List[str]:
-    """Extract template variables like {{callTranscript}} from the prompt"""
-    # Match {{variableName}} pattern
-    pattern = r'\{\{(\w+)\}\}'
-    matches = re.findall(pattern, prompt_text)
-    return list(set(matches))  # Remove duplicates
+    """
+    Extract template variables from the prompt.
+    Supports both single brace {variable} and double brace {{variable}} formats.
+    """
+    # Match double braces {{variable}} first (more specific)
+    double_brace_pattern = r'\{\{(\w+)\}\}'
+    double_matches = re.findall(double_brace_pattern, prompt_text)
+
+    # Match single braces {variable} - but exclude JSON-like patterns
+    # This pattern matches {word} but not {"key" or {  or {{
+    single_brace_pattern = r'(?<!\{)\{(\w+)\}(?!\})'
+    single_matches = re.findall(single_brace_pattern, prompt_text)
+
+    # Combine and deduplicate
+    all_matches = list(set(double_matches + single_matches))
+    return all_matches
 
 
 def _get_system_type_description(input_type: InputType, use_case: str) -> str:
@@ -992,11 +1021,25 @@ def _get_domain_specific_rubric(input_type: InputType) -> str:
 
 
 @router.post("/{project_id}/eval-prompt/generate")
-async def generate_eval_prompt(project_id: str):
-    """Generate an evaluation prompt using LLM with best practices, tailored to the system prompt"""
+async def generate_eval_prompt(project_id: str, request: GenerateEvalPromptRequest = None):
+    """Generate an evaluation prompt using LLM with best practices, tailored to the system prompt.
+
+    When regenerate=True and existing eval prompt is provided, the LLM will improve upon
+    the existing prompt rather than generating from scratch.
+    """
+    # Handle case where no request body is provided
+    if request is None:
+        request = GenerateEvalPromptRequest()
+
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get existing eval prompt - from request or project
+    existing_eval_prompt = request.current_eval_prompt or getattr(project, 'eval_prompt', None)
+    existing_rationale = request.current_rationale or getattr(project, 'eval_rationale', None)
+    eval_changes = request.eval_changes or []
+    is_regeneration = request.regenerate and existing_eval_prompt
 
     # Get the current prompt from system_prompt_versions
     if not project.system_prompt_versions or len(project.system_prompt_versions) == 0:
@@ -1090,57 +1133,53 @@ Requirements: {requirements_str}
             "input_variable": input_var_name
         }
 
-    # Use LLM to generate sophisticated eval prompt with best practices
-    system_prompt = f"""You are an expert prompt engineer specializing in LLM-as-Judge evaluation systems.
+    # Use LLM to generate sophisticated eval prompt with Anthropic best practices
+    # Use shared best practices module for consistent prompts
+    if is_regeneration:
+        # Regeneration mode: improve upon existing eval prompt using shared best practices
+        system_prompt = get_anthropic_system_prompt_for_improvement(
+            system_description=system_description,
+            input_var_name=input_var_name,
+            output_var_name=output_var_name,
+            template_vars=template_vars if template_vars else ['INPUT'],
+            detected_type=detected_type.value,
+            domain_criteria=domain_criteria,
+            domain_rubric=domain_rubric
+        )
 
-Your task is to create a comprehensive evaluation prompt for a {system_description}.
+        user_message = get_eval_improvement_user_prompt(
+            existing_eval_prompt=existing_eval_prompt,
+            system_prompt=current_prompt,
+            use_case=project.use_case,
+            requirements=requirements_str,
+            input_var_name=input_var_name,
+            output_var_name=output_var_name,
+            detected_type=detected_type.value,
+            eval_changes=eval_changes
+        )
 
-## CRITICAL: Variable Naming
-The system prompt being evaluated uses these template variables: {template_vars if template_vars else ['INPUT']}
-You MUST use the EXACT same variable names in your evaluation prompt:
-- Use {{{{{input_var_name}}}}} for the input (NOT {{{{INPUT}}}} unless that's the actual variable name)
-- Use {{{{{output_var_name}}}}} for the AI response to evaluate
+    else:
+        # Fresh generation mode: use shared best practices for consistency with agentic flow
+        system_prompt = get_anthropic_system_prompt_for_generation(
+            system_description=system_description,
+            input_var_name=input_var_name,
+            output_var_name=output_var_name,
+            template_vars=template_vars if template_vars else ['INPUT'],
+            detected_type=detected_type.value,
+            domain_criteria=domain_criteria,
+            domain_rubric=domain_rubric
+        )
 
-## System Context
-This is a {system_description}. The evaluation criteria should be specific to this domain.
-
-## Structure Requirements:
-1. Use markdown-style headers with ** for sections
-2. Include {{{{{input_var_name}}}}} and {{{{{output_var_name}}}}} placeholders (EXACT variable names!)
-3. Define a clear evaluator role with expertise in {detected_type.value} analysis
-4. Create evaluation criteria weighted by importance (must sum to 100%)
-5. Make criteria SPECIFIC to evaluating {detected_type.value} outputs
-
-## Domain-Specific Requirements for {detected_type.value}:
-{domain_criteria}
-
-## Rubric Requirements:
-Create a detailed 1-5 scoring rubric with domain-specific indicators:
-{domain_rubric}
-
-## Instructions:
-Include evaluation instructions specific to {detected_type.value} analysis.
-Require JSON output with "score" (1-5 number) and "reasoning" (specific explanation).
-
-Return ONLY the evaluation prompt text in plain text format. No XML tags. No explanations."""
-
-    user_message = f"""Create an evaluation prompt for this {system_description}:
-
-Use Case: {project.use_case}
-
-Requirements: {requirements_str}
-
-System Prompt Being Evaluated:
-{current_prompt}
-
-Template Variables Found: {template_vars if template_vars else ['INPUT']}
-
-Generate a comprehensive evaluation prompt that:
-- Uses {{{{{input_var_name}}}}} placeholder (matching the system prompt's variable)
-- Uses {{{{{output_var_name}}}}} placeholder for the response
-- Has criteria specifically tailored to evaluating {detected_type.value} outputs
-- Includes domain-specific failure modes for {detected_type.value}
-- References the specific requirements: {requirements_str}"""
+        user_message = get_fresh_eval_generation_prompt(
+            system_prompt=current_prompt,
+            use_case=project.use_case,
+            requirements=requirements_str,
+            input_var_name=input_var_name,
+            output_var_name=output_var_name,
+            detected_type=detected_type.value,
+            domain_criteria=domain_criteria,
+            domain_rubric=domain_rubric
+        )
 
     result = await llm_client.chat(
         system_prompt=system_prompt,
@@ -1168,7 +1207,38 @@ Generate a comprehensive evaluation prompt that:
         eval_prompt = eval_prompt.replace(f"{{{output_var_name}}}", f"{{{{{output_var_name}}}}}")
         eval_prompt = eval_prompt.replace("{OUTPUT}", f"{{{{{output_var_name}}}}}")
 
-    rationale = f"AI-generated evaluation prompt tailored for {system_description}. Uses {{{{{input_var_name}}}}} variable matching system prompt. Domain-specific criteria for {detected_type.value} evaluation."
+    # Run best practices check on the generated eval prompt
+    best_practices_report = apply_best_practices_check(eval_prompt)
+
+    # Set appropriate rationale based on generation mode
+    if is_regeneration:
+        rationale = f"AI-improved evaluation prompt based on existing prompt. Applied Anthropic's eval best practices: outcome-focused grading, balanced criteria, and domain-specific failure modes for {detected_type.value}. Best practices score: {best_practices_report['score']}/100."
+        changes_made = "Regenerated with improvements"
+    else:
+        rationale = f"AI-generated evaluation prompt tailored for {system_description}. Uses {{{{{input_var_name}}}}} variable matching system prompt. Applied Anthropic's best practices. Score: {best_practices_report['score']}/100."
+        changes_made = "Initial generation"
+
+    # Add to eval prompt version history
+    if not project.eval_prompt_versions:
+        project.eval_prompt_versions = []
+
+    # Determine next version number
+    next_version = 1
+    if project.eval_prompt_versions:
+        max_version = max(v.get("version", 0) for v in project.eval_prompt_versions)
+        next_version = max_version + 1
+
+    # Create version entry
+    version_entry = {
+        "version": next_version,
+        "eval_prompt_text": eval_prompt,
+        "rationale": rationale,
+        "changes_made": changes_made,
+        "best_practices_score": best_practices_report['score'],
+        "detected_type": detected_type.value,
+        "created_at": datetime.now().isoformat()
+    }
+    project.eval_prompt_versions.append(version_entry)
 
     # Persist eval prompt to project
     project.eval_prompt = eval_prompt
@@ -1180,7 +1250,10 @@ Generate a comprehensive evaluation prompt that:
         "eval_prompt": eval_prompt,
         "rationale": rationale,
         "detected_type": detected_type.value,
-        "input_variable": input_var_name
+        "input_variable": input_var_name,
+        "is_regeneration": is_regeneration,
+        "best_practices": best_practices_report,
+        "version": next_version
     }
 
 
@@ -1879,8 +1952,30 @@ Create an improved evaluation prompt that addresses the feedback."""
         if not refined_eval_prompt:
             raise HTTPException(status_code=500, detail="LLM returned empty response")
 
-        rationale = f"AI-refined evaluation prompt incorporating: {feedback_text[:100]}"
+        # Run best practices check on refined prompt
+        best_practices_report = apply_best_practices_check(refined_eval_prompt)
+
+        rationale = f"AI-refined evaluation prompt incorporating: {feedback_text[:100]}. Best practices score: {best_practices_report['score']}/100."
         changes = [f"Incorporated feedback: {feedback_text[:50]}...", "AI refinement applied"]
+
+        # Add to eval prompt version history
+        if not project.eval_prompt_versions:
+            project.eval_prompt_versions = []
+
+        next_version = 1
+        if project.eval_prompt_versions:
+            max_version = max(v.get("version", 0) for v in project.eval_prompt_versions)
+            next_version = max_version + 1
+
+        version_entry = {
+            "version": next_version,
+            "eval_prompt_text": refined_eval_prompt,
+            "rationale": rationale,
+            "changes_made": f"Refined based on feedback: {feedback_text[:50]}...",
+            "best_practices_score": best_practices_report['score'],
+            "created_at": datetime.now().isoformat()
+        }
+        project.eval_prompt_versions.append(version_entry)
 
         # Persist refined eval prompt to project
         project.eval_prompt = refined_eval_prompt
@@ -1892,7 +1987,9 @@ Create an improved evaluation prompt that addresses the feedback."""
             "refined_prompt": refined_eval_prompt,
             "eval_prompt": refined_eval_prompt,  # For backwards compatibility
             "rationale": rationale,
-            "changes_made": changes
+            "changes_made": changes,
+            "version": next_version,
+            "best_practices": best_practices_report
         }
 
     except HTTPException:
@@ -2102,6 +2199,229 @@ Please evaluate based on the criteria above and provide your assessment."""
 
 
 # ============================================================================
+# EVAL PROMPT VERSION MANAGEMENT ENDPOINTS
+# ============================================================================
+
+def _add_eval_prompt_version(project, eval_prompt: str, rationale: str, changes_made: str = "Generated", best_practices_score: int = None):
+    """Helper function to add a new eval prompt version to the project."""
+    if not project.eval_prompt_versions:
+        project.eval_prompt_versions = []
+
+    # Determine next version number
+    next_version = 1
+    if project.eval_prompt_versions:
+        max_version = max(v.get("version", 0) for v in project.eval_prompt_versions)
+        next_version = max_version + 1
+
+    # Create version entry
+    version_entry = {
+        "version": next_version,
+        "eval_prompt_text": eval_prompt,
+        "rationale": rationale,
+        "changes_made": changes_made,
+        "best_practices_score": best_practices_score,
+        "created_at": datetime.now().isoformat()
+    }
+
+    project.eval_prompt_versions.append(version_entry)
+    return next_version
+
+
+class AddEvalVersionRequest(BaseModel):
+    eval_prompt_text: str
+    changes_made: str = "Manual edit"
+    rationale: str = None
+
+
+@router.post("/{project_id}/eval-prompt/versions")
+async def add_eval_prompt_version(project_id: str, request: AddEvalVersionRequest):
+    """Add a new eval prompt version manually"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Run best practices check
+    best_practices_report = apply_best_practices_check(request.eval_prompt_text)
+
+    # Add version
+    version_num = _add_eval_prompt_version(
+        project,
+        eval_prompt=request.eval_prompt_text,
+        rationale=request.rationale or f"Manual edit. Best practices score: {best_practices_report['score']}/100",
+        changes_made=request.changes_made,
+        best_practices_score=best_practices_report['score']
+    )
+
+    # Update current eval prompt
+    project.eval_prompt = request.eval_prompt_text
+    project.eval_rationale = request.rationale
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return {
+        "version": version_num,
+        "message": f"Eval prompt version {version_num} created",
+        "best_practices": best_practices_report
+    }
+
+
+@router.get("/{project_id}/eval-prompt/versions")
+async def list_eval_prompt_versions(project_id: str):
+    """List all eval prompt versions for a project"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    versions = project.eval_prompt_versions or []
+
+    # Add current version indicator
+    current_eval = project.eval_prompt
+    for v in versions:
+        v["is_current"] = v.get("eval_prompt_text") == current_eval
+
+    return {
+        "versions": versions,
+        "total": len(versions),
+        "current_eval_prompt": current_eval
+    }
+
+
+@router.get("/{project_id}/eval-prompt/versions/{version_number}")
+async def get_eval_prompt_version(project_id: str, version_number: int):
+    """Get a specific eval prompt version"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.eval_prompt_versions:
+        raise HTTPException(status_code=404, detail="No eval prompt versions found")
+
+    version = None
+    for v in project.eval_prompt_versions:
+        if v.get("version") == version_number:
+            version = v
+            break
+
+    if not version:
+        raise HTTPException(status_code=404, detail=f"Version {version_number} not found")
+
+    version["is_current"] = version.get("eval_prompt_text") == project.eval_prompt
+    return version
+
+
+@router.put("/{project_id}/eval-prompt/versions/{version_number}/restore")
+async def restore_eval_prompt_version(project_id: str, version_number: int):
+    """Restore an eval prompt version as the current version"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.eval_prompt_versions:
+        raise HTTPException(status_code=404, detail="No eval prompt versions found")
+
+    version = None
+    for v in project.eval_prompt_versions:
+        if v.get("version") == version_number:
+            version = v
+            break
+
+    if not version:
+        raise HTTPException(status_code=404, detail=f"Version {version_number} not found")
+
+    # Update current eval prompt
+    project.eval_prompt = version.get("eval_prompt_text")
+    project.eval_rationale = version.get("rationale")
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return {
+        "message": f"Restored eval prompt version {version_number}",
+        "eval_prompt": project.eval_prompt,
+        "rationale": project.eval_rationale
+    }
+
+
+@router.delete("/{project_id}/eval-prompt/versions/{version_number}")
+async def delete_eval_prompt_version(project_id: str, version_number: int):
+    """Delete an eval prompt version"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.eval_prompt_versions:
+        raise HTTPException(status_code=404, detail="No eval prompt versions found")
+
+    # Don't allow deleting if only one version exists
+    if len(project.eval_prompt_versions) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the only version")
+
+    # Find and remove the version
+    original_length = len(project.eval_prompt_versions)
+    project.eval_prompt_versions = [
+        v for v in project.eval_prompt_versions
+        if v.get("version") != version_number
+    ]
+
+    if len(project.eval_prompt_versions) == original_length:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    project.updated_at = datetime.now()
+    project_storage.save_project(project)
+
+    return {
+        "message": f"Version {version_number} deleted successfully",
+        "remaining_versions": len(project.eval_prompt_versions)
+    }
+
+
+class EvalVersionDiffRequest(BaseModel):
+    version_a: int
+    version_b: int
+
+
+@router.post("/{project_id}/eval-prompt/versions/diff")
+async def get_eval_version_diff(project_id: str, request: EvalVersionDiffRequest):
+    """Compute a diff between two eval prompt versions"""
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.eval_prompt_versions:
+        raise HTTPException(status_code=404, detail="No eval prompt versions found")
+
+    # Find both versions
+    version_a = None
+    version_b = None
+    for v in project.eval_prompt_versions:
+        if v.get("version") == request.version_a:
+            version_a = v
+        if v.get("version") == request.version_b:
+            version_b = v
+
+    if not version_a:
+        raise HTTPException(status_code=404, detail=f"Version {request.version_a} not found")
+    if not version_b:
+        raise HTTPException(status_code=404, detail=f"Version {request.version_b} not found")
+
+    prompt_a = version_a.get("eval_prompt_text", "")
+    prompt_b = version_b.get("eval_prompt_text", "")
+
+    diff_lines, stats, similarity = compute_line_diff(prompt_a, prompt_b)
+
+    return {
+        "version_a": request.version_a,
+        "version_b": request.version_b,
+        "prompt_a": prompt_a,
+        "prompt_b": prompt_b,
+        "diff_lines": diff_lines,
+        "stats": stats,
+        "similarity_percent": round(similarity, 1),
+        "score_a": version_a.get("best_practices_score"),
+        "score_b": version_b.get("best_practices_score")
+    }
+
+
+# ============================================================================
 # DATASET GENERATION ENDPOINTS
 # ============================================================================
 
@@ -2164,8 +2484,13 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
     analysis = analyze_prompt_dna(current_prompt)
     input_spec = detect_input_type(current_prompt, analysis.dna.template_variables)
 
+    # Extract ALL template variables from the system prompt
+    template_variables = _extract_template_variables(current_prompt)
+    if not template_variables:
+        template_variables = ["input"]  # Fallback to generic input
+
     logger.info(f"Smart generation - Detected input type: {input_spec.input_type.value}, "
-                f"template var: {input_spec.template_variable}, domain: {input_spec.domain_context}")
+                f"template vars: {template_variables}, domain: {input_spec.domain_context}")
 
     # Get scenario variations for comprehensive coverage
     scenarios = get_scenario_variations(input_spec, num_examples)
@@ -2180,16 +2505,26 @@ async def generate_dataset(project_id: str, request: GenerateDatasetRequest = No
         for i, s in enumerate(scenarios)
     ])
 
+    # Build the variable fields description for the prompt
+    variable_fields_desc = []
+    for var in template_variables:
+        variable_fields_desc.append(f'            "{var}": "Realistic value for {var}"')
+    variable_fields_json = ",\n".join(variable_fields_desc)
+
     system_prompt = f"""You are an expert QA engineer creating test cases for an AI system.
 
 ## YOUR TASK
 Generate realistic test inputs that will thoroughly test the system prompt below.
-Each test case should be a COMPLETE, REALISTIC input that a real user would provide.
+Each test case should provide COMPLETE, REALISTIC values for EACH input variable.
 
 ## SYSTEM PROMPT TO TEST
 ```
 {current_prompt}
 ```
+
+## TEMPLATE VARIABLES TO GENERATE
+The system prompt expects these input variables: {template_variables}
+You MUST generate a realistic value for EACH variable in every test case.
 
 ## USE CASE
 {use_case}
@@ -2204,11 +2539,11 @@ Each test case should be a COMPLETE, REALISTIC input that a real user would prov
 - **adversarial**: Tricky inputs that might confuse the system
 
 ## OUTPUT FORMAT
-Return ONLY valid JSON:
+Return ONLY valid JSON with SEPARATE FIELDS for each template variable:
 {{
     "test_cases": [
         {{
-            "input": "Complete realistic input text here...",
+{variable_fields_json},
             "category": "positive|edge_case|negative|adversarial",
             "test_focus": "Specific aspect being tested",
             "expected_behavior": "What the system should do",
@@ -2218,12 +2553,16 @@ Return ONLY valid JSON:
 }}
 
 ## CRITICAL RULES
-1. Each input must be COMPLETE and REALISTIC - no placeholders like "[insert here]"
-2. Inputs should match the format expected by the system prompt
+1. Each variable must have a COMPLETE, REALISTIC value - no placeholders like "[insert here]"
+2. Values should match the expected format for each variable type:
+   - IDs should be realistic identifiers (e.g., "REP-12345", "user_abc123")
+   - JSON fields should contain valid JSON arrays/objects
+   - Text fields should have substantial, realistic content
 3. Include specific details: real names, dates, numbers, scenarios
 4. Test cases should expose potential weaknesses in the prompt
 5. Vary complexity: some simple, some complex
-6. For transcripts/documents: write 100-500 words of realistic content"""
+6. For transcripts/documents: write 100-500 words of realistic content
+7. For JSON array fields (like gaps_json): generate 2-5 realistic items"""
 
     user_message = f"""Generate {num_examples} test cases for the system prompt above.
 
@@ -2292,12 +2631,29 @@ Return the test cases as JSON:"""
             category = tc.get("category", categories[i % len(categories)])
             test_case = {
                 "id": str(uuid.uuid4()),
-                "input": tc.get("input", f"Test input {i+1}"),
                 "expected_behavior": tc.get("expected_behavior", "Should respond appropriately"),
                 "category": category,
                 "test_focus": tc.get("test_focus", ""),
+                "difficulty": tc.get("difficulty", "medium"),
                 "created_at": datetime.now().isoformat()
             }
+
+            # Extract each template variable as a separate field
+            # This allows test cases to have columns like rep_id, gaps_json, grounding_summary
+            for var in template_variables:
+                if var in tc:
+                    test_case[var] = tc[var]
+                else:
+                    # Fallback: check for legacy "input" field
+                    if var == template_variables[0] and "input" in tc:
+                        test_case[var] = tc["input"]
+                    else:
+                        test_case[var] = f"[Missing {var}]"
+
+            # Also keep a combined "input" field for backwards compatibility
+            # This is a dict of all variable values
+            test_case["inputs"] = {var: test_case.get(var, "") for var in template_variables}
+
             test_cases.append(test_case)
             categories_count[category] = categories_count.get(category, 0) + 1
 
@@ -2320,7 +2676,7 @@ Return the test cases as JSON:"""
         "generated_at": datetime.now().isoformat(),
         "metadata": {
             "input_type": input_spec.input_type.value,
-            "template_variable": input_spec.template_variable,
+            "template_variables": template_variables,  # All variables as separate columns
             "domain_context": input_spec.domain_context,
             "generation_type": "smart"
         }
@@ -3079,8 +3435,148 @@ async def compare_test_runs(project_id: str, data: dict):
     }
 
 
-# NOTE: POST /{project_id}/test-runs/single was removed as it was a non-functional
-# stub that returned hardcoded mock data instead of actually running a test.
+@router.post("/{project_id}/test-runs/single")
+async def run_single_test(project_id: str, data: dict):
+    """
+    Run a single test case against the system prompt and evaluate it.
+    Used for quick testing without running a full test suite.
+    """
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Extract request data
+    prompt_text = data.get("prompt_text", "")
+    test_input = data.get("test_input", {})
+    eval_prompt_text = data.get("eval_prompt_text", project.eval_prompt)
+
+    # Get LLM settings
+    llm_provider = data.get("llm_provider")
+    model_name = data.get("model_name")
+
+    if not llm_provider:
+        settings = get_settings()
+        llm_provider = settings.get("provider", "openai")
+        model_name = model_name or settings.get("model_name")
+
+    api_key = get_settings().get("api_key", "")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key not configured")
+
+    # Prepare input - handle both dict and string formats
+    if isinstance(test_input, dict):
+        # New format with separate variables
+        input_text = test_input.get("input") or test_input.get("inputs") or json.dumps(test_input)
+        if isinstance(input_text, dict):
+            input_text = json.dumps(input_text)
+    else:
+        input_text = str(test_input)
+
+    # Step 1: Run the system prompt with the test input
+    try:
+        # Replace template variables in the prompt
+        filled_prompt = prompt_text
+        if isinstance(test_input, dict):
+            for key, value in test_input.items():
+                if key not in ['input', 'inputs']:
+                    # Handle both {var} and {{var}} formats
+                    filled_prompt = filled_prompt.replace(f"{{{key}}}", str(value) if not isinstance(value, str) else value)
+                    filled_prompt = filled_prompt.replace(f"{{{{{key}}}}}", str(value) if not isinstance(value, str) else value)
+
+        # Generate output from system prompt
+        result = await llm_client.chat(
+            system_prompt=filled_prompt,
+            user_message=input_text,
+            provider=llm_provider,
+            api_key=api_key,
+            model_name=model_name,
+            temperature=0.3,
+            max_tokens=2000
+        )
+
+        if result.get("error"):
+            return {
+                "success": False,
+                "error": result["error"],
+                "prompt_output": None,
+                "eval_score": None,
+                "eval_feedback": None,
+                "passed": False
+            }
+
+        prompt_output = result.get("output", "")
+
+    except Exception as e:
+        logger.error(f"Error running system prompt: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "prompt_output": None,
+            "eval_score": None,
+            "eval_feedback": None,
+            "passed": False
+        }
+
+    # Step 2: Evaluate the output if eval prompt is provided
+    eval_score = None
+    eval_feedback = None
+    passed = None
+
+    if eval_prompt_text:
+        try:
+            # Fill in eval prompt variables
+            filled_eval = eval_prompt_text
+            filled_eval = filled_eval.replace("{{input}}", input_text)
+            filled_eval = filled_eval.replace("{input}", input_text)
+            filled_eval = filled_eval.replace("{{output}}", prompt_output)
+            filled_eval = filled_eval.replace("{output}", prompt_output)
+
+            # Also replace any specific variable names
+            if isinstance(test_input, dict):
+                for key, value in test_input.items():
+                    val_str = str(value) if not isinstance(value, str) else value
+                    filled_eval = filled_eval.replace(f"{{{key}}}", val_str)
+                    filled_eval = filled_eval.replace(f"{{{{{key}}}}}", val_str)
+
+            eval_result = await llm_client.chat(
+                system_prompt=filled_eval,
+                user_message="Evaluate the output above.",
+                provider=llm_provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=0.1,
+                max_tokens=2000
+            )
+
+            if not eval_result.get("error"):
+                eval_output = eval_result.get("output", "")
+                # Try to parse JSON response
+                try:
+                    # Extract JSON from response
+                    json_match = re.search(r'\{[\s\S]*\}', eval_output)
+                    if json_match:
+                        eval_json = json.loads(json_match.group())
+                        eval_score = eval_json.get("score", 3.0)
+                        eval_feedback = eval_json.get("summary") or eval_json.get("reasoning") or eval_output[:500]
+                        verdict = eval_json.get("verdict", "").upper()
+                        passed = verdict == "PASS" or (eval_score >= 4.0 if isinstance(eval_score, (int, float)) else False)
+                    else:
+                        eval_feedback = eval_output[:500]
+                except json.JSONDecodeError:
+                    eval_feedback = eval_output[:500]
+
+        except Exception as e:
+            logger.error(f"Error running evaluation: {e}")
+            eval_feedback = f"Evaluation error: {str(e)}"
+
+    return {
+        "success": True,
+        "prompt_output": prompt_output,
+        "eval_score": eval_score,
+        "eval_feedback": eval_feedback,
+        "passed": passed,
+        "test_input": test_input
+    }
 
 
 @router.post("/{project_id}/test-runs/rerun-failed")
@@ -3090,7 +3586,8 @@ async def rerun_failed_tests(project_id: str, data: dict):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    run_id = data.get("run_id")
+    # Accept both "run_id" and "source_run_id" for backwards compatibility
+    run_id = data.get("run_id") or data.get("source_run_id")
     original_run = get_test_run_from_project(project, run_id)
 
     if not original_run:

@@ -38,10 +38,22 @@ logger = logging.getLogger(__name__)
 
 
 def extract_template_variables(prompt_text: str) -> List[str]:
-    """Extract template variables like {{callTranscript}} from the prompt"""
-    pattern = r'\{\{(\w+)\}\}'
-    matches = re.findall(pattern, prompt_text)
-    return list(set(matches))  # Remove duplicates
+    """
+    Extract template variables from the prompt.
+    Supports both single brace {variable} and double brace {{variable}} formats.
+    """
+    # Match double braces {{variable}} first (more specific)
+    double_brace_pattern = r'\{\{(\w+)\}\}'
+    double_matches = re.findall(double_brace_pattern, prompt_text)
+
+    # Match single braces {variable} - but exclude JSON-like patterns
+    # This pattern matches {word} but not {"key" or {  or {{
+    single_brace_pattern = r'(?<!\{)\{(\w+)\}(?!\})'
+    single_matches = re.findall(single_brace_pattern, prompt_text)
+
+    # Combine and deduplicate
+    all_matches = list(set(double_matches + single_matches))
+    return all_matches
 
 
 def get_primary_input_variable(system_prompt: str) -> str:
@@ -51,9 +63,8 @@ def get_primary_input_variable(system_prompt: str) -> str:
     """
     variables = extract_template_variables(system_prompt)
     if variables:
-        # Return the first variable (most likely the main input)
-        # Prefer variables that look like inputs over outputs
-        input_keywords = ['input', 'transcript', 'text', 'content', 'data', 'query', 'message', 'code', 'email', 'document']
+        # Prefer variables that look like primary inputs
+        input_keywords = ['input', 'transcript', 'text', 'content', 'data', 'query', 'message', 'code', 'email', 'document', 'gaps', 'json']
         for var in variables:
             var_lower = var.lower()
             for keyword in input_keywords:
@@ -62,6 +73,17 @@ def get_primary_input_variable(system_prompt: str) -> str:
         # If no keyword match, return first variable
         return variables[0]
     return "input"
+
+
+def get_all_input_variables(system_prompt: str) -> List[str]:
+    """
+    Get all template variable names from the system prompt.
+    Returns list of variable names for use in eval prompt.
+    """
+    variables = extract_template_variables(system_prompt)
+    if not variables:
+        return ["input"]
+    return variables
 
 
 # ============================================================================
@@ -398,18 +420,169 @@ FAILURE_MODE_TAXONOMY = {
                 "category": "completeness"
             }
         ]
+    },
+    PromptType.CREATIVE: {
+        "auto_fail": [
+            {
+                "id": "safety_violation",
+                "name": "Safety/Content Policy Violation",
+                "description": "Harmful, offensive, or inappropriate content",
+                "detection": "Check for policy violations",
+                "category": "safety"
+            },
+            {
+                "id": "plagiarism",
+                "name": "Plagiarism/Copyright Violation",
+                "description": "Directly copies copyrighted material",
+                "detection": "Check for verbatim copied content",
+                "category": "safety"
+            }
+        ],
+        "major": [
+            {
+                "id": "constraint_violation",
+                "name": "Constraint Violation",
+                "description": "Ignores specified constraints (length, style, tone, format)",
+                "detection": "Verify compliance with stated constraints",
+                "category": "rule_adherence"
+            },
+            {
+                "id": "off_brief",
+                "name": "Off Brief",
+                "description": "Output doesn't match the creative brief or requirements",
+                "detection": "Compare output to requirements",
+                "category": "relevance"
+            },
+            {
+                "id": "inconsistent_voice",
+                "name": "Inconsistent Voice/Tone",
+                "description": "Voice or tone shifts unexpectedly",
+                "detection": "Check consistency throughout output",
+                "category": "consistency"
+            },
+            {
+                "id": "factual_error",
+                "name": "Factual Error in Creative Context",
+                "description": "Gets real-world facts wrong when accuracy matters",
+                "detection": "Verify factual claims if applicable",
+                "category": "accuracy"
+            }
+        ],
+        "minor": [
+            {
+                "id": "generic_output",
+                "name": "Generic/Template-like Output",
+                "description": "Output is bland, predictable, or lacks creativity",
+                "detection": "Assess originality and engagement",
+                "category": "quality"
+            }
+        ]
+    },
+    PromptType.INSTRUCTIONAL: {
+        "auto_fail": [
+            {
+                "id": "dangerous_instruction",
+                "name": "Dangerous/Harmful Instructions",
+                "description": "Provides instructions that could cause harm",
+                "detection": "Check for safety of instructions",
+                "category": "safety"
+            },
+            {
+                "id": "critical_step_missing",
+                "name": "Critical Step Missing",
+                "description": "Omits essential step that would cause failure",
+                "detection": "Verify all critical steps present",
+                "category": "completeness"
+            }
+        ],
+        "major": [
+            {
+                "id": "incorrect_sequence",
+                "name": "Incorrect Sequence",
+                "description": "Steps in wrong order causing failure",
+                "detection": "Verify logical step sequence",
+                "category": "accuracy"
+            },
+            {
+                "id": "unclear_instruction",
+                "name": "Unclear Instructions",
+                "description": "Steps are ambiguous or confusing",
+                "detection": "Assess clarity of each step",
+                "category": "clarity"
+            },
+            {
+                "id": "wrong_prerequisites",
+                "name": "Wrong/Missing Prerequisites",
+                "description": "Incorrect or missing prerequisites",
+                "detection": "Verify prerequisites are accurate",
+                "category": "completeness"
+            },
+            {
+                "id": "incorrect_values",
+                "name": "Incorrect Values/Parameters",
+                "description": "Wrong numbers, settings, or parameters",
+                "detection": "Verify accuracy of all values",
+                "category": "accuracy"
+            }
+        ],
+        "minor": [
+            {
+                "id": "verbose_instructions",
+                "name": "Overly Verbose",
+                "description": "Instructions longer than necessary",
+                "detection": "Assess conciseness",
+                "category": "quality"
+            }
+        ]
+    },
+    PromptType.HYBRID: {
+        "auto_fail": [
+            {
+                "id": "format_unparseable",
+                "name": "Unparseable Output",
+                "description": "Output cannot be parsed as required format",
+                "detection": "Attempt to parse output",
+                "category": "format"
+            },
+            {
+                "id": "safety_violation",
+                "name": "Safety Violation",
+                "description": "Harmful or inappropriate content",
+                "detection": "Check for safety violations",
+                "category": "safety"
+            }
+        ],
+        "major": [
+            {
+                "id": "requirement_miss",
+                "name": "Requirement Miss",
+                "description": "Fails to meet stated requirements",
+                "detection": "Compare output to requirements",
+                "category": "completeness"
+            },
+            {
+                "id": "hallucination",
+                "name": "Hallucination",
+                "description": "Makes up information not in input",
+                "detection": "Verify claims against input",
+                "category": "grounding"
+            }
+        ],
+        "minor": [
+            {
+                "id": "quality_issue",
+                "name": "Quality Issue",
+                "description": "Output quality below expectations",
+                "detection": "Assess overall quality",
+                "category": "quality"
+            }
+        ]
     }
 }
 
 # Universal auto-fail conditions (apply to ALL prompt types)
-UNIVERSAL_AUTO_FAIL = [
-    {
-        "id": "format_unparseable",
-        "name": "Unparseable Output",
-        "description": "Output cannot be parsed as required format (JSON/XML/etc.)",
-        "detection": "Attempt to parse output in expected format",
-        "category": "format"
-    },
+# Note: format_unparseable only applies to structured outputs, not plain text
+UNIVERSAL_AUTO_FAIL_ALWAYS = [
     {
         "id": "prompt_leak",
         "name": "System Prompt Leakage",
@@ -425,6 +598,18 @@ UNIVERSAL_AUTO_FAIL = [
         "category": "safety"
     }
 ]
+
+# Format-related auto-fail - only applies to structured output formats (json, xml, csv)
+STRUCTURED_FORMAT_AUTO_FAIL = {
+    "id": "format_unparseable",
+    "name": "Unparseable Output",
+    "description": "Output cannot be parsed as required format (JSON/XML/etc.)",
+    "detection": "Attempt to parse output in expected format",
+    "category": "format"
+}
+
+# Output formats that require parsing/validation
+STRUCTURED_OUTPUT_FORMATS = {"json", "xml", "csv"}
 
 
 # ============================================================================
@@ -625,22 +810,30 @@ async def analyze_system_prompt_for_eval(
    - Quality thresholds
    - What "good" means in THIS system
 
-2. **FAILURE RISKS** (What could go wrong)
+2. **MANDATORY OUTPUT ELEMENTS** (Extract EVERY required element from the system prompt)
+   - Identifiers that MUST appear (e.g., Rep ID, Case ID, Customer ID)
+   - Contextual framing that MUST appear (e.g., time period, date range, executive summary)
+   - Structural elements that MUST appear (e.g., section headers, specific fields)
+   - Grounding elements that MUST appear (e.g., "What Good Looks Like" references, baseline comparisons)
+
+   BE EXHAUSTIVE. If the system prompt says "include X" or "must contain Y" or "always show Z", capture it.
+
+3. **FAILURE RISKS** (What could go wrong)
    - Primary risks if system fails
    - Who is impacted
    - Severity of failures
 
-3. **EXPLICIT RULES** (Non-negotiable requirements)
+4. **EXPLICIT RULES** (Non-negotiable requirements)
    - Stated constraints
    - Prohibited actions
    - Required behaviors
 
-4. **GROUNDING REQUIREMENTS**
+5. **GROUNDING REQUIREMENTS**
    - What evidence must be cited
    - What can't be assumed
    - Required verbatim elements
 
-5. **DOWNSTREAM CONSUMERS**
+6. **DOWNSTREAM CONSUMERS**
    - Who uses this output
    - What decisions depend on it
    - Stakes of incorrect evaluation
@@ -652,6 +845,20 @@ Return JSON:
         "content_requirements": ["Specific requirement 1", "..."],
         "format_requirements": ["Specific requirement 1", "..."],
         "quality_thresholds": ["Specific threshold 1", "..."]
+    },
+    "mandatory_output_elements": {
+        "identifiers": [
+            {"element": "Rep ID", "description": "Sales rep identifier", "where_required": "header/summary"}
+        ],
+        "contextual_framing": [
+            {"element": "Time period", "description": "Date range of analysis", "where_required": "header"}
+        ],
+        "structural_elements": [
+            {"element": "Executive summary", "description": "High-level overview", "where_required": "beginning"}
+        ],
+        "grounding_elements": [
+            {"element": "WGLL reference", "description": "What Good Looks Like baseline", "where_required": "comparisons"}
+        ]
     },
     "failure_risks": {
         "primary_risks": ["Risk 1", "..."],
@@ -722,14 +929,31 @@ def build_auto_fail_conditions(
     prompt_type: PromptType,
     analysis: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Build comprehensive auto-fail conditions"""
+    """Build comprehensive auto-fail conditions based on prompt type and output format"""
 
-    # Start with universal auto-fails
-    auto_fails = UNIVERSAL_AUTO_FAIL.copy()
+    # Start with universal auto-fails that apply to ALL outputs
+    auto_fails = [af.copy() for af in UNIVERSAL_AUTO_FAIL_ALWAYS]
 
-    # Add type-specific auto-fails
+    # Get the detected output format from analysis
+    # The analysis dict has structure: {"programmatic": {"dna": {"output_format": "..."}}, "deep": {...}}
+    programmatic = analysis.get("programmatic", {})
+    dna = programmatic.get("dna", {})
+    output_format = dna.get("output_format", "plain")
+    if output_format is None:
+        output_format = "plain"
+
+    # Only add format-parsing auto-fail for structured output formats
+    if output_format.lower() in STRUCTURED_OUTPUT_FORMATS:
+        auto_fails.append(STRUCTURED_FORMAT_AUTO_FAIL.copy())
+
+    # Add type-specific auto-fails, but filter out format-related ones for plain text
     type_failures = FAILURE_MODE_TAXONOMY.get(prompt_type, {})
-    auto_fails.extend(type_failures.get("auto_fail", []))
+    for af in type_failures.get("auto_fail", []):
+        # Skip format-related auto-fails for plain text outputs
+        if output_format.lower() not in STRUCTURED_OUTPUT_FORMATS:
+            if af.get("category") == "format" or af.get("id") in ["format_invalid", "parse_failure", "missing_required_keys"]:
+                continue
+        auto_fails.append(af.copy())
 
     # Add rule-based auto-fails from analysis
     deep = analysis.get("deep", {})
@@ -765,16 +989,36 @@ def build_major_issues(
             "category": "custom"
         })
 
+    # Add mandatory output element violations as major issues
+    mandatory_elements = deep.get("mandatory_output_elements", {})
+    all_elements = []
+    for category, elements in mandatory_elements.items():
+        if isinstance(elements, list):
+            for elem in elements:
+                if isinstance(elem, dict):
+                    all_elements.append(elem.get("element", ""))
+                elif isinstance(elem, str):
+                    all_elements.append(elem)
+
+    if all_elements:
+        major.append({
+            "id": "missing_mandatory_elements",
+            "name": "Missing Mandatory Output Elements",
+            "description": f"Output is missing required elements: {', '.join(all_elements[:5])}{'...' if len(all_elements) > 5 else ''}",
+            "detection": "Check if all mandatory elements (identifiers, contextual framing, grounding elements) are present in output",
+            "category": "completeness"
+        })
+
     return major
 
 
-def build_evaluation_dimensions(
+def build_evaluation_dimensions_static(
     prompt_type: PromptType,
     analysis: Dict[str, Any],
     auto_fails: List[Dict[str, Any]],
     major_issues: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Build weighted evaluation dimensions with full rubrics"""
+    """Build weighted evaluation dimensions with full rubrics (static fallback)"""
 
     # Base dimensions always included
     dimensions = [
@@ -801,6 +1045,146 @@ def build_evaluation_dimensions(
         d["weight"] = round(d["weight"] / total_weight, 2)
 
     return dimensions
+
+
+async def generate_dynamic_evaluation_dimensions(
+    system_prompt: str,
+    use_case: str,
+    analysis: Dict[str, Any],
+    auto_fails: List[Dict[str, Any]],
+    major_issues: List[Dict[str, Any]],
+    llm_client,
+    provider: str,
+    api_key: str,
+    model_name: str
+) -> List[Dict[str, Any]]:
+    """
+    Generate domain-specific evaluation dimensions dynamically using LLM.
+
+    This analyzes the system prompt to understand WHAT matters for this specific
+    domain and generates appropriate dimension names, descriptions, and rubrics.
+
+    For example:
+    - Call scoring system → "Diagnostic Signal Quality", "Severity Calibration"
+    - Code review system → "Bug Detection Accuracy", "Code Quality Assessment"
+    - Customer support → "Resolution Completeness", "Empathy & Tone"
+    """
+
+    deep = analysis.get("deep", {})
+    programmatic = analysis.get("programmatic", {})
+
+    dimension_prompt = """You are an expert evaluation system designer. Your task is to create
+DOMAIN-SPECIFIC evaluation dimensions for judging outputs from a specific system.
+
+DO NOT use generic dimension names like "Accuracy", "Completeness", "Relevance".
+Instead, create dimensions that reflect WHAT ACTUALLY MATTERS for this specific system's outputs.
+
+For each dimension, provide:
+1. **name**: A domain-specific name that reflects what's being evaluated
+   - BAD: "Accuracy" (too generic)
+   - GOOD: "Evidence Grounding Quality" or "Diagnostic Signal Precision"
+2. **description**: What this dimension evaluates in the context of THIS system
+3. **what_to_check**: Specific things to look for (list of 3-5 items)
+4. **what_NOT_to_check**: Scope limits to prevent evaluator overreach (list of 2-3 items)
+5. **rubric**: Score criteria for 5 (excellent), 3 (acceptable), 1 (poor)
+6. **weight**: Relative importance (0.0-1.0, should sum to ~1.0 across all dimensions)
+
+Return a JSON array of 4-6 dimensions:
+[
+    {
+        "name": "Domain-Specific Dimension Name",
+        "description": "What this dimension evaluates for THIS system",
+        "what_to_check": ["Specific check 1", "Specific check 2", "Specific check 3"],
+        "what_NOT_to_check": ["Scope limit 1", "Scope limit 2"],
+        "rubric": {
+            "5": "What earns excellent - specific to this domain",
+            "3": "What earns acceptable - specific to this domain",
+            "1": "What earns poor - specific to this domain"
+        },
+        "weight": 0.25
+    }
+]
+
+IMPORTANT:
+- Dimension names should be UNIQUE to this system's domain
+- Rubrics should describe domain-specific quality, not generic LLM quality
+- Consider: What makes output from THIS system valuable vs useless?"""
+
+    # Build context about what the system does
+    core_function = deep.get("core_function", use_case)
+    critical_factors = deep.get("critical_success_factors", [])
+    failure_names = [f["name"] for f in auto_fails + major_issues]
+
+    user_message = f"""Design evaluation dimensions for this system:
+
+**System Purpose:**
+{core_function}
+
+**Use Case:**
+{use_case}
+
+**Critical Success Factors (what MUST be right):**
+{json.dumps(critical_factors, indent=2) if critical_factors else "Not specified - infer from system prompt"}
+
+**Failure Modes to Catch:**
+{json.dumps(failure_names[:10], indent=2)}
+
+**System Prompt:**
+```
+{system_prompt[:6000]}
+```
+
+Create 4-6 domain-specific evaluation dimensions that will effectively judge outputs from this system.
+Focus on what makes outputs from THIS system valuable, not generic LLM quality metrics."""
+
+    result = await llm_client.chat(
+        system_prompt=dimension_prompt,
+        user_message=user_message,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name,
+        temperature=0.3,
+        max_tokens=4000
+    )
+
+    if result.get("error"):
+        logger.warning(f"Dynamic dimension generation failed: {result['error']}, using static fallback")
+        return build_evaluation_dimensions_static(
+            analysis.get("prompt_type", PromptType.HYBRID),
+            analysis, auto_fails, major_issues
+        )
+
+    try:
+        dimensions = parse_json_response(result["output"], "array")
+        if dimensions and len(dimensions) >= 3:
+            # Normalize weights
+            total_weight = sum(d.get("weight", 0.2) for d in dimensions)
+            for d in dimensions:
+                d["weight"] = round(d.get("weight", 0.2) / total_weight, 2)
+                # Convert rubric keys to integers for consistency
+                if "rubric" in d:
+                    d["rubric"] = {int(k): v for k, v in d["rubric"].items()}
+
+            logger.info(f"Generated {len(dimensions)} domain-specific dimensions: {[d['name'] for d in dimensions]}")
+            return dimensions
+    except Exception as e:
+        logger.warning(f"Failed to parse dynamic dimensions: {e}, using static fallback")
+
+    return build_evaluation_dimensions_static(
+        analysis.get("prompt_type", PromptType.HYBRID),
+        analysis, auto_fails, major_issues
+    )
+
+
+# Alias for backward compatibility
+def build_evaluation_dimensions(
+    prompt_type: PromptType,
+    analysis: Dict[str, Any],
+    auto_fails: List[Dict[str, Any]],
+    major_issues: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Synchronous fallback - use generate_dynamic_evaluation_dimensions for async"""
+    return build_evaluation_dimensions_static(prompt_type, analysis, auto_fails, major_issues)
 
 
 async def generate_calibration_examples_v3(
@@ -889,11 +1273,12 @@ def build_gold_standard_eval_prompt(
     deep = analysis.get("deep", {})
     programmatic = analysis.get("programmatic", {})
 
-    # Extract the primary input variable from the system prompt
-    input_var_name = get_primary_input_variable(system_prompt)
+    # Extract ALL input variables from the system prompt
+    all_input_vars = get_all_input_variables(system_prompt)
+    primary_input_var = get_primary_input_variable(system_prompt)
     output_var_name = "output"  # Response is always 'output'
 
-    logger.info(f"Using input variable: {{{{{input_var_name}}}}} (extracted from system prompt)")
+    logger.info(f"Found template variables: {all_input_vars} (primary: {primary_input_var})")
 
     # Build dimension sections with full rubrics and NOT-to-check
     dimension_sections = []
@@ -924,6 +1309,61 @@ def build_gold_standard_eval_prompt(
 {rubric_lines}"""
         dimension_sections.append(section)
 
+    # Build mandatory output elements section
+    mandatory_elements = deep.get("mandatory_output_elements", {})
+    mandatory_section = ""
+
+    all_mandatory = []
+    for category, elements in mandatory_elements.items():
+        if isinstance(elements, list):
+            for elem in elements:
+                if isinstance(elem, dict):
+                    all_mandatory.append({
+                        "category": category.replace("_", " ").title(),
+                        "element": elem.get("element", ""),
+                        "description": elem.get("description", ""),
+                        "where": elem.get("where_required", "")
+                    })
+                elif isinstance(elem, str):
+                    all_mandatory.append({
+                        "category": category.replace("_", " ").title(),
+                        "element": elem,
+                        "description": "",
+                        "where": ""
+                    })
+
+    if all_mandatory:
+        mandatory_lines = []
+        for item in all_mandatory:
+            line = f"- **{item['element']}**"
+            if item['description']:
+                line += f": {item['description']}"
+            if item['where']:
+                line += f" *(required in: {item['where']})*"
+            mandatory_lines.append(line)
+
+        mandatory_section = f"""
+## II.B Mandatory Output Elements (Content Checklist)
+
+The system output **MUST** include the following elements. Missing ANY of these should significantly impact the score:
+
+**Identifiers:**
+{chr(10).join([l for l in mandatory_lines if any(x in l.lower() for x in ['id', 'identifier', 'name', 'reference'])] or ['- None specified'])}
+
+**Contextual Framing:**
+{chr(10).join([l for l in mandatory_lines if any(x in l.lower() for x in ['time', 'period', 'date', 'range', 'context', 'summary', 'executive', 'overview'])] or ['- None specified'])}
+
+**Grounding Elements:**
+{chr(10).join([l for l in mandatory_lines if any(x in l.lower() for x in ['good', 'wgll', 'baseline', 'benchmark', 'ground', 'reference', 'standard'])] or ['- None specified'])}
+
+**Other Required Elements:**
+{chr(10).join([l for l in mandatory_lines if not any(x in l.lower() for x in ['id', 'identifier', 'name', 'reference', 'time', 'period', 'date', 'range', 'context', 'summary', 'executive', 'overview', 'good', 'wgll', 'baseline', 'benchmark', 'ground', 'standard'])] or ['- None specified'])}
+
+**Evaluation Rule:** For each missing mandatory element, deduct points from the relevant dimension score. If multiple mandatory elements are missing, this may constitute a major failure.
+
+---
+"""
+
     # Build calibration section
     calibration_section = ""
     if calibration_examples:
@@ -942,6 +1382,18 @@ def build_gold_standard_eval_prompt(
 Use these to calibrate your scoring. Similar outputs should receive similar scores.
 {''.join(cal_text)}
 """
+
+    # Build the inputs section with ALL template variables
+    input_vars_list = []
+    for var in all_input_vars:
+        input_vars_list.append(f"- **{{{{{var}}}}}**: Input data for '{var}'")
+    input_vars_section = chr(10).join(input_vars_list) if input_vars_list else f"- **{{{{input}}}}**: The input data"
+
+    # Build the final evaluation block with ALL variables
+    final_eval_inputs = []
+    for var in all_input_vars:
+        final_eval_inputs.append(f"**{var}:**\n{{{{{var}}}}}")
+    final_eval_block = chr(10).join(final_eval_inputs) if final_eval_inputs else f"**Input:**\n{{{{input}}}}"
 
     # Build the complete gold-standard eval prompt
     eval_prompt = f"""# GOLD-STANDARD EVALUATOR / LLM JUDGE
@@ -984,15 +1436,15 @@ Your evaluation must be **strict, evidence-based, and consistent**.
 **Required output format:** {programmatic.get('dna', {}).get('output_format', 'As specified')}
 
 ---
-
+{mandatory_section}
 ## III. Inputs You Receive
 
 For each evaluation, you are given:
 
-- **{{{{{input_var_name}}}}}**: The exact prompt/data sent to the system
+{input_vars_section}
 - **{{{{{output_var_name}}}}}**: The system's response that you must evaluate
 
-**CRITICAL:** You must not assume any information outside these two artifacts.
+**CRITICAL:** You must not assume any information outside these artifacts.
 
 ---
 
@@ -1108,8 +1560,7 @@ Similar outputs should receive similar scores. If you've evaluated similar outpu
 
 Now evaluate the output below:
 
-**Input ({input_var_name}):**
-{{{{{input_var_name}}}}}
+{final_eval_block}
 
 **Output to Evaluate ({output_var_name}):**
 {{{{{output_var_name}}}}}"""
@@ -1233,9 +1684,13 @@ async def generate_gold_standard_eval_prompt(
     major_issues = build_major_issues(prompt_type, analysis)
     steps.append({"step": "major_issues", "count": len(major_issues)})
 
-    # Step 4: Build Evaluation Dimensions
-    dimensions = build_evaluation_dimensions(prompt_type, analysis, auto_fails, major_issues)
-    steps.append({"step": "dimensions", "count": len(dimensions)})
+    # Step 4: Generate Domain-Specific Evaluation Dimensions (Dynamic)
+    logger.info(f"Step 4: Generating domain-specific evaluation dimensions")
+    dimensions = await generate_dynamic_evaluation_dimensions(
+        system_prompt, use_case, analysis, auto_fails, major_issues,
+        llm_client, provider, api_key, model_name
+    )
+    steps.append({"step": "dimensions", "count": len(dimensions), "dynamic": True})
 
     # Step 5: Generate Calibration Examples
     logger.info(f"Step 5: Generating calibration examples")

@@ -48,6 +48,7 @@ from agentic_rewrite import agentic_rewrite, result_to_dict as agentic_result_to
 from agentic_eval import agentic_eval_generation, result_to_dict as agentic_eval_result_to_dict
 from eval_generator_v2 import generate_best_eval_prompt
 from eval_generator_v3 import generate_gold_standard_eval_prompt
+from eval_best_practices import apply_best_practices_check
 from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
 from security import check_rate_limit, validate_api_key_format, mask_api_key, generate_request_id
 from logging_config import (
@@ -524,16 +525,23 @@ async def agentic_generate_evaluation_prompt(
         # Record metrics
         metrics.increment("eval_prompts_generated")
 
+        # Run Anthropic best practices check for consistency with project-based flow
+        best_practices_report = apply_best_practices_check(result.eval_prompt)
+
+        # Enhance rationale with best practices score
+        enhanced_rationale = f"{result.rationale} Anthropic best practices score: {best_practices_report['score']}/100."
+
         return {
             "eval_prompt": result.eval_prompt,
             "eval_criteria": result.eval_criteria,
-            "rationale": result.rationale,
+            "rationale": enhanced_rationale,
             "agentic_details": {
                 "failure_modes": result.failure_modes,
                 "eval_dimensions": result.dimensions,
                 "calibration_examples": result.calibration_examples,
                 "self_test": result.self_test_results,
-                "metadata": result.metadata
+                "metadata": result.metadata,
+                "best_practices": best_practices_report
             }
         }
 

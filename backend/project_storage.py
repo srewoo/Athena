@@ -86,6 +86,7 @@ def list_projects() -> List[ProjectListItem]:
                         use_case=project.use_case,
                         requirements=project.requirements,
                         system_prompt_versions=project.system_prompt_versions,
+                        project_type=project.project_type,
                         created_at=project.created_at,
                         updated_at=project.updated_at,
                         version=project.version,
@@ -117,19 +118,32 @@ def create_new_project(
     use_case: str,
     requirements: any,
     key_requirements: list = None,
-    initial_prompt: str = ""
+    initial_prompt: str = "",
+    eval_prompt: str = None,
+    project_type: str = None
 ) -> SavedProject:
     """Create a new project"""
     project_id = generate_project_id()
     now = datetime.now()
 
-    # Create initial version
+    # Create initial version for system prompt
     initial_version = {
         "version": 1,
         "prompt_text": initial_prompt,
         "created_at": now.isoformat(),
         "changes_made": "Initial prompt"
     }
+
+    # Create initial eval prompt version if eval_prompt is provided
+    eval_prompt_versions = None
+    if eval_prompt:
+        eval_prompt_versions = [{
+            "version": 1,
+            "eval_prompt_text": eval_prompt,
+            "rationale": "Initial eval prompt",
+            "changes_made": "Initial import" if project_type == "eval" else "Initial generation",
+            "created_at": now.isoformat()
+        }]
 
     project = SavedProject(
         id=project_id,
@@ -138,6 +152,9 @@ def create_new_project(
         requirements=requirements,
         key_requirements=key_requirements or [],
         initial_prompt=initial_prompt,
+        eval_prompt=eval_prompt,
+        eval_prompt_versions=eval_prompt_versions,
+        project_type=project_type,
         system_prompt_versions=[initial_version],
         created_at=now,
         updated_at=now,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, PlayCircle, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, PlayCircle, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles, Upload } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -18,6 +18,34 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { useToast } from "../hooks/use-toast";
 import { API, BASE_URL } from "../App";
 import { ThemeToggle } from "../components/theme-toggle";
+
+// Helper function to safely get display text from test case input
+const getTestInputDisplay = (test, maxLength = 100) => {
+  try {
+    if (!test) return '';
+    // Handle string input
+    if (typeof test.input === 'string') return test.input.substring(0, maxLength);
+    // Handle inputs object (new multi-variable format)
+    if (test.inputs && typeof test.inputs === 'object') {
+      return JSON.stringify(test.inputs).substring(0, maxLength);
+    }
+    // Handle input as object
+    if (test.input && typeof test.input === 'object') {
+      return JSON.stringify(test.input).substring(0, maxLength);
+    }
+    // Fallback: try to find any variable field
+    const knownFields = ['id', 'category', 'test_focus', 'expected_behavior', 'difficulty', 'created_at', 'inputs'];
+    const varFields = Object.keys(test).filter(k => !knownFields.includes(k));
+    if (varFields.length > 0) {
+      const varsObj = {};
+      varFields.forEach(k => varsObj[k] = test[k]);
+      return JSON.stringify(varsObj).substring(0, maxLength);
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+};
 
 const PromptOptimizer = () => {
   const { toast } = useToast();
@@ -43,6 +71,14 @@ const PromptOptimizer = () => {
   const [projectSelectorOpen, setProjectSelectorOpen] = useState(false);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
   const [isLoadingProject, setIsLoadingProject] = useState(false);
+
+  // Import Eval Prompt
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importedEvalPrompt, setImportedEvalPrompt] = useState("");
+  const [importProjectName, setImportProjectName] = useState("");
+  const [importDescription, setImportDescription] = useState("");
+  const [isImporting, setIsImporting] = useState(false);
+  const fileInputRef = React.useRef(null);
 
   // Section 2: Optimization
   const [analysisResults, setAnalysisResults] = useState(null);
@@ -73,6 +109,14 @@ const PromptOptimizer = () => {
   const [evalTestExpectedScore, setEvalTestExpectedScore] = useState("");
   const [evalTestResult, setEvalTestResult] = useState(null);
   const [isTestingEval, setIsTestingEval] = useState(false);
+
+  // Eval Prompt Versioning
+  const [evalPromptVersions, setEvalPromptVersions] = useState([]);
+  const [currentEvalVersion, setCurrentEvalVersion] = useState(null);
+  const [selectedEvalVersionsForCompare, setSelectedEvalVersionsForCompare] = useState([]);
+  const [evalVersionCompareModalOpen, setEvalVersionCompareModalOpen] = useState(false);
+  const [evalVersionDiffData, setEvalVersionDiffData] = useState(null);
+  const [isLoadingEvalDiff, setIsLoadingEvalDiff] = useState(false);
 
   // Section 4: Dataset
   const [dataset, setDataset] = useState(null);
@@ -350,6 +394,22 @@ const PromptOptimizer = () => {
         }
       }
 
+      // Load eval prompt versions if exists
+      if (project.eval_prompt_versions && project.eval_prompt_versions.length > 0) {
+        setEvalPromptVersions(project.eval_prompt_versions);
+        // Find current version
+        const current = project.eval_prompt_versions.find(v =>
+          v.eval_prompt_text === project.eval_prompt
+        );
+        if (current) {
+          setCurrentEvalVersion(current);
+        }
+      } else if (project.eval_prompt) {
+        // If there's an eval prompt but no versions, fetch them from the server
+        // (versions might have been created but not included in the project response)
+        setTimeout(() => fetchEvalPromptVersions(), 100);
+      }
+
       // Set dataset if exists (mark as current session since it was persisted)
       if (project.dataset) {
         setDataset(project.dataset);
@@ -410,6 +470,9 @@ const PromptOptimizer = () => {
     setEvalPrompt("");
     setEvalRationale("");
     setEvalChanges([]);
+    setEvalPromptVersions([]);
+    setCurrentEvalVersion(null);
+    setSelectedEvalVersionsForCompare([]);
     setDataset(null);
     setIsCurrentSessionDataset(false);
     setPromptChanges([]);
@@ -420,6 +483,140 @@ const PromptOptimizer = () => {
       dataset: false
     });
     setProjectSelectorOpen(false);
+  };
+
+  // Handle Import Eval Prompt button click
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  // Handle file selection
+  const handleFileSelected = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file size (max 50KB)
+    if (file.size > 50 * 1024) {
+      toast({
+        title: "File Too Large",
+        description: "Please select a file smaller than 50KB",
+        variant: "destructive"
+      });
+      event.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result;
+      if (!content || content.trim().length === 0) {
+        toast({
+          title: "Empty File",
+          description: "The selected file is empty",
+          variant: "destructive"
+        });
+        return;
+      }
+      setImportedEvalPrompt(content);
+      setImportProjectName("");
+      setImportDescription("");
+      setShowImportDialog(true);
+    };
+    reader.onerror = () => {
+      toast({
+        title: "Error Reading File",
+        description: "Failed to read the selected file",
+        variant: "destructive"
+      });
+    };
+    reader.readAsText(file);
+    event.target.value = ""; // Reset input
+  };
+
+  // Handle creating imported eval project
+  const handleCreateImportedProject = async () => {
+    if (!importProjectName.trim() || !importDescription.trim()) {
+      toast({
+        title: "Missing Fields",
+        description: "Please fill in both project name and description",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsImporting(true);
+    try {
+      const response = await fetch(`${API}/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: importProjectName.trim(),
+          use_case: importDescription.trim(),
+          key_requirements: [],
+          initial_prompt: "",
+          eval_prompt: importedEvalPrompt,
+          project_type: "eval"
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Failed to create project");
+      }
+
+      const project = await response.json();
+
+      // Set project state
+      setProjectId(project.id);
+      setProjectName(project.project_name);
+      setUseCase(project.use_case);
+      setKeyRequirements("");
+      setInitialPrompt("");
+      setVersionHistory(project.system_prompt_versions || []);
+      setCurrentVersion(project.system_prompt_versions?.[0] || null);
+      setEvalPrompt(importedEvalPrompt);
+      setEvalRationale("");
+
+      // Set eval prompt versions from the created project
+      if (project.eval_prompt_versions && project.eval_prompt_versions.length > 0) {
+        setEvalPromptVersions(project.eval_prompt_versions);
+        const current = project.eval_prompt_versions.find(v => v.eval_prompt_text === importedEvalPrompt);
+        if (current) {
+          setCurrentEvalVersion(current);
+        }
+      }
+
+      // Clear import state
+      setShowImportDialog(false);
+      setImportedEvalPrompt("");
+      setImportProjectName("");
+      setImportDescription("");
+      setProjectSelectorOpen(false);
+
+      // Expand eval prompt section (skip to section 3)
+      setExpandedSections({
+        requirements: false,
+        optimization: false,
+        evalPrompt: true,
+        dataset: false,
+        testRun: false
+      });
+
+      toast({
+        title: "Eval Prompt Imported",
+        description: `Project "${project.project_name}" created with imported eval prompt`
+      });
+
+    } catch (error) {
+      console.error("Import error:", error);
+      toast({
+        title: "Import Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   const handleEditProject = async (project, event) => {
@@ -877,6 +1074,21 @@ const PromptOptimizer = () => {
         })
       });
 
+      // Also add to eval prompt versions via the generate endpoint
+      // The agentic endpoint doesn't create versions, so we manually add one
+      await fetch(`${API}/projects/${projectId}/eval-prompt/versions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eval_prompt_text: result.eval_prompt,
+          changes_made: "Agentic generation with failure mode analysis",
+          rationale: result.rationale
+        })
+      });
+
+      // Refresh eval prompt versions
+      await fetchEvalPromptVersions();
+
       const failureModes = result.agentic_details?.failure_modes?.length || 0;
       const confidence = result.agentic_details?.self_test?.confidence_score || 0;
 
@@ -945,9 +1157,12 @@ const PromptOptimizer = () => {
         setEvalFeedback("");
         setShowEvalFeedback(false);
 
+        // Refresh eval prompt versions
+        await fetchEvalPromptVersions();
+
         toast({
           title: "Eval Prompt Refined",
-          description: `Applied ${result.changes_made?.length || 0} changes based on your feedback`
+          description: `Applied ${result.changes_made?.length || 0} changes. Version ${result.version || 'new'} created.`
         });
       } else {
         throw new Error("No refined prompt returned");
@@ -1191,6 +1406,100 @@ const PromptOptimizer = () => {
     }
   };
 
+  // Fetch eval prompt versions
+  const fetchEvalPromptVersions = async () => {
+    if (!projectId) return;
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/versions`);
+      if (!response.ok) return;
+      const data = await response.json();
+      setEvalPromptVersions(data.versions || []);
+      // Set current version
+      const current = data.versions?.find(v => v.is_current);
+      if (current) {
+        setCurrentEvalVersion(current);
+      }
+    } catch (error) {
+      console.error("Error fetching eval prompt versions:", error);
+    }
+  };
+
+  // Fetch eval version diff
+  const fetchEvalVersionDiff = async (versionA, versionB) => {
+    if (!projectId) return;
+    setIsLoadingEvalDiff(true);
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/versions/diff`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version_a: versionA, version_b: versionB })
+      });
+      if (!response.ok) throw new Error("Failed to fetch eval diff");
+      const data = await response.json();
+      setEvalVersionDiffData(data);
+    } catch (error) {
+      console.error("Error fetching eval diff:", error);
+      setEvalVersionDiffData(null);
+    } finally {
+      setIsLoadingEvalDiff(false);
+    }
+  };
+
+  // Restore eval prompt version
+  const handleRestoreEvalVersion = async (versionNumber) => {
+    if (!projectId) return;
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/versions/${versionNumber}/restore`, {
+        method: "PUT"
+      });
+      if (!response.ok) throw new Error("Failed to restore version");
+      const data = await response.json();
+      setEvalPrompt(data.eval_prompt);
+      setEvalRationale(data.rationale);
+      await fetchEvalPromptVersions();
+      toast({
+        title: "Version Restored",
+        description: `Restored eval prompt version ${versionNumber}`
+      });
+    } catch (error) {
+      toast({
+        title: "Restore Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    }
+  };
+
+  // Delete eval prompt version
+  const handleDeleteEvalVersion = async (versionNumber) => {
+    if (!projectId) return;
+    if (evalPromptVersions.length <= 1) {
+      toast({
+        title: "Cannot Delete",
+        description: "Cannot delete the only version",
+        variant: "destructive"
+      });
+      return;
+    }
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/versions/${versionNumber}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) throw new Error("Failed to delete version");
+      await fetchEvalPromptVersions();
+      toast({
+        title: "Version Deleted",
+        description: `Deleted eval prompt version ${versionNumber}`
+      });
+    } catch (error) {
+      toast({
+        title: "Delete Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    }
+  };
+
   // Check for regression when version changes
   const checkRegression = async (versionNum = null) => {
     if (!projectId) return;
@@ -1331,7 +1640,7 @@ const PromptOptimizer = () => {
     }
   };
 
-  // Regenerate eval prompt using existing context
+  // Regenerate eval prompt using agentic flow for smart, context-aware generation
   const handleRegenerateEvalPrompt = async () => {
     if (!projectId) {
       toast({
@@ -1342,26 +1651,124 @@ const PromptOptimizer = () => {
       return;
     }
 
-    setIsRegeneratingEval(true);
-    try {
-      const response = await fetch(`${API}/projects/${projectId}/eval-prompt/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          regenerate: true // Signal this is a regeneration
-        })
-      });
-
-      if (!response.ok) throw new Error("Failed to regenerate eval prompt");
-
-      const result = await response.json();
-      setEvalPrompt(result.eval_prompt);
-      setEvalRationale(result.rationale);
-
+    // Check if we have LLM settings configured
+    if (!settingsLoaded || !apiKey) {
       toast({
-        title: "Eval Prompt Regenerated",
-        description: "Fresh evaluation prompt has been generated"
+        title: "Settings Required",
+        description: "Please configure your LLM settings first (click the gear icon)",
+        variant: "destructive"
       });
+      return;
+    }
+
+    setIsRegeneratingEval(true);
+    setAgenticEvalDetails(null);
+
+    try {
+      // Use agentic flow if we have a system prompt (for smart, domain-aware generation)
+      // This analyzes the system prompt to generate context-appropriate eval dimensions
+      const hasSystemPrompt = currentVersion?.prompt_text && currentVersion.prompt_text.trim().length > 0;
+
+      if (hasSystemPrompt) {
+        // Use agentic flow for smart regeneration
+        const response = await fetch(`${API}/step3/agentic-generate-eval`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project: {
+              provider: llmProvider,
+              api_key: apiKey,
+              model_name: llmModel,
+              project_name: projectName,
+              use_case: useCase,
+              requirements: Array.isArray(keyRequirements) ? keyRequirements.join("\n") : keyRequirements,
+              initial_prompt: currentVersion.prompt_text
+            },
+            optimized_prompt: currentVersion.prompt_text,
+            use_thinking_model: true,
+            // Pass existing eval prompt for context-aware improvement
+            existing_eval_prompt: evalPrompt,
+            existing_rationale: evalRationale
+          })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          const errorMessage = Array.isArray(errorData.detail)
+            ? errorData.detail.map(e => e.msg || e.message || JSON.stringify(e)).join(', ')
+            : (errorData.detail || "Agentic regeneration failed");
+          throw new Error(errorMessage);
+        }
+
+        const result = await response.json();
+
+        setEvalPrompt(result.eval_prompt);
+        setEvalRationale(result.rationale);
+        setAgenticEvalDetails(result.agentic_details);
+
+        // Save to project
+        await fetch(`${API}/projects/${projectId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            eval_prompt: result.eval_prompt,
+            eval_rationale: result.rationale
+          })
+        });
+
+        // Add to eval prompt versions
+        await fetch(`${API}/projects/${projectId}/eval-prompt/versions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            eval_prompt_text: result.eval_prompt,
+            changes_made: "Smart regeneration with failure mode analysis",
+            rationale: result.rationale
+          })
+        });
+
+        // Refresh eval prompt versions
+        await fetchEvalPromptVersions();
+
+        const failureModes = result.agentic_details?.failure_modes?.length || 0;
+        const dimensions = result.agentic_details?.eval_dimensions?.length || 0;
+
+        toast({
+          title: "Eval Prompt Regenerated (Smart)",
+          description: `Generated ${dimensions} domain-specific dimensions based on ${failureModes} identified failure modes.`
+        });
+
+      } else {
+        // Fallback to simpler regeneration for imported eval prompts without system prompt
+        const response = await fetch(`${API}/projects/${projectId}/eval-prompt/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            regenerate: true,
+            current_eval_prompt: evalPrompt,
+            current_rationale: evalRationale,
+            eval_changes: evalChanges
+          })
+        });
+
+        if (!response.ok) throw new Error("Failed to regenerate eval prompt");
+
+        const result = await response.json();
+        setEvalPrompt(result.eval_prompt);
+        setEvalRationale(result.rationale);
+
+        if (result.is_regeneration) {
+          setEvalChanges(prev => [...prev, "Improved using Anthropic's eval best practices"]);
+        }
+
+        await fetchEvalPromptVersions();
+
+        toast({
+          title: "Eval Prompt Improved",
+          description: `Evaluation prompt improved. Version ${result.version || 'new'} created.`
+        });
+      }
+
     } catch (error) {
       toast({
         title: "Regeneration Failed",
@@ -1922,14 +2329,33 @@ const PromptOptimizer = () => {
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 py-4">
-                  {/* New Project Button */}
-                  <Button
-                    onClick={resetToNewProject}
-                    className="w-full bg-blue-600 hover:bg-blue-700"
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    Create New Project
-                  </Button>
+                  {/* Hidden File Input */}
+                  <input
+                    type="file"
+                    accept=".txt"
+                    ref={fileInputRef}
+                    style={{ display: 'none' }}
+                    onChange={handleFileSelected}
+                  />
+
+                  {/* New Project / Import Buttons */}
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={resetToNewProject}
+                      className="flex-1 bg-blue-600 hover:bg-blue-700"
+                    >
+                      <Plus className="w-4 h-4 mr-2" />
+                      Create New Project
+                    </Button>
+                    <Button
+                      onClick={handleImportClick}
+                      variant="outline"
+                      className="flex-1 border-blue-600 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                    >
+                      <Upload className="w-4 h-4 mr-2" />
+                      Import Eval Prompt
+                    </Button>
+                  </div>
 
                   {/* Divider */}
                   <div className="flex items-center gap-3">
@@ -1962,7 +2388,14 @@ const PromptOptimizer = () => {
                         >
                           <div className="flex justify-between items-start">
                             <div className="flex-1">
-                              <h4 className="font-medium text-slate-900 dark:text-slate-100">{project.project_name || project.name}</h4>
+                              <div className="flex items-center gap-2">
+                                <h4 className="font-medium text-slate-900 dark:text-slate-100">{project.project_name || project.name}</h4>
+                                {project.project_type === 'eval' && (
+                                  <span className="px-2 py-0.5 text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded font-medium">
+                                    Eval
+                                  </span>
+                                )}
+                              </div>
                               <p className="text-xs text-slate-600 dark:text-slate-600 dark:text-slate-400 mt-1 line-clamp-1">
                                 {project.requirements?.use_case || 'No description'}
                               </p>
@@ -2008,6 +2441,80 @@ const PromptOptimizer = () => {
                     className="border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
                   >
                     Cancel
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {/* Import Eval Prompt Dialog */}
+            <Dialog open={showImportDialog} onOpenChange={(open) => {
+              setShowImportDialog(open);
+              if (!open) {
+                setImportedEvalPrompt("");
+                setImportProjectName("");
+                setImportDescription("");
+              }
+            }}>
+              <DialogContent className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white max-w-lg">
+                <DialogHeader>
+                  <DialogTitle className="text-xl text-slate-900 dark:text-white">Import Eval Prompt</DialogTitle>
+                  <DialogDescription className="text-slate-600 dark:text-slate-400">
+                    Create a new project with your imported evaluation prompt
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="space-y-2">
+                    <Label className="text-slate-700 dark:text-slate-300">Project Name *</Label>
+                    <Input
+                      value={importProjectName}
+                      onChange={(e) => setImportProjectName(e.target.value)}
+                      placeholder="Enter a name for this project"
+                      className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-slate-700 dark:text-slate-300">What does this eval prompt evaluate? *</Label>
+                    <Textarea
+                      value={importDescription}
+                      onChange={(e) => setImportDescription(e.target.value)}
+                      placeholder="Brief description of what this evaluation prompt is designed to assess..."
+                      rows={3}
+                      className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-slate-700 dark:text-slate-300">Imported Eval Prompt Preview</Label>
+                    <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 max-h-32 overflow-y-auto">
+                      <pre className="text-xs text-slate-600 dark:text-slate-400 whitespace-pre-wrap">
+                        {importedEvalPrompt.slice(0, 500)}{importedEvalPrompt.length > 500 ? '...' : ''}
+                      </pre>
+                    </div>
+                  </div>
+                </div>
+                <DialogFooter className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowImportDialog(false)}
+                    className="border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleCreateImportedProject}
+                    disabled={isImporting || !importProjectName.trim() || !importDescription.trim()}
+                    className="bg-blue-600 hover:bg-blue-700"
+                  >
+                    {isImporting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                        Creating...
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4 mr-2" />
+                        Create Project
+                      </>
+                    )}
                   </Button>
                 </DialogFooter>
               </DialogContent>
@@ -3008,6 +3515,107 @@ const PromptOptimizer = () => {
                           )}
                         </div>
                       )}
+
+                      {/* Eval Prompt Version History */}
+                      {evalPromptVersions.length >= 1 && (
+                        <div className="mt-6">
+                          <div className="flex justify-between items-center mb-2">
+                            <div>
+                              <h3 className="font-semibold text-slate-900 dark:text-slate-100">Eval Prompt Version History</h3>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">Click on a version to load it, or select versions to compare</p>
+                            </div>
+                            {selectedEvalVersionsForCompare.length >= 2 && (
+                              <Button
+                                size="sm"
+                                onClick={() => {
+                                  setEvalVersionCompareModalOpen(true);
+                                  if (selectedEvalVersionsForCompare.length === 2) {
+                                    const sorted = [...selectedEvalVersionsForCompare].sort((a, b) => a - b);
+                                    fetchEvalVersionDiff(sorted[0], sorted[1]);
+                                  }
+                                }}
+                                className="bg-purple-600 hover:bg-purple-700 text-white"
+                              >
+                                <ArrowUpDown className="w-4 h-4 mr-1" />
+                                Compare ({selectedEvalVersionsForCompare.length})
+                              </Button>
+                            )}
+                          </div>
+                          <div className="space-y-2">
+                            {evalPromptVersions.map((v, idx) => (
+                              <div
+                                key={idx}
+                                onClick={() => {
+                                  if (v.eval_prompt_text !== evalPrompt) {
+                                    handleRestoreEvalVersion(v.version);
+                                  }
+                                }}
+                                className={`p-3 rounded-lg border transition-all cursor-pointer ${
+                                  v.eval_prompt_text === evalPrompt
+                                    ? 'bg-blue-100 dark:bg-blue-900/20 border-blue-600 dark:border-blue-700'
+                                    : 'bg-slate-50 dark:bg-slate-800 border-slate-300 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-100 dark:hover:bg-slate-700'
+                                }`}
+                              >
+                                <div className="flex justify-between items-center">
+                                  <div className="flex items-center gap-3">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedEvalVersionsForCompare.includes(v.version)}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        if (e.target.checked) {
+                                          setSelectedEvalVersionsForCompare(prev => [...prev, v.version]);
+                                        } else {
+                                          setSelectedEvalVersionsForCompare(prev => prev.filter(ver => ver !== v.version));
+                                        }
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-purple-600 focus:ring-purple-500"
+                                    />
+                                    <div className="flex items-center gap-2 flex-1">
+                                      <span className="font-medium text-slate-900 dark:text-white">Version {v.version}</span>
+                                      {v.eval_prompt_text === evalPrompt && (
+                                        <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    {v.best_practices_score !== undefined && (
+                                      <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
+                                        v.best_practices_score >= 80
+                                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                          : v.best_practices_score >= 60
+                                            ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                            : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                                      }`}>
+                                        {v.best_practices_score}/100
+                                      </span>
+                                    )}
+                                    {v.eval_prompt_text !== evalPrompt && evalPromptVersions.length > 1 && (
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDeleteEvalVersion(v.version);
+                                        }}
+                                        className="h-6 w-6 p-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/20"
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
+                                {v.changes_made && (
+                                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 ml-7">
+                                    {v.changes_made}
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </>
                   )}
                 </CardContent>
@@ -3141,21 +3749,21 @@ const PromptOptimizer = () => {
                             ? `All ${dataset.sample_count} cases`
                             : `First ${dataset.preview?.length || 10} of ${dataset.sample_count} cases`})
                         </h3>
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
-                            <thead className="bg-slate-800 dark:bg-slate-800">
+                        <div className="overflow-auto max-h-96 border border-slate-300 dark:border-slate-700 rounded">
+                          <table className="text-sm min-w-full">
+                            <thead className="bg-slate-800 dark:bg-slate-800 sticky top-0">
                               <tr>
-                                <th className="p-2 text-left text-white">Input</th>
-                                <th className="p-2 text-left text-white">Category</th>
-                                <th className="p-2 text-left text-white">Test Focus</th>
-                                <th className="p-2 text-left text-white">Difficulty</th>
+                                <th className="p-2 text-left text-white min-w-[300px]">Input</th>
+                                <th className="p-2 text-left text-white min-w-[100px]">Category</th>
+                                <th className="p-2 text-left text-white min-w-[200px]">Test Focus</th>
+                                <th className="p-2 text-left text-white min-w-[100px]">Difficulty</th>
                               </tr>
                             </thead>
                             <tbody>
                               {dataset.preview?.map((test, idx) => (
                                 <tr key={idx} className="border-t border-slate-300 dark:border-slate-700">
-                                  <td className="p-2 text-slate-900 dark:text-slate-100">{(typeof test.input === 'string' ? test.input : JSON.stringify(test.input)).substring(0, 100)}...</td>
-                                  <td className="p-2">
+                                  <td className="p-2 text-slate-900 dark:text-slate-100 whitespace-nowrap" title={getTestInputDisplay(test, 500)}>{getTestInputDisplay(test, 60)}...</td>
+                                  <td className="p-2 whitespace-nowrap">
                                     <span className={`px-2 py-1 rounded text-xs text-white ${
                                       test.category === 'positive' ? 'bg-green-600' :
                                       test.category === 'edge_case' ? 'bg-yellow-600' :
@@ -3165,8 +3773,8 @@ const PromptOptimizer = () => {
                                       {test.category}
                                     </span>
                                   </td>
-                                  <td className="p-2 text-slate-600 dark:text-slate-400">{test.test_focus}</td>
-                                  <td className="p-2 text-slate-600 dark:text-slate-400">{test.difficulty}</td>
+                                  <td className="p-2 text-slate-600 dark:text-slate-400 whitespace-nowrap">{test.test_focus}</td>
+                                  <td className="p-2 text-slate-600 dark:text-slate-400 whitespace-nowrap">{test.difficulty}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -3716,7 +4324,7 @@ const PromptOptimizer = () => {
                                   {(result.dataset_item_index ?? result.index ?? 0) + 1}
                                 </td>
                                 <td className="p-2 text-slate-900 dark:text-slate-100 max-w-xs truncate">
-                                  {String(result.input_data?.input || result.input || result.test_case_id || '').substring(0, 80)}...
+                                  {getTestInputDisplay(result.input_data || result, 80)}...
                                 </td>
                                 <td className="p-2 text-slate-900 dark:text-slate-100 max-w-xs truncate">
                                   {String(result.prompt_output || result.output || '').substring(0, 100)}...
@@ -4229,6 +4837,144 @@ const PromptOptimizer = () => {
               setVersionCompareModalOpen(false);
               setSelectedVersionsForCompare([]);
               setVersionDiffData(null);
+            }}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Eval Prompt Version Compare Modal */}
+      <Dialog open={evalVersionCompareModalOpen} onOpenChange={(open) => {
+        setEvalVersionCompareModalOpen(open);
+        if (!open) {
+          setSelectedEvalVersionsForCompare([]);
+          setEvalVersionDiffData(null);
+        }
+      }}>
+        <DialogContent className="max-w-[95vw] w-full max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowUpDown className="w-5 h-5" />
+              Compare Eval Prompt Versions
+            </DialogTitle>
+            <DialogDescription>
+              Side-by-side comparison of {selectedEvalVersionsForCompare.length} selected eval prompt versions
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Diff Stats Banner */}
+          {evalVersionDiffData && selectedEvalVersionsForCompare.length === 2 && (
+            <div className="flex items-center gap-4 px-4 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-sm">
+              <span className="text-slate-600 dark:text-slate-400">
+                Similarity: <span className="font-semibold text-slate-900 dark:text-white">{evalVersionDiffData.similarity_percent}%</span>
+              </span>
+              <span className="text-green-600 dark:text-green-400">
+                +{evalVersionDiffData.stats?.added || 0} added
+              </span>
+              <span className="text-red-600 dark:text-red-400">
+                -{evalVersionDiffData.stats?.removed || 0} removed
+              </span>
+              {evalVersionDiffData.score_a !== undefined && evalVersionDiffData.score_b !== undefined && (
+                <span className="text-slate-500 dark:text-slate-400">
+                  Score: {evalVersionDiffData.score_a} → {evalVersionDiffData.score_b}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="flex-1 overflow-auto py-4">
+            {isLoadingEvalDiff ? (
+              <div className="flex items-center justify-center py-8">
+                <RefreshCw className="w-5 h-5 animate-spin text-slate-400" />
+                <span className="ml-2 text-slate-500">Loading diff...</span>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                {selectedEvalVersionsForCompare
+                  .sort((a, b) => a - b)
+                  .map((versionNum, colIdx) => {
+                    const version = evalPromptVersions.find(v => v.version === versionNum);
+                    if (!version) return null;
+
+                    const isLeftColumn = colIdx === 0;
+                    const diffLines = evalVersionDiffData?.diff_lines || [];
+
+                    return (
+                      <div key={versionNum} className="flex flex-col h-full border rounded-lg overflow-hidden bg-white dark:bg-slate-800">
+                        {/* Version Header */}
+                        <div className="p-3 bg-slate-100 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-900 dark:text-white">Version {version.version}</span>
+                              {version.eval_prompt_text === evalPrompt && (
+                                <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Current</span>
+                              )}
+                            </div>
+                            {version.best_practices_score !== undefined && (
+                              <span className={`text-sm font-semibold px-2 py-0.5 rounded ${
+                                version.best_practices_score >= 80
+                                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                  : version.best_practices_score >= 60
+                                    ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                                    : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                              }`}>
+                                Score: {version.best_practices_score}/100
+                              </span>
+                            )}
+                          </div>
+                          {version.changes_made && (
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                              {version.changes_made}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Prompt Content with Diff Highlighting */}
+                        <div className="flex-1 p-3 overflow-auto max-h-[50vh]">
+                          {diffLines.length > 0 ? (
+                            <div className="font-mono text-sm">
+                              {diffLines.map((line, idx) => {
+                                if (isLeftColumn && line.type === 'added') return null;
+                                if (!isLeftColumn && line.type === 'removed') return null;
+
+                                const content = isLeftColumn ? line.content_a : line.content_b;
+                                if (content === null && line.type !== 'unchanged') return null;
+
+                                return (
+                                  <div
+                                    key={idx}
+                                    className={`py-0.5 px-1 -mx-1 ${
+                                      line.type === 'added'
+                                        ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'
+                                        : line.type === 'removed'
+                                          ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300'
+                                          : 'text-slate-700 dark:text-slate-300'
+                                    }`}
+                                  >
+                                    <span className="whitespace-pre-wrap">{content || ''}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <pre className="text-sm whitespace-pre-wrap font-mono text-slate-800 dark:text-slate-200 leading-relaxed">
+                              {version.eval_prompt_text}
+                            </pre>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="border-t pt-4">
+            <Button variant="outline" onClick={() => {
+              setEvalVersionCompareModalOpen(false);
+              setSelectedEvalVersionsForCompare([]);
+              setEvalVersionDiffData(null);
             }}>
               Close
             </Button>

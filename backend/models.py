@@ -137,10 +137,12 @@ class SavedProject(BaseModel):
     requirements: Any  # Can be string or object with use_case
     key_requirements: Optional[List[str]] = None
     initial_prompt: str
+    project_type: Optional[str] = None  # "eval" for imported eval prompts
     optimized_prompt: Optional[str] = None
     optimization_score: Optional[float] = None
     eval_prompt: Optional[str] = None
     eval_rationale: Optional[str] = None
+    eval_prompt_versions: Optional[List[Dict[str, Any]]] = None  # Eval prompt version history
     calibration_examples: Optional[List[CalibrationExample]] = None  # Few-shot examples
     human_validations: Optional[List[HumanValidation]] = None  # Human validation records
     ab_tests: Optional[List[ABTestConfig]] = None  # A/B test configurations
@@ -162,6 +164,7 @@ class ProjectListItem(BaseModel):
     use_case: str
     requirements: Any  # Include for frontend display
     system_prompt_versions: Optional[List[Dict[str, Any]]] = None
+    project_type: Optional[str] = None  # "eval" for imported eval prompts
     created_at: datetime
     updated_at: datetime
     version: int
