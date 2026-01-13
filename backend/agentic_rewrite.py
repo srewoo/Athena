@@ -94,18 +94,69 @@ def get_thinking_model_for_provider(provider: str) -> Optional[str]:
     return recommendations.get(provider)
 
 
+@dataclass
+class ScoreWithConfidence:
+    """LLM score with statistical confidence"""
+    mean_score: float
+    std_deviation: float
+    individual_scores: List[float]
+    confidence_level: str  # "high", "medium", "low"
+    is_reliable: bool
+    reasoning: str
+
+
 async def llm_score_prompt(
     prompt: str,
     use_case: str,
     llm_client,
     provider: str,
     api_key: str,
-    model_name: str
+    model_name: str,
+    num_runs: int = 1
 ) -> float:
     """
     Use LLM to score a prompt's quality (1-10 scale).
     This provides more accurate scoring than heuristic analysis.
+    
+    Args:
+        num_runs: Number of scoring runs (default 1 for speed, use 3 for reliable decisions)
+    
+    Returns:
+        float: Mean score across runs
     """
+    result = await llm_score_prompt_with_confidence(
+        prompt=prompt,
+        use_case=use_case,
+        llm_client=llm_client,
+        provider=provider,
+        api_key=api_key,
+        model_name=model_name,
+        num_runs=num_runs
+    )
+    return result.mean_score
+
+
+async def llm_score_prompt_with_confidence(
+    prompt: str,
+    use_case: str,
+    llm_client,
+    provider: str,
+    api_key: str,
+    model_name: str,
+    num_runs: int = 3
+) -> ScoreWithConfidence:
+    """
+    Use LLM to score a prompt's quality with statistical confidence.
+    Runs multiple times to account for LLM variance.
+    
+    Args:
+        num_runs: Number of scoring runs (default 3 for confidence, minimum 1)
+    
+    Returns:
+        ScoreWithConfidence: Score with mean, stddev, and confidence level
+    """
+    import statistics
+    
     system_prompt = """You are an expert prompt engineer. Score this system prompt on a scale of 1-10.
 
 ## Scoring Criteria:
@@ -132,32 +183,83 @@ PROMPT:
 
 Return JSON with score (1-10) and brief reasoning."""
 
-    try:
-        result = await llm_client.chat(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            provider=provider,
-            api_key=api_key,
-            model_name=model_name,
-            temperature=0.2,
-            max_tokens=500
+    scores = []
+    reasoning = ""
+    
+    # Run scoring multiple times to get confidence interval
+    actual_runs = max(1, min(5, num_runs))  # Cap at 5 runs
+    
+    for run in range(actual_runs):
+        try:
+            result = await llm_client.chat(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=0.3,  # Slightly higher for variance detection
+                max_tokens=500
+            )
+
+            if not result or result.get("error"):
+                error_msg = result.get("error") if result else "No response"
+                logger.warning(f"LLM scoring run {run+1} failed: {error_msg}")
+                continue
+
+            json_match = re.search(r'\{[\s\S]*\}', result.get("output", ""))
+            if json_match:
+                data = json.loads(json_match.group())
+                score = float(data.get("score", 0))
+                score = min(10.0, max(1.0, score))
+                scores.append(score)
+                if not reasoning:
+                    reasoning = data.get('reasoning', '')[:200]
+                logger.debug(f"LLM scoring run {run+1}: {score}/10")
+        except Exception as e:
+            logger.warning(f"LLM scoring run {run+1} exception: {e}")
+            continue
+    
+    # Calculate statistics
+    if not scores:
+        logger.warning("All LLM scoring runs failed, using fallback")
+        return ScoreWithConfidence(
+            mean_score=5.0,  # Conservative fallback (was 6.0, now more honest)
+            std_deviation=2.0,  # High uncertainty
+            individual_scores=[],
+            confidence_level="low",
+            is_reliable=False,
+            reasoning="LLM scoring failed; using conservative fallback"
         )
-
-        if not result or result.get("error"):
-            error_msg = result.get("error") if result else "No response"
-            logger.warning(f"LLM scoring failed: {error_msg}")
-            return 6.0  # Default fallback
-
-        json_match = re.search(r'\{[\s\S]*\}', result.get("output", ""))
-        if json_match:
-            data = json.loads(json_match.group())
-            score = float(data.get("score", 6.0))
-            logger.info(f"LLM scored prompt: {score}/10 - {data.get('reasoning', '')[:100]}")
-            return min(10.0, max(1.0, score))
-    except Exception as e:
-        logger.warning(f"LLM scoring exception: {e}")
-
-    return 6.0  # Default fallback
+    
+    mean_score = statistics.mean(scores)
+    
+    if len(scores) >= 2:
+        std_dev = statistics.stdev(scores)
+    else:
+        std_dev = 0.5  # Assume moderate variance for single run
+    
+    # Determine confidence level
+    # Low stddev = high confidence, high stddev = low confidence
+    if std_dev <= 0.3:
+        confidence_level = "high"
+        is_reliable = True
+    elif std_dev <= 0.7:
+        confidence_level = "medium"
+        is_reliable = True
+    else:
+        confidence_level = "low"
+        is_reliable = False
+    
+    logger.info(f"LLM scored prompt: {mean_score:.1f} ± {std_dev:.2f} ({confidence_level} confidence)")
+    
+    return ScoreWithConfidence(
+        mean_score=round(mean_score, 1),
+        std_deviation=round(std_dev, 2),
+        individual_scores=scores,
+        confidence_level=confidence_level,
+        is_reliable=is_reliable,
+        reasoning=reasoning
+    )
 
 
 async def deep_analysis(
@@ -1002,35 +1104,72 @@ async def agentic_rewrite(
 
             steps_taken[-1]["status"] = "completed"
 
-    # Final quality check using LLM scoring (more accurate than heuristics)
-    logger.info("Final quality check: Using LLM scoring for accurate assessment")
-    final_score = await llm_score_prompt(
+    # Final quality check using LLM scoring WITH CONFIDENCE (3 runs for reliable decision)
+    # This is critical for rollback decisions - we need statistical confidence
+    logger.info("Final quality check: Using LLM scoring with confidence (3 runs)")
+    final_score_result = await llm_score_prompt_with_confidence(
         prompt=current_prompt,
         use_case=use_case,
         llm_client=llm_client,
         provider=provider,
         api_key=api_key,
-        model_name=model_name
+        model_name=model_name,
+        num_runs=3  # Multiple runs for statistical confidence
     )
+    final_score = final_score_result.mean_score
 
     # Also get heuristic score for validation
     final_analysis = analyze_prompt(current_prompt)
     heuristic_score = final_analysis.quality_score
-    logger.info(f"Scores - LLM: {final_score}/10, Heuristic: {heuristic_score}/10")
+    
+    # Log comprehensive scoring info
+    logger.info(
+        f"Scores - LLM: {final_score:.1f} ± {final_score_result.std_deviation:.2f} "
+        f"({final_score_result.confidence_level} confidence), Heuristic: {heuristic_score}/10"
+    )
+    
+    # Warn if LLM scoring has high variance
+    if not final_score_result.is_reliable:
+        logger.warning(
+            f"LLM scoring variance is high (stddev={final_score_result.std_deviation:.2f}). "
+            f"Using conservative approach for rollback decision."
+        )
+        # Use worst-case score when confidence is low
+        final_score = min(final_score_result.individual_scores) if final_score_result.individual_scores else final_score
 
-    # Check if we should revert to original
-    # Only revert for CRITICAL issues: missing template variables or severe score drop
+    # ========================================================================
+    # ROLLBACK DECISION - STRICT THRESHOLD
+    # ========================================================================
+    # Threshold: -1.0 max (10% degradation on 10-point scale)
+    # Previously was -2.0 which allowed 20% degradation - too lenient!
+    # 
+    # Rationale for -1.0:
+    # - A prompt rated 8.0 should not drop below 7.0 after "improvement"
+    # - If improvement causes >10% quality drop, it's not an improvement
+    # - Critical DNA issues (missing variables, broken format) trigger immediate revert
+    MAX_ALLOWED_SCORE_DROP = 1.0  # Strict: max 1 point (10%) drop allowed
+    
     critical_issues = []
     if final_validation:
-        critical_issues = [i for i in final_validation.issues if "variable" in i.lower() or "code block" in i.lower() or "JSON" in i.lower()]
+        critical_issues = [
+            i for i in final_validation.issues 
+            if any(kw in i.lower() for kw in ["variable", "code block", "json", "template", "schema"])
+        ]
 
+    score_drop = original_score - final_score
     should_revert = (
-        final_score < original_score - 2.0 or  # More lenient: allow up to 2 point drop
-        len(critical_issues) > 0  # Only revert for critical DNA issues
+        score_drop > MAX_ALLOWED_SCORE_DROP or  # STRICT: max 1 point drop
+        len(critical_issues) > 0  # Critical DNA issues
     )
+    
+    revert_reason = ""
+    if score_drop > MAX_ALLOWED_SCORE_DROP:
+        revert_reason = f"Score dropped by {score_drop:.1f} points (max allowed: {MAX_ALLOWED_SCORE_DROP})"
+    elif critical_issues:
+        revert_reason = f"Critical DNA issues: {', '.join(critical_issues[:3])}"
 
     if should_revert:
-        logger.warning(f"Reverting due to: score_drop={final_score - original_score:.1f}, critical_issues={critical_issues}")
+        logger.warning(f"Reverting: {revert_reason}")
         return AgenticRewriteResult(
             original_prompt=prompt,
             final_prompt=prompt,
@@ -1045,14 +1184,16 @@ async def agentic_rewrite(
             },
             validation={
                 "is_valid": False,
-                "issues": critical_issues if critical_issues else ["Quality regression detected"],
-                "quality_delta": final_score - original_score
+                "issues": critical_issues if critical_issues else [f"Quality dropped {score_drop:.1f} points (threshold: {MAX_ALLOWED_SCORE_DROP})"],
+                "quality_delta": -score_drop,
+                "max_allowed_drop": MAX_ALLOWED_SCORE_DROP
             },
             no_change=True,
-            reason=f"Rewrite caused issues: {', '.join(critical_issues) if critical_issues else f'score dropped from {original_score} to {final_score}'}. Original preserved."
+            reason=f"Rewrite reverted: {revert_reason}. Original prompt preserved."
         )
 
-    logger.info(f"Rewrite successful: {original_score:.1f} -> {final_score:.1f}")
+    improvement = final_score - original_score
+    logger.info(f"Rewrite successful: {original_score:.1f} -> {final_score:.1f} (+{improvement:.1f})")
 
     return AgenticRewriteResult(
         original_prompt=prompt,
@@ -1071,10 +1212,15 @@ async def agentic_rewrite(
             "dna_preserved": final_validation.dna_preserved if final_validation else True,
             "issues": final_validation.issues if final_validation else [],
             "warnings": final_validation.warnings if final_validation else [],
-            "quality_delta": final_score - original_score
+            "quality_delta": improvement,
+            "score_confidence": {
+                "std_deviation": final_score_result.std_deviation,
+                "confidence_level": final_score_result.confidence_level,
+                "individual_scores": final_score_result.individual_scores
+            }
         },
         no_change=False,
-        reason=f"Successfully improved prompt from {original_score}/10 to {final_score}/10"
+        reason=f"Successfully improved prompt from {original_score:.1f}/10 to {final_score:.1f}/10 (+{improvement:.1f}, {final_score_result.confidence_level} confidence)"
     )
 
 

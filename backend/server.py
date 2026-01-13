@@ -55,6 +55,8 @@ from logging_config import (
     setup_logging, get_logger, set_request_id, get_request_id,
     log_performance, metrics
 )
+import quality_api
+from eval_quality_system import get_quality_manager, build_compact_eval_prompt
 
 # Setup structured logging
 log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -175,6 +177,9 @@ llm_client = get_llm_client()
 
 # Include project management router
 app.include_router(project_api.router)
+
+# Include quality API router for eval quality features
+app.include_router(quality_api.router)
 
 
 # NOTE: The following endpoints were removed as they are not used by the UI:

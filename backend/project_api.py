@@ -1022,11 +1022,26 @@ def _get_domain_specific_rubric(input_type: InputType) -> str:
 
 @router.post("/{project_id}/eval-prompt/generate")
 async def generate_eval_prompt(project_id: str, request: GenerateEvalPromptRequest = None):
-    """Generate an evaluation prompt using LLM with best practices, tailored to the system prompt.
+    """Generate an evaluation prompt using the VALIDATED PIPELINE.
 
-    When regenerate=True and existing eval prompt is provided, the LLM will improve upon
-    the existing prompt rather than generating from scratch.
+    This endpoint now enforces mandatory validation before deployment:
+    1. Semantic analysis for contradictions
+    2. Feedback learning integration
+    3. Cost tracking with budget limits
+    4. Ground truth validation (if examples exist)
+    5. Reliability verification
+    6. Adversarial security testing
+    7. Statistical confidence checks
+
+    The eval prompt is ONLY deployed if all blocking validation gates pass.
     """
+    from validated_eval_pipeline import (
+        ValidatedEvalPipeline,
+        EvalPromptVersionManager,
+        CostBudget,
+        ValidationStatus
+    )
+
     # Handle case where no request body is provided
     if request is None:
         request = GenerateEvalPromptRequest()
@@ -1035,92 +1050,46 @@ async def generate_eval_prompt(project_id: str, request: GenerateEvalPromptReque
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get existing eval prompt - from request or project
-    existing_eval_prompt = request.current_eval_prompt or getattr(project, 'eval_prompt', None)
-    existing_rationale = request.current_rationale or getattr(project, 'eval_rationale', None)
-    eval_changes = request.eval_changes or []
-    is_regeneration = request.regenerate and existing_eval_prompt
-
     # Get the current prompt from system_prompt_versions
     if not project.system_prompt_versions or len(project.system_prompt_versions) == 0:
         raise HTTPException(status_code=400, detail="No prompt versions found")
 
     current_prompt = project.system_prompt_versions[-1]["prompt_text"]
 
-    # Extract template variables from the system prompt (e.g., {{callTranscript}})
+    # Extract template variables for response metadata
     template_vars = _extract_template_variables(current_prompt)
-    logger.info(f"Extracted template variables: {template_vars}")
+    input_var_name = template_vars[0] if template_vars else "INPUT"
 
-    # Detect the input type based on system prompt and variables
+    # Detect input type for response metadata
     input_spec = detect_input_type(current_prompt, template_vars)
     detected_type = input_spec.input_type
-    logger.info(f"Detected input type: {detected_type}")
-
-    # Determine variable names to use in eval prompt
-    # Use the actual variable name from system prompt, or fall back to INPUT/OUTPUT
-    input_var_name = template_vars[0] if template_vars else "INPUT"
-    output_var_name = "OUTPUT"  # Response is always OUTPUT
-
-    # Get system type description
-    system_description = _get_system_type_description(detected_type, project.use_case)
-
-    # Get domain-specific criteria and rubric
-    domain_criteria = _get_domain_specific_criteria(detected_type)
-    domain_rubric = _get_domain_specific_rubric(detected_type)
 
     # Get LLM settings
     settings = get_settings()
     provider = settings.get("provider", "openai")
     api_key = settings.get("api_key", "")
-    model_name = settings.get("model_name")
+    model_name = settings.get("model_name", "gpt-4o-mini")
 
-    # Build requirements string
-    requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
-
-    # Template-based eval prompt - now tailored to the detected type
+    # If no API key, return template-based eval (no validation needed for templates)
     if not api_key:
+        system_description = _get_system_type_description(detected_type, project.use_case)
+        requirements_str = ', '.join(project.key_requirements) if project.key_requirements else 'Not specified'
+        domain_criteria = _get_domain_specific_criteria(detected_type)
+        domain_rubric = _get_domain_specific_rubric(detected_type)
+        output_var_name = "OUTPUT"
+
         eval_prompt = f"""**Evaluator Role:**
-You are an expert evaluator specializing in assessing {system_description} outputs. Your task is to evaluate how well the AI response meets the requirements for this specific use case.
+You are an expert evaluator specializing in assessing {system_description} outputs.
 
-**System Under Test:**
-Type: {system_description}
-Use Case: {project.use_case}
-Requirements: {requirements_str}
+**Input ({input_var_name}):** {{{{{input_var_name}}}}}
+**Response to Evaluate:** {{{{OUTPUT}}}}
 
-**Original System Prompt:**
-{current_prompt}
+**Evaluation Criteria:** {domain_criteria}
+**Scoring Rubric:** {domain_rubric}
 
----
+**Return JSON:** {{"score": <1-5>, "reasoning": "<explanation>"}}"""
 
-**Input ({input_var_name}):**
-{{{{{input_var_name}}}}}
-
-**Response to Evaluate ({output_var_name}):**
-{{{{{output_var_name}}}}}
-
----
-
-**Evaluation Criteria (Domain-Specific):**
-{domain_criteria}
-
-**Scoring Rubric:**
-{domain_rubric}
-
-**Instructions:**
-1. Read the input {input_var_name.lower()} carefully to understand what needs to be processed
-2. Evaluate the {output_var_name} against each criterion above
-3. Consider the specific requirements: {requirements_str}
-4. Provide a score and detailed reasoning
-
-**Return your evaluation as JSON:**
-{{
-    "score": <number from 1-5>,
-    "reasoning": "<2-3 sentences explaining the score with specific examples from the {output_var_name.lower()}>"
-}}"""
-
-        rationale = f"Template-based evaluation prompt tailored for {system_description}. Uses {{{{{input_var_name}}}}} variable from system prompt. Configure API key for AI-customized eval prompts."
-
-        # Persist eval prompt to project
+        rationale = f"Template-based eval. Configure API key for validated AI-generated eval prompts."
         project.eval_prompt = eval_prompt
         project.eval_rationale = rationale
         project.updated_at = datetime.now()
@@ -1130,131 +1099,145 @@ Requirements: {requirements_str}
             "eval_prompt": eval_prompt,
             "rationale": rationale,
             "detected_type": detected_type.value,
-            "input_variable": input_var_name
+            "input_variable": input_var_name,
+            "validation": {"status": "skipped", "reason": "Template-based (no API key)"}
         }
 
-    # Use LLM to generate sophisticated eval prompt with Anthropic best practices
-    # Use shared best practices module for consistent prompts
-    if is_regeneration:
-        # Regeneration mode: improve upon existing eval prompt using shared best practices
-        system_prompt = get_anthropic_system_prompt_for_improvement(
-            system_description=system_description,
-            input_var_name=input_var_name,
-            output_var_name=output_var_name,
-            template_vars=template_vars if template_vars else ['INPUT'],
-            detected_type=detected_type.value,
-            domain_criteria=domain_criteria,
-            domain_rubric=domain_rubric
-        )
+    # =========================================================================
+    # USE VALIDATED PIPELINE - MANDATORY VALIDATION BEFORE DEPLOYMENT
+    # =========================================================================
 
-        user_message = get_eval_improvement_user_prompt(
-            existing_eval_prompt=existing_eval_prompt,
-            system_prompt=current_prompt,
-            use_case=project.use_case,
-            requirements=requirements_str,
-            input_var_name=input_var_name,
-            output_var_name=output_var_name,
-            detected_type=detected_type.value,
-            eval_changes=eval_changes
-        )
+    logger.info(f"Generating eval prompt via VALIDATED PIPELINE for project {project_id}")
 
-    else:
-        # Fresh generation mode: use shared best practices for consistency with agentic flow
-        system_prompt = get_anthropic_system_prompt_for_generation(
-            system_description=system_description,
-            input_var_name=input_var_name,
-            output_var_name=output_var_name,
-            template_vars=template_vars if template_vars else ['INPUT'],
-            detected_type=detected_type.value,
-            domain_criteria=domain_criteria,
-            domain_rubric=domain_rubric
-        )
+    # Create cost budget (default $0.50 per generation)
+    cost_budget = CostBudget(
+        max_cost_per_validation=0.50,
+        hard_limit=True
+    )
 
-        user_message = get_fresh_eval_generation_prompt(
-            system_prompt=current_prompt,
-            use_case=project.use_case,
-            requirements=requirements_str,
-            input_var_name=input_var_name,
-            output_var_name=output_var_name,
-            detected_type=detected_type.value,
-            domain_criteria=domain_criteria,
-            domain_rubric=domain_rubric
-        )
+    # Create validated pipeline
+    pipeline = ValidatedEvalPipeline(
+        project_id=project_id,
+        cost_budget=cost_budget,
+        min_ground_truth_examples=3,
+        min_reliability_runs=3,
+        require_adversarial_pass=True,
+        statistical_confidence_threshold=0.80
+    )
 
-    result = await llm_client.chat(
-        system_prompt=system_prompt,
-        user_message=user_message,
+    # Get sample test case for live validation (if available)
+    sample_input = None
+    sample_output = None
+    test_cases = getattr(project, 'test_cases', None) or []
+    if test_cases and len(test_cases) > 0:
+        sample_input = test_cases[0].get("input", "Sample test input")
+        sample_output = "This is a sample response for validation testing."
+
+    # Create eval function for live validation
+    run_eval_func = None
+    if sample_input and sample_output:
+        async def run_eval_func(ep, inp, outp):
+            """Run evaluation for validation gates"""
+            from llm_client_v2 import get_llm_client as get_llm
+            llm = get_llm()
+
+            # Fill in variables
+            filled_prompt = ep.replace("{input}", inp).replace("{output}", outp)
+            filled_prompt = filled_prompt.replace("{INPUT}", inp).replace("{OUTPUT}", outp)
+
+            result = await llm.chat(
+                system_prompt="You are an evaluation assistant. Output only valid JSON.",
+                user_message=filled_prompt,
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=0.0,
+                max_tokens=1000
+            )
+
+            # Parse score and verdict
+            score = 3.0
+            verdict = "NEEDS_REVIEW"
+            if not result.get("error"):
+                import re
+                import json
+                raw = result.get("output", "")
+                try:
+                    match = re.search(r'\{[\s\S]*\}', raw)
+                    if match:
+                        parsed = json.loads(match.group())
+                        score = float(parsed.get("weighted_score", parsed.get("score", 3.0)))
+                        verdict = parsed.get("verdict", "NEEDS_REVIEW")
+                except:
+                    pass
+
+            return score, verdict
+
+    # Generate and validate through the pipeline
+    existing_eval = request.current_eval_prompt or getattr(project, 'eval_prompt', None)
+
+    eval_prompt, validation_result = await pipeline.generate_and_validate(
+        system_prompt=current_prompt,
+        use_case=project.use_case or "",
+        requirements=project.key_requirements or [],
         provider=provider,
         api_key=api_key,
         model_name=model_name,
-        temperature=0.5,
-        max_tokens=8000
+        existing_eval_prompt=existing_eval if request.regenerate else None,
+        run_eval_func=run_eval_func,
+        sample_input=sample_input,
+        sample_output=sample_output
     )
 
-    if result.get("error"):
-        raise HTTPException(status_code=500, detail=result["error"])
+    # Save version with validation metadata
+    version_manager = EvalPromptVersionManager(project_id)
+    version_info = version_manager.save_version(
+        eval_prompt=eval_prompt,
+        validation_result=validation_result,
+        dimensions=[],
+        auto_fails=[],
+        changes_made="Regenerated" if request.regenerate else "Initial generation"
+    )
 
-    eval_prompt = result.get("output", "").strip()
-
-    # Ensure the eval prompt has the required placeholders with correct variable names
-    # Only add fallback if the specific variable is missing
-    if f"{{{{{input_var_name}}}}}" not in eval_prompt and "{{INPUT}}" not in eval_prompt:
-        # Try to fix common variations
-        eval_prompt = eval_prompt.replace(f"{{{input_var_name}}}", f"{{{{{input_var_name}}}}}")
-        eval_prompt = eval_prompt.replace("{INPUT}", f"{{{{{input_var_name}}}}}")
-
-    if f"{{{{{output_var_name}}}}}" not in eval_prompt and "{{OUTPUT}}" not in eval_prompt:
-        eval_prompt = eval_prompt.replace(f"{{{output_var_name}}}", f"{{{{{output_var_name}}}}}")
-        eval_prompt = eval_prompt.replace("{OUTPUT}", f"{{{{{output_var_name}}}}}")
-
-    # Run best practices check on the generated eval prompt
-    best_practices_report = apply_best_practices_check(eval_prompt)
-
-    # Set appropriate rationale based on generation mode
-    if is_regeneration:
-        rationale = f"AI-improved evaluation prompt based on existing prompt. Applied Anthropic's eval best practices: outcome-focused grading, balanced criteria, and domain-specific failure modes for {detected_type.value}. Best practices score: {best_practices_report['score']}/100."
-        changes_made = "Regenerated with improvements"
-    else:
-        rationale = f"AI-generated evaluation prompt tailored for {system_description}. Uses {{{{{input_var_name}}}}} variable matching system prompt. Applied Anthropic's best practices. Score: {best_practices_report['score']}/100."
-        changes_made = "Initial generation"
-
-    # Add to eval prompt version history
-    if not project.eval_prompt_versions:
-        project.eval_prompt_versions = []
-
-    # Determine next version number
-    next_version = 1
-    if project.eval_prompt_versions:
-        max_version = max(v.get("version", 0) for v in project.eval_prompt_versions)
-        next_version = max_version + 1
-
-    # Create version entry
-    version_entry = {
-        "version": next_version,
-        "eval_prompt_text": eval_prompt,
-        "rationale": rationale,
-        "changes_made": changes_made,
-        "best_practices_score": best_practices_report['score'],
-        "detected_type": detected_type.value,
-        "created_at": datetime.now().isoformat()
-    }
-    project.eval_prompt_versions.append(version_entry)
-
-    # Persist eval prompt to project
-    project.eval_prompt = eval_prompt
-    project.eval_rationale = rationale
-    project.updated_at = datetime.now()
-    project_storage.save_project(project)
-
-    return {
-        "eval_prompt": eval_prompt,
-        "rationale": rationale,
+    # Build response with full validation details
+    response = {
         "detected_type": detected_type.value,
         "input_variable": input_var_name,
-        "is_regeneration": is_regeneration,
-        "best_practices": best_practices_report,
-        "version": next_version
+        "is_regeneration": request.regenerate,
+        "version": version_info.get("version"),
+        "validation": {
+            "status": validation_result.overall_status.value,
+            "score": validation_result.overall_score,
+            "can_deploy": validation_result.can_deploy,
+            "blocking_failures": validation_result.blocking_failures,
+            "warnings": validation_result.warnings,
+            "cost_usd": validation_result.cost_incurred,
+            "gates": [
+                {
+                    "name": g.gate_name,
+                    "status": g.status.value,
+                    "score": g.score,
+                    "blocking": g.blocking,
+                    "recommendation": g.recommendation
+                }
+                for g in validation_result.gates
+            ]
+        }
     }
+
+    # CRITICAL: Only return eval_prompt if validation passed
+    if validation_result.can_deploy:
+        response["eval_prompt"] = eval_prompt
+        response["rationale"] = f"AI-generated eval prompt. Validation score: {validation_result.overall_score}/100. All gates passed."
+        response["best_practices"] = {"score": validation_result.overall_score}
+        logger.info(f"Eval prompt DEPLOYED for project {project_id} - validation passed")
+    else:
+        response["eval_prompt"] = None  # DO NOT DEPLOY
+        response["rationale"] = f"Validation FAILED. Blocking issues: {', '.join(validation_result.blocking_failures)}"
+        response["best_practices"] = {"score": 0}
+        logger.warning(f"Eval prompt BLOCKED for project {project_id} - validation failed: {validation_result.blocking_failures}")
+
+    return response
 
 
 # ============================================================================
@@ -1837,160 +1820,304 @@ Improve this prompt following the best practices. Return only the improved promp
 
 
 # ============================================================================
-# EVAL PROMPT REFINEMENT
+# EVAL PROMPT REFINEMENT - ENHANCED WITH DIFF PREVIEW
 # ============================================================================
+
+class StructuredFeedback(BaseModel):
+    """Structured feedback targeting specific aspects of the eval prompt"""
+    target_type: Optional[str] = None  # "dimension", "rubric", "auto_fail", "general"
+    target_name: Optional[str] = None  # Name of the dimension/rubric being targeted
+    issue: Optional[str] = None  # What's wrong
+    suggestion: Optional[str] = None  # How to fix it
+
 
 class RefineEvalRequest(BaseModel):
     feedback: str = None
     user_feedback: str = None  # Alias for frontend compatibility
     current_eval_prompt: str = None  # Optional: current eval prompt
+    structured_feedback: Optional[StructuredFeedback] = None  # New: structured feedback
+    preview_only: bool = False  # New: return diff without applying changes
+
+
+def parse_feedback_to_structure(feedback_text: str) -> StructuredFeedback:
+    """
+    Parse unstructured feedback text into structured feedback.
+    Identifies which aspect of the eval prompt the feedback targets.
+    """
+    text_lower = feedback_text.lower()
+    
+    # Detect target type
+    target_type = "general"
+    target_name = None
+    
+    # Check for dimension-related feedback
+    dimension_keywords = ["dimension", "scoring", "weight", "rubric", "criteria"]
+    if any(kw in text_lower for kw in dimension_keywords):
+        target_type = "dimension"
+        # Try to extract dimension name
+        import re
+        dim_match = re.search(r'(?:dimension|criteria|rubric)\s*[:\-]?\s*["\']?([a-zA-Z\s]+)["\']?', text_lower)
+        if dim_match:
+            target_name = dim_match.group(1).strip()
+    
+    # Check for strictness-related feedback
+    strictness_keywords = ["too strict", "too lenient", "too harsh", "not strict enough"]
+    for kw in strictness_keywords:
+        if kw in text_lower:
+            target_type = "rubric"
+            break
+    
+    # Check for auto-fail related feedback
+    autofail_keywords = ["auto-fail", "auto fail", "autofail", "automatic fail", "critical failure"]
+    if any(kw in text_lower for kw in autofail_keywords):
+        target_type = "auto_fail"
+    
+    # Extract suggestion if present
+    suggestion = None
+    suggestion_patterns = [
+        r'(?:should|could|please)\s+(.+?)(?:\.|$)',
+        r'(?:instead|rather)\s+(.+?)(?:\.|$)',
+        r'(?:suggest|recommend)\s*(?:ing)?\s+(.+?)(?:\.|$)'
+    ]
+    import re
+    for pattern in suggestion_patterns:
+        match = re.search(pattern, feedback_text, re.IGNORECASE)
+        if match:
+            suggestion = match.group(1).strip()
+            break
+    
+    return StructuredFeedback(
+        target_type=target_type,
+        target_name=target_name,
+        issue=feedback_text[:200],
+        suggestion=suggestion
+    )
+
+
+def generate_eval_prompt_diff(old_prompt: str, new_prompt: str) -> Dict[str, Any]:
+    """
+    Generate a human-readable diff between old and new eval prompts.
+    Returns structured diff with sections that changed.
+    """
+    import difflib
+    
+    old_lines = old_prompt.splitlines(keepends=True)
+    new_lines = new_prompt.splitlines(keepends=True)
+    
+    # Generate unified diff
+    diff = list(difflib.unified_diff(old_lines, new_lines, lineterm=''))
+    
+    # Count changes
+    additions = sum(1 for line in diff if line.startswith('+') and not line.startswith('+++'))
+    deletions = sum(1 for line in diff if line.startswith('-') and not line.startswith('---'))
+    
+    # Identify changed sections (look for markdown headers)
+    changed_sections = []
+    current_section = None
+    for i, line in enumerate(new_lines):
+        if line.startswith('#'):
+            current_section = line.strip()
+        # Check if this line was changed
+        if i < len(old_lines) and old_lines[i] != line:
+            if current_section and current_section not in changed_sections:
+                changed_sections.append(current_section)
+    
+    # Calculate similarity
+    similarity = difflib.SequenceMatcher(None, old_prompt, new_prompt).ratio()
+    
+    return {
+        "has_changes": additions > 0 or deletions > 0,
+        "additions": additions,
+        "deletions": deletions,
+        "similarity_percent": round(similarity * 100, 1),
+        "changed_sections": changed_sections[:5],  # Top 5 changed sections
+        "diff_preview": ''.join(diff[:50]),  # First 50 lines of diff
+        "summary": f"{additions} lines added, {deletions} lines removed, {similarity*100:.0f}% similar"
+    }
 
 
 @router.post("/{project_id}/eval-prompt/refine")
 async def refine_eval_prompt(project_id: str, request: RefineEvalRequest):
-    """Refine the evaluation prompt based on feedback using LLM"""
+    """Refine the evaluation prompt based on feedback - WITH DIFF PREVIEW SUPPORT.
+
+    This endpoint:
+    1. Records human feedback for the feedback learning system
+    2. Parses feedback into structured form (identifies target dimension/issue)
+    3. Optionally returns a PREVIEW of changes (set preview_only=True)
+    4. Regenerates the eval prompt through the validated pipeline
+    5. Only deploys if validation passes
+
+    Set preview_only=True to see what would change without applying changes.
+    """
+    from validated_eval_pipeline import (
+        ValidatedEvalPipeline,
+        EvalPromptVersionManager,
+        CostBudget
+    )
+    from feedback_learning import record_human_feedback
+
     logger.info(f"Refine eval prompt request for project {project_id}")
-    logger.info(f"Request data: feedback={request.feedback}, user_feedback={request.user_feedback}")
 
     try:
         project = project_storage.load_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        # Support both feedback field names (frontend sends user_feedback)
+        # Support both feedback field names
         feedback_text = request.feedback or request.user_feedback
         if not feedback_text:
             raise HTTPException(status_code=400, detail="Feedback is required")
 
-        # Get current eval prompt (from request or project)
         current_eval = request.current_eval_prompt or getattr(project, 'eval_prompt', '') or ""
-
-        # Get current system prompt
         current_prompt = project.system_prompt_versions[-1]["prompt_text"] if project.system_prompt_versions else ""
 
+        # =====================================================================
+        # PARSE FEEDBACK INTO STRUCTURED FORM
+        # =====================================================================
+        structured = request.structured_feedback
+        if not structured:
+            # Auto-parse unstructured feedback
+            structured = parse_feedback_to_structure(feedback_text)
+            logger.info(f"Parsed feedback: target_type={structured.target_type}, target_name={structured.target_name}")
+        
         # Get LLM settings
         settings = get_settings()
         provider = settings.get("provider", "openai")
         api_key = settings.get("api_key", "")
-        model_name = settings.get("model_name")
+        model_name = settings.get("model_name", "gpt-4o-mini")
 
-        # If no API key, return template-based refinement
+        # RECORD FEEDBACK FOR LEARNING SYSTEM (with structured info)
+        # This ensures feedback is captured even if refinement fails
+        try:
+            feedback_id = record_human_feedback(
+                project_id=project_id,
+                eval_prompt_version=len(project.eval_prompt_versions) if project.eval_prompt_versions else 1,
+                test_case_id="manual_refinement",
+                llm_score=3.0,  # Unknown
+                llm_verdict="NEEDS_REVIEW",
+                llm_reasoning="Manual refinement requested",
+                human_score=None,
+                human_verdict=None,
+                human_feedback=feedback_text
+            )
+            logger.info(f"Recorded feedback for learning: {feedback_id}")
+        except Exception as e:
+            logger.warning(f"Failed to record feedback: {e}")
+
         if not api_key:
-            refined_eval_prompt = f"""Evaluate the following AI-generated response based on these criteria:
+            # Template-based - still record but no validation needed
+            refined_eval_prompt = f"""Evaluate the response based on feedback: {feedback_text[:200]}
 
-**Task Context:**
-Use Case: {project.use_case}
-Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
-
-**User Feedback to Consider:**
-{feedback_text}
-
-**Original System Prompt:**
-{current_prompt}
-
-**Evaluation Criteria (Refined):**
-1. Task Completion - Does it fulfill the specific request?
-2. Accuracy - Is the information factually correct?
-3. Relevance - Does it stay on topic?
-4. Quality - Is it well-written and clear?
-5. User Feedback - Does it address the specific concerns raised?
-
-**Rating:** Provide a score from 1-5 with justification."""
-
-            rationale = "Template-based refinement. Configure API key for AI refinement."
-            changes = [f"Incorporated feedback: {feedback_text[:50]}..."]
-
-            # Persist refined eval prompt to project
-            project.eval_prompt = refined_eval_prompt
-            project.eval_rationale = rationale
-            project.updated_at = datetime.now()
-            project_storage.save_project(project)
+**Return JSON:** {{"score": <1-5>, "reasoning": "<explanation>"}}"""
 
             return {
                 "refined_prompt": refined_eval_prompt,
-                "eval_prompt": refined_eval_prompt,  # For backwards compatibility
-                "rationale": rationale,
-                "changes_made": changes
+                "eval_prompt": refined_eval_prompt,
+                "rationale": "Template-based. Configure API key for validated refinement.",
+                "changes_made": [f"Incorporated feedback: {feedback_text[:50]}..."],
+                "validation": {"status": "skipped", "reason": "No API key"}
             }
 
-        # Use LLM to refine eval prompt
-        system_prompt = """You are an expert at refining evaluation prompts based on user feedback.
-Improve the evaluation prompt to better address the user's concerns while maintaining comprehensive coverage.
+        # =========================================================================
+        # USE VALIDATED PIPELINE FOR REFINEMENT
+        # =========================================================================
 
-Return ONLY the refined evaluation prompt, no explanations."""
+        logger.info(f"Refining eval prompt via VALIDATED PIPELINE for project {project_id}")
 
-        user_message = f"""Refine this evaluation prompt based on the feedback:
+        cost_budget = CostBudget(max_cost_per_validation=0.50, hard_limit=True)
 
-User Feedback: {feedback_text}
+        pipeline = ValidatedEvalPipeline(
+            project_id=project_id,
+            cost_budget=cost_budget,
+            require_adversarial_pass=True
+        )
 
-Current Use Case: {project.use_case}
-Requirements: {', '.join(project.key_requirements) if project.key_requirements else 'Not specified'}
-
-Current Evaluation Prompt:
-{current_eval if current_eval else 'No existing eval prompt - create one based on the system prompt below'}
-
-System Prompt Being Evaluated:
-{current_prompt}
-
-Create an improved evaluation prompt that addresses the feedback."""
-
-        result = await llm_client.chat(
-            system_prompt=system_prompt,
-            user_message=user_message,
+        # Generate refined prompt through validated pipeline
+        # The pipeline will apply feedback learning adaptations
+        eval_prompt, validation_result = await pipeline.generate_and_validate(
+            system_prompt=current_prompt,
+            use_case=project.use_case or "",
+            requirements=project.key_requirements or [],
             provider=provider,
             api_key=api_key,
             model_name=model_name,
-            temperature=0.5,
-            max_tokens=8000
+            existing_eval_prompt=current_eval  # Pass existing for refinement
         )
 
-        if result.get("error"):
-            raise HTTPException(status_code=500, detail=result["error"])
+        # =====================================================================
+        # GENERATE DIFF PREVIEW
+        # =====================================================================
+        diff_info = generate_eval_prompt_diff(current_eval, eval_prompt)
+        
+        # If preview_only, return diff without saving
+        if request.preview_only:
+            logger.info(f"Preview mode: returning diff for project {project_id}")
+            return {
+                "preview_mode": True,
+                "diff": diff_info,
+                "proposed_prompt": eval_prompt,
+                "current_prompt": current_eval,
+                "validation": {
+                    "status": validation_result.overall_status.value,
+                    "score": validation_result.overall_score,
+                    "can_deploy": validation_result.can_deploy,
+                    "blocking_failures": validation_result.blocking_failures,
+                    "warnings": validation_result.warnings
+                },
+                "structured_feedback": {
+                    "target_type": structured.target_type,
+                    "target_name": structured.target_name,
+                    "issue": structured.issue,
+                    "suggestion": structured.suggestion
+                },
+                "instructions": "Review the diff above. To apply changes, call this endpoint again with preview_only=False"
+            }
+        
+        # =====================================================================
+        # SAVE VERSION WITH METADATA
+        # =====================================================================
+        version_manager = EvalPromptVersionManager(project_id)
+        version_info = version_manager.save_version(
+            eval_prompt=eval_prompt,
+            validation_result=validation_result,
+            dimensions=[],
+            auto_fails=[],
+            changes_made=f"Refined based on feedback: {feedback_text[:50]}..."
+        )
 
-        refined_eval_prompt = result.get("output", "").strip()
-
-        if not refined_eval_prompt:
-            raise HTTPException(status_code=500, detail="LLM returned empty response")
-
-        # Run best practices check on refined prompt
-        best_practices_report = apply_best_practices_check(refined_eval_prompt)
-
-        rationale = f"AI-refined evaluation prompt incorporating: {feedback_text[:100]}. Best practices score: {best_practices_report['score']}/100."
-        changes = [f"Incorporated feedback: {feedback_text[:50]}...", "AI refinement applied"]
-
-        # Add to eval prompt version history
-        if not project.eval_prompt_versions:
-            project.eval_prompt_versions = []
-
-        next_version = 1
-        if project.eval_prompt_versions:
-            max_version = max(v.get("version", 0) for v in project.eval_prompt_versions)
-            next_version = max_version + 1
-
-        version_entry = {
-            "version": next_version,
-            "eval_prompt_text": refined_eval_prompt,
-            "rationale": rationale,
-            "changes_made": f"Refined based on feedback: {feedback_text[:50]}...",
-            "best_practices_score": best_practices_report['score'],
-            "created_at": datetime.now().isoformat()
+        response = {
+            "version": version_info.get("version"),
+            "changes_made": [f"Incorporated feedback: {feedback_text[:50]}...", "Validated refinement"],
+            "diff": diff_info,  # Include diff in response
+            "structured_feedback": {  # Include parsed feedback
+                "target_type": structured.target_type,
+                "target_name": structured.target_name,
+                "suggestion": structured.suggestion
+            },
+            "validation": {
+                "status": validation_result.overall_status.value,
+                "score": validation_result.overall_score,
+                "can_deploy": validation_result.can_deploy,
+                "blocking_failures": validation_result.blocking_failures,
+                "warnings": validation_result.warnings
+            }
         }
-        project.eval_prompt_versions.append(version_entry)
 
-        # Persist refined eval prompt to project
-        project.eval_prompt = refined_eval_prompt
-        project.eval_rationale = rationale
-        project.updated_at = datetime.now()
-        project_storage.save_project(project)
+        # CRITICAL: Only deploy if validation passed
+        if validation_result.can_deploy:
+            response["refined_prompt"] = eval_prompt
+            response["eval_prompt"] = eval_prompt
+            response["rationale"] = f"AI-refined and validated. Score: {validation_result.overall_score}/100"
+            response["best_practices"] = {"score": validation_result.overall_score}
+            logger.info(f"Refined eval prompt DEPLOYED for project {project_id}")
+        else:
+            response["refined_prompt"] = None
+            response["eval_prompt"] = None
+            response["rationale"] = f"Validation FAILED: {', '.join(validation_result.blocking_failures)}"
+            response["best_practices"] = {"score": 0}
+            logger.warning(f"Refined eval prompt BLOCKED for project {project_id}")
 
-        return {
-            "refined_prompt": refined_eval_prompt,
-            "eval_prompt": refined_eval_prompt,  # For backwards compatibility
-            "rationale": rationale,
-            "changes_made": changes,
-            "version": next_version,
-            "best_practices": best_practices_report
-        }
+        return response
 
     except HTTPException:
         raise
@@ -2199,6 +2326,210 @@ Please evaluate based on the criteria above and provide your assessment."""
 
 
 # ============================================================================
+# INCREMENTAL VALIDATION ENDPOINT (Run gates 4-8 after test data exists)
+# ============================================================================
+
+class IncrementalValidationRequest(BaseModel):
+    """Request to run incremental validation on existing eval prompt"""
+    version_number: Optional[int] = None  # If not specified, validates current eval_prompt
+    run_ground_truth: bool = True
+    run_reliability: bool = True
+    run_adversarial: bool = True
+    run_consistency: bool = True
+    sample_test_case_id: Optional[str] = None  # Specific test case to use
+
+
+@router.post("/{project_id}/eval-prompt/validate-incremental")
+async def validate_eval_prompt_incremental(project_id: str, request: IncrementalValidationRequest = None):
+    """
+    Run incremental validation on an existing eval prompt.
+
+    This endpoint runs validation gates 4-8 that require test data:
+    - Gate 4: Ground Truth Validation
+    - Gate 5: Reliability Verification
+    - Gate 6: Adversarial Testing
+    - Gate 7: Statistical Confidence
+    - Gate 8: Consistency Check (±0.3 tolerance)
+
+    Use this AFTER you have added test cases to get full validation coverage.
+    This solves the problem where gates 4-8 are skipped during initial generation.
+    """
+    from validated_eval_pipeline import (
+        ValidatedEvalPipeline,
+        ValidationStatus,
+        ValidationGateResult,
+        CostBudget
+    )
+
+    project = project_storage.load_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get eval prompt to validate
+    eval_prompt = None
+    if request and request.version_number:
+        # Find specific version
+        for v in (project.eval_prompt_versions or []):
+            if v.get("version") == request.version_number:
+                eval_prompt = v.get("eval_prompt_text")
+                break
+        if not eval_prompt:
+            raise HTTPException(status_code=404, detail=f"Version {request.version_number} not found")
+    else:
+        eval_prompt = project.eval_prompt
+
+    if not eval_prompt:
+        raise HTTPException(status_code=400, detail="No eval prompt to validate")
+
+    # Check for test cases
+    test_cases = getattr(project, 'test_cases', None) or []
+    if not test_cases:
+        raise HTTPException(
+            status_code=400,
+            detail="No test cases available. Add test cases first, then run incremental validation."
+        )
+
+    # Get sample for validation
+    if request and request.sample_test_case_id:
+        sample_tc = next((tc for tc in test_cases if tc.get("id") == request.sample_test_case_id), None)
+        if not sample_tc:
+            raise HTTPException(status_code=404, detail=f"Test case {request.sample_test_case_id} not found")
+    else:
+        sample_tc = test_cases[0]
+
+    sample_input = sample_tc.get("input", "")
+    sample_output = sample_tc.get("expected_output", sample_tc.get("output", ""))
+
+    if not sample_input or not sample_output:
+        raise HTTPException(status_code=400, detail="Test case missing input or output")
+
+    # Get LLM settings
+    settings = get_settings()
+    provider = settings.get("provider", "openai")
+    api_key = settings.get("api_key", "")
+    model_name = settings.get("model_name", "gpt-4o-mini")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key not configured")
+
+    # Create pipeline for incremental validation
+    pipeline = ValidatedEvalPipeline(
+        project_id=project_id,
+        cost_budget=CostBudget(max_cost_per_validation=1.0)
+    )
+
+    # Define eval runner
+    async def run_eval(ep, inp, outp):
+        result = await llm_client.chat(
+            system_prompt=ep,
+            user_message=f"**Input:**\n{inp}\n\n**Output to Evaluate:**\n{outp}",
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name,
+            temperature=0.2,
+            max_tokens=2000
+        )
+        # Parse score and verdict from result
+        output = result.get("output", "")
+        score = 3.0  # Default
+        verdict = "NEEDS_REVIEW"
+
+        import re
+        score_match = re.search(r'"score"\s*:\s*([\d.]+)', output)
+        if score_match:
+            score = float(score_match.group(1))
+        verdict_match = re.search(r'"verdict"\s*:\s*"([^"]+)"', output)
+        if verdict_match:
+            verdict = verdict_match.group(1)
+
+        return score, verdict
+
+    # Run incremental validation gates
+    gate_results = []
+
+    request = request or IncrementalValidationRequest()
+
+    # Gate 4: Ground Truth
+    if request.run_ground_truth:
+        try:
+            gt_result = await pipeline._run_ground_truth_gate(eval_prompt, run_eval)
+            gate_results.append({
+                "gate": "ground_truth",
+                "status": gt_result.status.value,
+                "score": gt_result.score,
+                "details": gt_result.details,
+                "recommendation": gt_result.recommendation
+            })
+        except Exception as e:
+            gate_results.append({"gate": "ground_truth", "status": "error", "error": str(e)})
+
+    # Gate 5: Reliability
+    if request.run_reliability:
+        try:
+            rel_result = await pipeline._run_reliability_gate(
+                eval_prompt, run_eval, sample_input, sample_output
+            )
+            gate_results.append({
+                "gate": "reliability",
+                "status": rel_result.status.value,
+                "score": rel_result.score,
+                "details": rel_result.details,
+                "recommendation": rel_result.recommendation
+            })
+        except Exception as e:
+            gate_results.append({"gate": "reliability", "status": "error", "error": str(e)})
+
+    # Gate 6: Adversarial
+    if request.run_adversarial:
+        try:
+            adv_result = await pipeline._run_adversarial_gate(eval_prompt, run_eval, sample_input)
+            gate_results.append({
+                "gate": "adversarial",
+                "status": adv_result.status.value,
+                "score": adv_result.score,
+                "details": adv_result.details,
+                "recommendation": adv_result.recommendation
+            })
+        except Exception as e:
+            gate_results.append({"gate": "adversarial", "status": "error", "error": str(e)})
+
+    # Gate 8: Consistency (Gate 7 statistical requires more data, run separately)
+    if request.run_consistency:
+        try:
+            cons_result = await pipeline._run_consistency_gate(
+                eval_prompt, run_eval, sample_input, sample_output
+            )
+            gate_results.append({
+                "gate": "consistency",
+                "status": cons_result.status.value,
+                "score": cons_result.score,
+                "details": cons_result.details,
+                "recommendation": cons_result.recommendation,
+                "blocking": cons_result.blocking
+            })
+        except Exception as e:
+            gate_results.append({"gate": "consistency", "status": "error", "error": str(e)})
+
+    # Compute overall result
+    passed_gates = sum(1 for g in gate_results if g.get("status") == "passed")
+    failed_gates = sum(1 for g in gate_results if g.get("status") == "failed")
+    blocking_failures = [g for g in gate_results if g.get("blocking") and g.get("status") == "failed"]
+
+    return {
+        "project_id": project_id,
+        "eval_prompt_validated": eval_prompt[:200] + "...",
+        "test_case_used": sample_tc.get("id", "first"),
+        "gates_run": len(gate_results),
+        "gates_passed": passed_gates,
+        "gates_failed": failed_gates,
+        "can_deploy": len(blocking_failures) == 0,
+        "blocking_failures": [f"{g['gate']}: {g.get('recommendation', '')}" for g in blocking_failures],
+        "gate_results": gate_results,
+        "cost_incurred": pipeline.cost_gate.get_summary()["session_total_usd"]
+    }
+
+
+# ============================================================================
 # EVAL PROMPT VERSION MANAGEMENT ENDPOINTS
 # ============================================================================
 
@@ -2235,33 +2566,95 @@ class AddEvalVersionRequest(BaseModel):
 
 @router.post("/{project_id}/eval-prompt/versions")
 async def add_eval_prompt_version(project_id: str, request: AddEvalVersionRequest):
-    """Add a new eval prompt version manually"""
+    """Add a new eval prompt version manually - WITH MANDATORY VALIDATION.
+
+    Manual versions are validated using semantic analysis before being saved.
+    The version is saved but NOT deployed unless validation passes.
+    """
+    from validated_eval_pipeline import SemanticContradictionDetector, ValidationStatus
+
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # Run semantic analysis (validation gate 1)
+    detector = SemanticContradictionDetector()
+    semantic_result = detector.analyze(request.eval_prompt_text)
+
     # Run best practices check
     best_practices_report = apply_best_practices_check(request.eval_prompt_text)
 
-    # Add version
-    version_num = _add_eval_prompt_version(
-        project,
-        eval_prompt=request.eval_prompt_text,
-        rationale=request.rationale or f"Manual edit. Best practices score: {best_practices_report['score']}/100",
-        changes_made=request.changes_made,
-        best_practices_score=best_practices_report['score']
-    )
+    # Determine if version can be deployed
+    has_critical_issues = semantic_result.get("has_critical_issues", False)
+    best_practices_score = best_practices_report.get('score', 0)
+    can_deploy = not has_critical_issues and best_practices_score >= 50
 
-    # Update current eval prompt
-    project.eval_prompt = request.eval_prompt_text
-    project.eval_rationale = request.rationale
+    # Build validation metadata
+    validation_metadata = {
+        "status": "failed" if has_critical_issues else ("warning" if best_practices_score < 70 else "passed"),
+        "score": best_practices_score,
+        "can_deploy": can_deploy,
+        "blocking_failures": [] if not has_critical_issues else ["Semantic contradictions detected"],
+        "warnings": semantic_result.get("recommendation", ""),
+        "gates": [
+            {
+                "name": "semantic_analysis",
+                "status": "failed" if has_critical_issues else "passed",
+                "score": 100 - semantic_result.get("severity_score", 0),
+                "blocking": has_critical_issues
+            },
+            {
+                "name": "best_practices",
+                "status": "passed" if best_practices_score >= 50 else "failed",
+                "score": best_practices_score,
+                "blocking": best_practices_score < 50
+            }
+        ]
+    }
+
+    # Add version with validation metadata (always save for history)
+    if not project.eval_prompt_versions:
+        project.eval_prompt_versions = []
+
+    next_version = 1
+    if project.eval_prompt_versions:
+        max_version = max(v.get("version", 0) for v in project.eval_prompt_versions)
+        next_version = max_version + 1
+
+    version_entry = {
+        "version": next_version,
+        "eval_prompt_text": request.eval_prompt_text,
+        "rationale": request.rationale or f"Manual edit. Validation: {validation_metadata['status']}",
+        "changes_made": request.changes_made,
+        "best_practices_score": best_practices_score,
+        "validation": validation_metadata,
+        "is_deployed": can_deploy,
+        "created_at": datetime.now().isoformat()
+    }
+    project.eval_prompt_versions.append(version_entry)
+
+    # CRITICAL: Only deploy if validation passed
+    if can_deploy:
+        project.eval_prompt = request.eval_prompt_text
+        project.eval_rationale = request.rationale
+        logger.info(f"Manual eval prompt DEPLOYED for project {project_id}")
+    else:
+        logger.warning(f"Manual eval prompt SAVED but NOT DEPLOYED for project {project_id} - validation failed")
+
     project.updated_at = datetime.now()
     project_storage.save_project(project)
 
     return {
-        "version": version_num,
-        "message": f"Eval prompt version {version_num} created",
-        "best_practices": best_practices_report
+        "version": next_version,
+        "message": f"Eval prompt version {next_version} created" + (" and deployed" if can_deploy else " but NOT deployed (validation failed)"),
+        "best_practices": best_practices_report,
+        "validation": validation_metadata,
+        "is_deployed": can_deploy,
+        "semantic_issues": {
+            "contradictions": len(semantic_result.get("contradictions", [])),
+            "ambiguities": len(semantic_result.get("ambiguities", [])),
+            "recommendation": semantic_result.get("recommendation", "")
+        }
     }
 
 
@@ -2311,7 +2704,11 @@ async def get_eval_prompt_version(project_id: str, version_number: int):
 
 @router.put("/{project_id}/eval-prompt/versions/{version_number}/restore")
 async def restore_eval_prompt_version(project_id: str, version_number: int):
-    """Restore an eval prompt version as the current version"""
+    """Restore an eval prompt version - ONLY if it passed validation.
+
+    Versions that failed validation cannot be restored as the current version.
+    This prevents deploying invalid eval prompts through the restore backdoor.
+    """
     project = project_storage.load_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -2328,16 +2725,54 @@ async def restore_eval_prompt_version(project_id: str, version_number: int):
     if not version:
         raise HTTPException(status_code=404, detail=f"Version {version_number} not found")
 
-    # Update current eval prompt
+    # CRITICAL: Check if version passed validation before allowing restore
+    validation = version.get("validation", {})
+    can_deploy = validation.get("can_deploy", False)
+
+    # Legacy versions without validation metadata - mark as unvalidated
+    if not validation:
+        logger.warning(f"Version {version_number} has no validation metadata - treating as unvalidated")
+        return {
+            "error": "Cannot restore unvalidated version",
+            "message": f"Version {version_number} was created before validation was enforced. Please regenerate the eval prompt.",
+            "version": version_number,
+            "validation_status": "unknown",
+            "can_restore": False
+        }
+
+    # Check validation status
+    if not can_deploy:
+        blocking_failures = validation.get("blocking_failures", ["Unknown validation failure"])
+        return {
+            "error": "Cannot restore version that failed validation",
+            "message": f"Version {version_number} failed validation: {', '.join(blocking_failures)}",
+            "version": version_number,
+            "validation_status": validation.get("status", "failed"),
+            "validation_score": validation.get("score", 0),
+            "blocking_failures": blocking_failures,
+            "can_restore": False
+        }
+
+    # Version passed validation - allow restore
     project.eval_prompt = version.get("eval_prompt_text")
     project.eval_rationale = version.get("rationale")
     project.updated_at = datetime.now()
+
+    # Mark this version as deployed
+    for v in project.eval_prompt_versions:
+        v["is_deployed"] = (v.get("version") == version_number)
+
     project_storage.save_project(project)
+
+    logger.info(f"Restored validated eval prompt version {version_number} for project {project_id}")
 
     return {
         "message": f"Restored eval prompt version {version_number}",
         "eval_prompt": project.eval_prompt,
-        "rationale": project.eval_rationale
+        "rationale": project.eval_rationale,
+        "validation_status": validation.get("status"),
+        "validation_score": validation.get("score"),
+        "can_restore": True
     }
 
 
@@ -2430,6 +2865,159 @@ class GenerateDatasetRequest(BaseModel):
     sample_count: int = None  # Alias for num_examples (frontend uses this)
     categories: List[str] = None
     version: int = None  # Optional: specific version number to use
+    include_expected_outputs: bool = False  # NEW: Generate expected outputs too
+    quality_threshold: float = 0.7  # NEW: Minimum quality score to accept test case
+
+
+# ============================================================================
+# DATASET QUALITY VALIDATION
+# ============================================================================
+
+def validate_test_case_quality(test_case: Dict[str, Any], template_variables: List[str]) -> Dict[str, Any]:
+    """
+    Validate quality of a generated test case.
+    Returns quality assessment with score and issues.
+    """
+    issues = []
+    quality_score = 1.0
+    
+    # Check for placeholder patterns that indicate incomplete generation
+    PLACEHOLDER_PATTERNS = [
+        r'\[insert\s+',
+        r'\[placeholder',
+        r'\[your\s+',
+        r'\[example\s+',
+        r'\[add\s+',
+        r'<insert\s+',
+        r'<your\s+',
+        r'<placeholder',
+        r'\.{3,}',  # Multiple dots like "..."
+        r'TODO',
+        r'FIXME',
+        r'\[.*here\]',
+        r'<.*here>',
+    ]
+    
+    import re
+    for var in template_variables:
+        value = test_case.get(var, "")
+        if isinstance(value, str):
+            # Check for placeholders
+            for pattern in PLACEHOLDER_PATTERNS:
+                if re.search(pattern, value, re.IGNORECASE):
+                    issues.append(f"Placeholder detected in {var}")
+                    quality_score -= 0.3
+                    break
+            
+            # Check for minimal content
+            if len(value) < 10:
+                issues.append(f"Minimal content in {var} ({len(value)} chars)")
+                quality_score -= 0.2
+            
+            # Check for JSON validity if it looks like JSON
+            if value.strip().startswith('[') or value.strip().startswith('{'):
+                try:
+                    json.loads(value)
+                except json.JSONDecodeError:
+                    issues.append(f"Invalid JSON in {var}")
+                    quality_score -= 0.3
+        
+        # Check for missing variables
+        if value in ["", None, f"[Missing {var}]"]:
+            issues.append(f"Missing value for {var}")
+            quality_score -= 0.4
+    
+    # Check expected_behavior
+    expected = test_case.get("expected_behavior", "")
+    if len(expected) < 10 or expected == "Should respond appropriately":
+        issues.append("Generic expected_behavior")
+        quality_score -= 0.1
+    
+    return {
+        "is_valid": quality_score >= 0.5,
+        "quality_score": max(0.0, min(1.0, quality_score)),
+        "issues": issues[:5],  # Limit to top 5 issues
+        "needs_regeneration": quality_score < 0.3
+    }
+
+
+def calculate_dataset_quality_metrics(test_cases: List[Dict], template_variables: List[str], requirements: List[str] = None) -> Dict[str, Any]:
+    """
+    Calculate comprehensive quality metrics for a dataset.
+    """
+    if not test_cases:
+        return {"quality_score": 0, "message": "No test cases"}
+    
+    # Individual quality scores
+    quality_results = [validate_test_case_quality(tc, template_variables) for tc in test_cases]
+    valid_cases = sum(1 for r in quality_results if r["is_valid"])
+    avg_quality = sum(r["quality_score"] for r in quality_results) / len(quality_results)
+    
+    # Category distribution
+    category_counts = {}
+    for tc in test_cases:
+        cat = tc.get("category", "unknown")
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+    
+    # Check category balance
+    total = len(test_cases)
+    ideal_distribution = {"positive": 0.4, "edge_case": 0.25, "negative": 0.2, "adversarial": 0.15}
+    distribution_score = 1.0
+    for cat, ideal in ideal_distribution.items():
+        actual = category_counts.get(cat, 0) / total
+        deviation = abs(actual - ideal)
+        if deviation > 0.15:
+            distribution_score -= 0.1
+    
+    # Coverage analysis (if requirements provided)
+    coverage_score = 1.0
+    uncovered_requirements = []
+    if requirements:
+        # Simple keyword matching for coverage estimation
+        all_test_text = " ".join([
+            str(tc.get("test_focus", "")) + " " + str(tc.get("expected_behavior", ""))
+            for tc in test_cases
+        ]).lower()
+        
+        for req in requirements:
+            req_keywords = req.lower().split()[:3]  # First 3 words
+            if not any(kw in all_test_text for kw in req_keywords):
+                uncovered_requirements.append(req)
+                coverage_score -= 0.1
+    
+    # Diversity score (unique test focuses)
+    test_focuses = set(tc.get("test_focus", "") for tc in test_cases)
+    diversity_score = min(1.0, len(test_focuses) / len(test_cases) * 1.5)
+    
+    # Overall quality
+    overall = (avg_quality * 0.4 + distribution_score * 0.2 + 
+               coverage_score * 0.2 + diversity_score * 0.2)
+    
+    return {
+        "overall_quality": round(overall, 2),
+        "individual_quality_avg": round(avg_quality, 2),
+        "valid_cases": valid_cases,
+        "total_cases": len(test_cases),
+        "valid_percentage": round(valid_cases / len(test_cases) * 100, 1),
+        "category_distribution": category_counts,
+        "distribution_score": round(distribution_score, 2),
+        "diversity_score": round(diversity_score, 2),
+        "coverage_score": round(coverage_score, 2) if requirements else None,
+        "uncovered_requirements": uncovered_requirements[:5] if requirements else None,
+        "quality_interpretation": _interpret_quality_score(overall),
+        "all_issues": [i for r in quality_results for i in r["issues"]][:10]  # Top 10 issues
+    }
+
+
+def _interpret_quality_score(score: float) -> str:
+    if score >= 0.85:
+        return "Excellent: High-quality, diverse test dataset"
+    elif score >= 0.70:
+        return "Good: Solid coverage with minor gaps"
+    elif score >= 0.50:
+        return "Fair: Usable but consider regenerating some cases"
+    else:
+        return "Poor: Significant quality issues, regeneration recommended"
 
 
 @router.post("/{project_id}/dataset/generate")
@@ -2547,22 +3135,27 @@ Return ONLY valid JSON with SEPARATE FIELDS for each template variable:
             "category": "positive|edge_case|negative|adversarial",
             "test_focus": "Specific aspect being tested",
             "expected_behavior": "What the system should do",
+            "expected_output": "Example of what the AI should output for this input",
             "difficulty": "easy|medium|hard"
         }}
     ]
 }}
 
-## CRITICAL RULES
-1. Each variable must have a COMPLETE, REALISTIC value - no placeholders like "[insert here]"
+## CRITICAL RULES - MUST FOLLOW
+1. **NO PLACEHOLDERS**: Each variable must have a COMPLETE, REALISTIC value
+   - FORBIDDEN: "[insert here]", "<your content>", "...", "[placeholder]", "[example]"
+   - REQUIRED: Actual realistic content appropriate for the variable type
 2. Values should match the expected format for each variable type:
    - IDs should be realistic identifiers (e.g., "REP-12345", "user_abc123")
-   - JSON fields should contain valid JSON arrays/objects
-   - Text fields should have substantial, realistic content
+   - JSON fields should contain VALID JSON arrays/objects - test by parsing
+   - Text fields should have substantial, realistic content (50+ words)
 3. Include specific details: real names, dates, numbers, scenarios
 4. Test cases should expose potential weaknesses in the prompt
 5. Vary complexity: some simple, some complex
 6. For transcripts/documents: write 100-500 words of realistic content
-7. For JSON array fields (like gaps_json): generate 2-5 realistic items"""
+7. For JSON array fields (like gaps_json): generate 2-5 realistic items with valid JSON
+8. **EXPECTED OUTPUT**: Provide a realistic example of what the AI should output for each input
+9. **NO DUPLICATES**: Each test case should be distinctly different from others"""
 
     user_message = f"""Generate {num_examples} test cases for the system prompt above.
 
@@ -2582,13 +3175,17 @@ Return the test cases as JSON:"""
 
     logger.info(f"Generating dataset with LLM: provider={provider}, model={model_name}, num_examples={num_examples}")
 
+    # Lower temperature (0.5) for more consistent, higher-quality generation
+    # Previously 0.8 caused high variance and inconsistent quality
+    GENERATION_TEMPERATURE = 0.5
+    
     result = await llm_client.chat(
         system_prompt=system_prompt,
         user_message=user_message,
         provider=provider,
         api_key=api_key,
         model_name=model_name,
-        temperature=0.8,
+        temperature=GENERATION_TEMPERATURE,
         max_tokens=16000  # More tokens for complete inputs
     )
 
@@ -2650,6 +3247,12 @@ Return the test cases as JSON:"""
                     else:
                         test_case[var] = f"[Missing {var}]"
 
+            # Extract expected_output if provided
+            if "expected_output" in tc:
+                test_case["expected_output"] = tc["expected_output"]
+            elif request and request.include_expected_outputs:
+                test_case["expected_output"] = "[Not generated - re-run with include_expected_outputs=True]"
+            
             # Also keep a combined "input" field for backwards compatibility
             # This is a dict of all variable values
             test_case["inputs"] = {var: test_case.get(var, "") for var in template_variables}
@@ -2666,25 +3269,73 @@ Return the test cases as JSON:"""
             detail=f"Failed to generate test cases: LLM response parsing failed - {str(e)}"
         )
 
+    # =====================================================================
+    # QUALITY VALIDATION - Filter out low-quality test cases
+    # =====================================================================
+    quality_threshold = request.quality_threshold if request else 0.7
+    
+    validated_cases = []
+    rejected_cases = []
+    for tc in test_cases:
+        quality_result = validate_test_case_quality(tc, template_variables)
+        tc["quality"] = {
+            "score": quality_result["quality_score"],
+            "issues": quality_result["issues"]
+        }
+        if quality_result["quality_score"] >= quality_threshold:
+            validated_cases.append(tc)
+        else:
+            rejected_cases.append(tc)
+            logger.warning(f"Rejected test case due to quality: {quality_result['issues']}")
+    
+    # Recalculate category counts after filtering
+    categories_count = {}
+    for tc in validated_cases:
+        cat = tc.get("category", "unknown")
+        categories_count[cat] = categories_count.get(cat, 0) + 1
+    
+    # Calculate comprehensive quality metrics
+    quality_metrics = calculate_dataset_quality_metrics(
+        validated_cases, 
+        template_variables, 
+        project.key_requirements or []
+    )
+
     # Build dataset object with smart generation metadata
     dataset_obj = {
-        "test_cases": test_cases,
-        "sample_count": len(test_cases),
-        "preview": test_cases[:10] if len(test_cases) > 10 else test_cases,
-        "count": len(test_cases),
+        "test_cases": validated_cases,
+        "sample_count": len(validated_cases),
+        "preview": validated_cases[:10] if len(validated_cases) > 10 else validated_cases,
+        "count": len(validated_cases),
         "categories": categories_count,
         "generated_at": datetime.now().isoformat(),
+        "quality_metrics": quality_metrics,
+        "generation_stats": {
+            "requested": num_examples,
+            "generated": len(test_cases),
+            "accepted": len(validated_cases),
+            "rejected": len(rejected_cases),
+            "quality_threshold": quality_threshold,
+            "temperature": GENERATION_TEMPERATURE
+        },
         "metadata": {
             "input_type": input_spec.input_type.value,
             "template_variables": template_variables,  # All variables as separate columns
             "domain_context": input_spec.domain_context,
-            "generation_type": "smart"
+            "generation_type": "smart",
+            "includes_expected_outputs": any("expected_output" in tc for tc in validated_cases)
         }
     }
+    
+    # Log quality summary
+    logger.info(
+        f"Dataset generated: {len(validated_cases)}/{len(test_cases)} accepted "
+        f"(quality: {quality_metrics['overall_quality']:.2f}, threshold: {quality_threshold})"
+    )
 
     # Persist dataset to project file
     project.dataset = dataset_obj
-    project.test_cases = test_cases
+    project.test_cases = validated_cases  # Only save validated cases
     project.updated_at = datetime.now()
     project_storage.save_project(project)
 

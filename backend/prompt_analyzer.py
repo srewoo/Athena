@@ -22,6 +22,39 @@ class PromptType(Enum):
 
 
 @dataclass
+class PromptTypeLabel:
+    """A single prompt type label with confidence score"""
+    type: PromptType
+    confidence: float  # 0.0 to 1.0
+    indicators_found: List[str] = field(default_factory=list)
+    indicator_count: int = 0
+
+    def __post_init__(self):
+        self.indicator_count = len(self.indicators_found)
+
+
+@dataclass
+class MultiLabelTypeResult:
+    """Multi-label classification result for a prompt"""
+    primary_type: PromptType
+    primary_confidence: float
+    all_labels: List[PromptTypeLabel]  # All types with confidence > threshold
+    is_multi_type: bool  # True if multiple types have high confidence
+    type_composition: Dict[str, float]  # Normalized percentages of each type
+
+    def get_types_above_threshold(self, threshold: float = 0.3) -> List[PromptType]:
+        """Get all types with confidence above threshold"""
+        return [label.type for label in self.all_labels if label.confidence >= threshold]
+
+    def get_secondary_types(self, threshold: float = 0.3) -> List[PromptType]:
+        """Get secondary types (excluding primary)"""
+        return [
+            label.type for label in self.all_labels
+            if label.confidence >= threshold and label.type != self.primary_type
+        ]
+
+
+@dataclass
 class PromptDNA:
     """Core elements that must be preserved in any rewrite"""
     # Template variables found in the prompt
@@ -53,7 +86,7 @@ class PromptAnalysis:
     prompt_type: PromptType
     prompt_types_detected: List[PromptType]  # Can have multiple
     dna: PromptDNA
-    quality_score: float  # 1-10
+    quality_score: float  # 0-10 (earned, not assumed)
     quality_breakdown: Dict[str, float]
     improvement_needed: bool
     improvement_areas: List[str]
@@ -64,6 +97,12 @@ class PromptAnalysis:
 
     # For test data generation
     suggested_test_categories: List[Dict[str, Any]]
+
+    # Multi-label typing (new)
+    multi_label_result: Optional[MultiLabelTypeResult] = None
+    
+    # Confidence information for score reliability
+    confidence_info: Optional[Dict[str, Any]] = None
 
 
 def extract_template_variables(text: str) -> List[str]:
@@ -208,7 +247,10 @@ def extract_key_terminology(text: str) -> List[str]:
         if len(term.split()) <= 4 and term not in terminology:
             terminology.append(term)
 
-    return terminology[:20]  # Limit to top 20
+    # Limit to prevent overwhelming output; 20 is sufficient for most prompts
+    # based on analysis of typical prompt terminology density
+    MAX_TERMINOLOGY = 20
+    return terminology[:MAX_TERMINOLOGY]
 
 
 def extract_sections(text: str) -> List[str]:
@@ -252,7 +294,10 @@ def extract_constraints(text: str) -> List[str]:
             if len(constraint) > 10 and constraint not in constraints:
                 constraints.append(constraint)
 
-    return constraints[:15]  # Limit to top 15
+    # Limit to most important constraints; 15 covers typical complex prompts
+    # while avoiding noise from false positive pattern matches
+    MAX_CONSTRAINTS = 15
+    return constraints[:MAX_CONSTRAINTS]
 
 
 def extract_role(text: str) -> Optional[str]:
@@ -265,173 +310,396 @@ def extract_role(text: str) -> Optional[str]:
         r'as (?:an? )?(expert|specialist|assistant|analyst|evaluator|generator)[^.!\n]*',
     ]
 
+    # Minimum role length to filter out false positives like "a"
+    MIN_ROLE_LENGTH = 5
+    # Maximum role length to prevent extracting entire paragraphs
+    MAX_ROLE_LENGTH = 200
+    
     for pattern in role_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             role = match.group(1).strip()
-            if len(role) > 5:
-                return role[:200]  # Limit length
+            if len(role) > MIN_ROLE_LENGTH:
+                return role[:MAX_ROLE_LENGTH]
 
     return None
 
 
 def detect_prompt_type(text: str) -> tuple[PromptType, List[PromptType]]:
-    """Detect the primary and secondary types of a prompt"""
+    """Detect the primary and secondary types of a prompt (legacy interface)"""
+    result = detect_prompt_type_multi_label(text)
+    secondary = [label.type for label in result.all_labels[1:4] if label.confidence >= 0.2]
+    return result.primary_type, [result.primary_type] + secondary
+
+
+def detect_prompt_type_multi_label(text: str, confidence_threshold: float = 0.15) -> MultiLabelTypeResult:
+    """
+    Detect prompt types using multi-label classification with confidence scores.
+
+    This improved version:
+    1. Returns confidence scores for each type (0-1)
+    2. Tracks which indicators were found
+    3. Handles multi-type prompts better
+    4. Provides type composition percentages
+
+    Args:
+        text: The prompt text to analyze
+        confidence_threshold: Minimum confidence to include a type (default 0.15)
+
+    Returns:
+        MultiLabelTypeResult with detailed classification
+    """
     text_lower = text.lower()
-    scores = {pt: 0 for pt in PromptType}
 
-    # Structured Output indicators
-    structured_indicators = [
-        'json', 'xml', 'format', 'schema', 'structure', 'field',
-        'return only', 'output format', 'response format', 'exactly'
-    ]
-    for indicator in structured_indicators:
-        if indicator in text_lower:
-            scores[PromptType.STRUCTURED_OUTPUT] += 2
+    # Define indicators with weights for each type
+    type_indicators = {
+        PromptType.STRUCTURED_OUTPUT: {
+            'high': ['```json', '```xml', 'output schema', 'json format', 'xml format'],
+            'medium': ['json', 'xml', 'format', 'schema', 'structure', 'field'],
+            'low': ['return only', 'output format', 'response format', 'exactly', 'strictly']
+        },
+        PromptType.ANALYTICAL: {
+            'high': ['rubric', 'scoring criteria', 'evaluation criteria', 'grading scale'],
+            'medium': ['score', 'rating', 'evaluate', 'assess', 'analyze', 'classify'],
+            'low': ['criteria', 'judgment', 'rate', 'rank', 'compare', 'quality']
+        },
+        PromptType.CONVERSATIONAL: {
+            'high': ['chatbot', 'conversation history', 'respond to user', 'user message'],
+            'medium': ['chat', 'conversation', 'assistant', 'dialogue', 'user'],
+            'low': ['help', 'friendly', 'natural', 'talk', 'communicate', 'respond']
+        },
+        PromptType.CREATIVE: {
+            'high': ['creative writing', 'write a story', 'compose a', 'narrative voice'],
+            'medium': ['write', 'create', 'story', 'creative', 'imagine', 'generate content'],
+            'low': ['compose', 'narrative', 'fiction', 'poetry', 'artistic', 'original']
+        },
+        PromptType.INSTRUCTIONAL: {
+            'high': ['step-by-step', 'step 1', 'follow these steps', 'instructions:'],
+            'medium': ['how to', 'guide', 'tutorial', 'instructions', 'procedure'],
+            'low': ['process', 'steps', 'method', 'approach', 'technique']
+        },
+        PromptType.EXTRACTION: {
+            'high': ['extract the following', 'parse the', 'identify all', 'find all'],
+            'medium': ['extract', 'parse', 'find', 'identify', 'locate', 'pull out'],
+            'low': ['get the', 'retrieve', 'summarize', 'key points', 'main ideas']
+        }
+    }
 
-    # Check for JSON/XML blocks
-    if re.search(r'```(?:json|xml)', text_lower) or re.search(r'\{\s*"[^"]+"\s*:', text):
-        scores[PromptType.STRUCTURED_OUTPUT] += 5
+    # Weights for indicator importance
+    weights = {'high': 3.0, 'medium': 1.5, 'low': 0.5}
 
-    # Analytical indicators
-    analytical_indicators = [
-        'score', 'rating', 'evaluate', 'assess', 'analyze', 'classify',
-        'rubric', 'criteria', 'judgment', 'rate', 'rank', 'compare'
-    ]
-    for indicator in analytical_indicators:
-        if indicator in text_lower:
-            scores[PromptType.ANALYTICAL] += 2
+    # Calculate scores and track indicators
+    type_scores: Dict[PromptType, float] = {}
+    type_indicators_found: Dict[PromptType, List[str]] = {pt: [] for pt in PromptType if pt != PromptType.HYBRID}
 
-    # Conversational indicators
-    conversational_indicators = [
-        'chat', 'conversation', 'respond to user', 'assistant', 'help',
-        'friendly', 'natural', 'dialogue', 'talk', 'communicate'
-    ]
-    for indicator in conversational_indicators:
-        if indicator in text_lower:
-            scores[PromptType.CONVERSATIONAL] += 2
+    for prompt_type, indicators in type_indicators.items():
+        score = 0.0
+        found = []
 
-    # Creative indicators
-    creative_indicators = [
-        'write', 'create', 'story', 'creative', 'imagine', 'generate content',
-        'compose', 'narrative', 'fiction', 'poetry', 'artistic'
-    ]
-    for indicator in creative_indicators:
-        if indicator in text_lower:
-            scores[PromptType.CREATIVE] += 2
+        for weight_level, indicator_list in indicators.items():
+            weight = weights[weight_level]
+            for indicator in indicator_list:
+                # Check for indicator (with word boundary awareness for short indicators)
+                if len(indicator) <= 4:
+                    # Short indicators need word boundaries
+                    if re.search(rf'\b{re.escape(indicator)}\b', text_lower):
+                        score += weight
+                        found.append(f"{indicator} ({weight_level})")
+                else:
+                    if indicator in text_lower:
+                        score += weight
+                        found.append(f"{indicator} ({weight_level})")
 
-    # Instructional indicators
-    instructional_indicators = [
-        'step-by-step', 'how to', 'guide', 'tutorial', 'instructions',
-        'process', 'procedure', 'follow these', 'steps:'
-    ]
-    for indicator in instructional_indicators:
-        if indicator in text_lower:
-            scores[PromptType.INSTRUCTIONAL] += 2
+        # Bonus for JSON/XML code blocks
+        if prompt_type == PromptType.STRUCTURED_OUTPUT:
+            if re.search(r'```(?:json|xml|yaml)', text_lower):
+                score += 5.0
+                found.append("code block (bonus)")
+            if re.search(r'\{\s*"[^"]+"\s*:', text):
+                score += 3.0
+                found.append("JSON object (bonus)")
 
-    # Extraction indicators
-    extraction_indicators = [
-        'extract', 'parse', 'find', 'identify', 'locate', 'pull out',
-        'get the', 'retrieve', 'summarize', 'key points'
-    ]
-    for indicator in extraction_indicators:
-        if indicator in text_lower:
-            scores[PromptType.EXTRACTION] += 2
+        # Bonus for numbered steps in instructional
+        if prompt_type == PromptType.INSTRUCTIONAL:
+            step_count = len(re.findall(r'^\s*\d+\.\s', text, re.MULTILINE))
+            if step_count >= 3:
+                score += 2.0 * min(step_count / 5, 1.0)
+                found.append(f"{step_count} numbered steps (bonus)")
 
-    # Sort by score
-    sorted_types = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        type_scores[prompt_type] = score
+        type_indicators_found[prompt_type] = found
+
+    # Normalize scores to confidence (0-1)
+    max_possible = 25.0  # Approximate max score
+    total_score = sum(type_scores.values())
+
+    labels = []
+    for prompt_type, score in type_scores.items():
+        # Confidence based on both absolute score and relative proportion
+        absolute_conf = min(1.0, score / max_possible)
+        relative_conf = score / total_score if total_score > 0 else 0
+
+        # Blend absolute and relative confidence
+        confidence = (absolute_conf * 0.6 + relative_conf * 0.4)
+
+        if confidence >= confidence_threshold:
+            labels.append(PromptTypeLabel(
+                type=prompt_type,
+                confidence=round(confidence, 3),
+                indicators_found=type_indicators_found[prompt_type]
+            ))
+
+    # Sort by confidence
+    labels.sort(key=lambda x: x.confidence, reverse=True)
 
     # Determine primary type
-    primary = sorted_types[0][0]
-    primary_score = sorted_types[0][1]
+    if labels:
+        primary = labels[0]
+    else:
+        primary = PromptTypeLabel(type=PromptType.HYBRID, confidence=0.5, indicators_found=[])
+        labels = [primary]
 
-    # If top score is very low, it's hybrid
-    if primary_score < 3:
-        primary = PromptType.HYBRID
+    # Check if multi-type (multiple high-confidence types)
+    high_conf_types = [l for l in labels if l.confidence >= 0.4]
+    is_multi_type = len(high_conf_types) >= 2
 
-    # Collect secondary types (score > 3)
-    secondary = [pt for pt, score in sorted_types[1:4] if score >= 3]
+    # If multi-type and primary isn't dramatically higher, consider it HYBRID
+    if is_multi_type and len(labels) >= 2:
+        if labels[0].confidence - labels[1].confidence < 0.15:
+            # Close competition - might be hybrid
+            primary = PromptTypeLabel(
+                type=PromptType.HYBRID,
+                confidence=labels[0].confidence,
+                indicators_found=labels[0].indicators_found + labels[1].indicators_found[:3]
+            )
 
-    # If multiple high scores, might be hybrid
-    if len([s for _, s in sorted_types[:3] if s >= 5]) > 1:
-        all_types = [primary] + secondary
-        return PromptType.HYBRID, all_types
+    # Calculate type composition (how much of each type)
+    type_composition = {}
+    total_conf = sum(l.confidence for l in labels)
+    for label in labels:
+        type_composition[label.type.value] = round(label.confidence / total_conf, 3) if total_conf > 0 else 0
 
-    return primary, [primary] + secondary
+    return MultiLabelTypeResult(
+        primary_type=primary.type,
+        primary_confidence=primary.confidence,
+        all_labels=labels,
+        is_multi_type=is_multi_type,
+        type_composition=type_composition
+    )
 
 
-def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str, float]]:
-    """Calculate quality score and breakdown"""
+def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str, float], Dict[str, Any]]:
+    """
+    Calculate quality score and breakdown using EARNED scoring (start at 0, not 5).
+    
+    Returns:
+        tuple: (overall_score, breakdown_dict, confidence_info)
+        
+    Scoring Philosophy:
+        - Scores are EARNED, not assumed (start at 0, add points for quality indicators)
+        - Each dimension has clear criteria with documented thresholds
+        - Confidence intervals provided based on how many indicators were found
+    """
     breakdown = {}
+    confidence_info = {"indicators_found": {}, "confidence_level": "low"}
     text_lower = text.lower()
     word_count = len(text.split())
-
-    # Structure score (0-10)
-    structure_score = 5.0
-    if len(dna.sections) >= 3:
-        structure_score += 2
-    if len(dna.sections) >= 5:
-        structure_score += 1
+    
+    # ========================================================================
+    # STRUCTURE SCORE (0-10) - Earn points for organizational quality
+    # ========================================================================
+    # Thresholds documented for reproducibility
+    SECTION_THRESHOLD_GOOD = 3  # 3+ sections indicates good organization
+    SECTION_THRESHOLD_EXCELLENT = 5  # 5+ sections indicates comprehensive structure
+    
+    structure_score = 0.0
+    structure_indicators = []
+    
+    # Baseline: Prompt exists and has content (2 points)
+    if word_count >= 10:  # At least 10 words
+        structure_score += 2.0
+        structure_indicators.append("has_content")
+    
+    # Sections indicate organization (up to 3 points)
+    if len(dna.sections) >= SECTION_THRESHOLD_EXCELLENT:
+        structure_score += 3.0
+        structure_indicators.append(f"excellent_sections({len(dna.sections)})")
+    elif len(dna.sections) >= SECTION_THRESHOLD_GOOD:
+        structure_score += 2.0
+        structure_indicators.append(f"good_sections({len(dna.sections)})")
+    elif len(dna.sections) >= 1:
+        structure_score += 1.0
+        structure_indicators.append(f"some_sections({len(dna.sections)})")
+    
+    # Role definition shows intentional design (1.5 points)
     if dna.role:
-        structure_score += 1
-    if dna.output_format:
-        structure_score += 1
-    # Bonus for structural markers
-    if any(marker in text for marker in ['##', '**', '###', '---', '===', '```']):
+        structure_score += 1.5
+        structure_indicators.append("has_role")
+    
+    # Output format indicates structured thinking (1.5 points)
+    if dna.output_format and dna.output_format != "plain":
+        structure_score += 1.5
+        structure_indicators.append(f"has_output_format({dna.output_format})")
+    
+    # Structural markers show formatting effort (up to 1.5 points)
+    markdown_markers = ['##', '###', '**', '---', '===', '```']
+    markers_found = sum(1 for m in markdown_markers if m in text)
+    if markers_found >= 3:
+        structure_score += 1.5
+        structure_indicators.append(f"rich_formatting({markers_found})")
+    elif markers_found >= 1:
         structure_score += 0.5
-    if re.search(r'^\s*[\d]+\.|\*\s|-\s', text, re.MULTILINE):
-        structure_score += 0.5
-    breakdown['structure'] = min(10, structure_score)
-
-    # Clarity score (0-10)
-    clarity_score = 5.0
-    if 100 < word_count < 2000:
-        clarity_score += 1
-    if len(dna.constraints) > 0:
-        clarity_score += 1
-    if dna.scoring_scale:
-        clarity_score += 1
-    # Check for clear instructions
-    if any(word in text_lower for word in ['must', 'should', 'always', 'never']):
-        clarity_score += 1
-    if '1.' in text or 'step 1' in text_lower:
-        clarity_score += 1
-    # Bonus for explicit task definition
-    if any(phrase in text_lower for phrase in ['your task', 'you will', 'you are']):
+        structure_indicators.append(f"some_formatting({markers_found})")
+    
+    breakdown['structure'] = min(10.0, structure_score)
+    confidence_info["indicators_found"]["structure"] = structure_indicators
+    
+    # ========================================================================
+    # CLARITY SCORE (0-10) - Earn points for instruction quality
+    # ========================================================================
+    OPTIMAL_LENGTH_MIN = 50  # Too short = likely incomplete
+    OPTIMAL_LENGTH_MAX = 3000  # Too long = hard to follow
+    CONSTRAINT_THRESHOLD_GOOD = 2  # 2+ constraints shows attention to boundaries
+    
+    clarity_score = 0.0
+    clarity_indicators = []
+    
+    # Length in optimal range (2 points)
+    if OPTIMAL_LENGTH_MIN <= word_count <= OPTIMAL_LENGTH_MAX:
+        clarity_score += 2.0
+        clarity_indicators.append(f"optimal_length({word_count})")
+    elif word_count > OPTIMAL_LENGTH_MAX:
+        clarity_score += 1.0  # Partial credit for comprehensive but verbose
+        clarity_indicators.append(f"verbose({word_count})")
+    elif word_count >= 20:
         clarity_score += 0.5
-    breakdown['clarity'] = min(10, clarity_score)
-
-    # Completeness score (0-10)
-    completeness_score = 5.0
+        clarity_indicators.append(f"short({word_count})")
+    
+    # Explicit constraints show clear boundaries (up to 2 points)
+    if len(dna.constraints) >= 5:
+        clarity_score += 2.0
+        clarity_indicators.append(f"many_constraints({len(dna.constraints)})")
+    elif len(dna.constraints) >= CONSTRAINT_THRESHOLD_GOOD:
+        clarity_score += 1.5
+        clarity_indicators.append(f"good_constraints({len(dna.constraints)})")
+    elif len(dna.constraints) >= 1:
+        clarity_score += 0.5
+        clarity_indicators.append(f"some_constraints({len(dna.constraints)})")
+    
+    # Scoring rubric for analytical prompts (1.5 points)
+    if dna.scoring_scale:
+        clarity_score += 1.5
+        clarity_indicators.append("has_scoring_scale")
+    
+    # Directive language shows clear expectations (up to 2 points)
+    directive_words = ['must', 'should', 'always', 'never', 'required', 'ensure']
+    directives_found = sum(1 for w in directive_words if w in text_lower)
+    if directives_found >= 3:
+        clarity_score += 2.0
+        clarity_indicators.append(f"strong_directives({directives_found})")
+    elif directives_found >= 1:
+        clarity_score += 1.0
+        clarity_indicators.append(f"some_directives({directives_found})")
+    
+    # Step-by-step or numbered instructions (1.5 points)
+    has_steps = bool(re.search(r'step\s*\d|^\s*\d+\.', text_lower, re.MULTILINE))
+    if has_steps:
+        clarity_score += 1.5
+        clarity_indicators.append("has_steps")
+    
+    # Task definition (1 point)
+    task_phrases = ['your task', 'you will', 'your goal', 'your job', 'you must']
+    if any(phrase in text_lower for phrase in task_phrases):
+        clarity_score += 1.0
+        clarity_indicators.append("explicit_task")
+    
+    breakdown['clarity'] = min(10.0, clarity_score)
+    confidence_info["indicators_found"]["clarity"] = clarity_indicators
+    
+    # ========================================================================
+    # COMPLETENESS SCORE (0-10) - Earn points for comprehensive coverage
+    # ========================================================================
+    completeness_score = 0.0
+    completeness_indicators = []
+    
+    # Role definition (2 points)
     if dna.role:
-        completeness_score += 1
-    if dna.output_format:
-        completeness_score += 1
+        completeness_score += 2.0
+        completeness_indicators.append("has_role")
+    
+    # Output format specification (2 points)
+    if dna.output_format and dna.output_format != "plain":
+        completeness_score += 1.5
+        completeness_indicators.append(f"output_format({dna.output_format})")
     if dna.output_schema:
-        completeness_score += 1
+        completeness_score += 1.5
+        completeness_indicators.append("has_schema")
+    
+    # Constraints and rules (1.5 points)
     if len(dna.constraints) >= 3:
-        completeness_score += 1
-    if len(dna.template_variables) > 0:
-        completeness_score += 1
-    # Bonus for input/output specification
-    if any(word in text_lower for word in ['input', 'output', 'return', 'respond']):
+        completeness_score += 1.5
+        completeness_indicators.append(f"sufficient_constraints({len(dna.constraints)})")
+    elif len(dna.constraints) >= 1:
         completeness_score += 0.5
-    breakdown['completeness'] = min(10, completeness_score)
-
-    # Output format score (0-10)
-    format_score = 5.0
-    if dna.output_format:
-        format_score += 2
+        completeness_indicators.append(f"minimal_constraints({len(dna.constraints)})")
+    
+    # Template variables show input awareness (1.5 points)
+    if len(dna.template_variables) > 0:
+        completeness_score += 1.5
+        completeness_indicators.append(f"template_vars({len(dna.template_variables)})")
+    
+    # Input/output specification (1.5 points)
+    io_words = ['input', 'output', 'return', 'respond', 'provide', 'generate']
+    io_found = sum(1 for w in io_words if w in text_lower)
+    if io_found >= 2:
+        completeness_score += 1.5
+        completeness_indicators.append(f"io_spec({io_found})")
+    elif io_found >= 1:
+        completeness_score += 0.5
+        completeness_indicators.append(f"partial_io({io_found})")
+    
+    breakdown['completeness'] = min(10.0, completeness_score)
+    confidence_info["indicators_found"]["completeness"] = completeness_indicators
+    
+    # ========================================================================
+    # OUTPUT FORMAT SCORE (0-10) - Earn points for format specification
+    # ========================================================================
+    format_score = 0.0
+    format_indicators = []
+    
+    # Explicit format declaration (3 points)
+    if dna.output_format and dna.output_format != "plain":
+        format_score += 3.0
+        format_indicators.append(f"declared_format({dna.output_format})")
+    
+    # Schema/example provided (3 points)
     if dna.output_schema:
-        format_score += 2
-    if 'example' in text_lower or 'sample' in text_lower:
-        format_score += 1
-    # Bonus for format specifications
-    if any(fmt in text_lower for fmt in ['json', 'xml', 'markdown', 'yaml']):
-        format_score += 0.5
-    breakdown['output_format'] = min(10, format_score)
-
-    # Calculate overall
+        format_score += 3.0
+        format_indicators.append("has_schema")
+    
+    # Example output shown (2 points)
+    example_patterns = ['example:', 'sample:', 'e.g.', 'for example', '```']
+    examples_found = sum(1 for p in example_patterns if p in text_lower)
+    if examples_found >= 2:
+        format_score += 2.0
+        format_indicators.append(f"has_examples({examples_found})")
+    elif examples_found >= 1:
+        format_score += 1.0
+        format_indicators.append(f"partial_examples({examples_found})")
+    
+    # Format specification keywords (2 points)
+    format_keywords = ['json', 'xml', 'markdown', 'yaml', 'csv', 'structured']
+    format_kw_found = sum(1 for f in format_keywords if f in text_lower)
+    if format_kw_found >= 1:
+        format_score += min(2.0, format_kw_found * 0.5)
+        format_indicators.append(f"format_keywords({format_kw_found})")
+    
+    breakdown['output_format'] = min(10.0, format_score)
+    confidence_info["indicators_found"]["output_format"] = format_indicators
+    
+    # ========================================================================
+    # CALCULATE OVERALL SCORE WITH CONFIDENCE
+    # ========================================================================
     weights = {
         'structure': 0.25,
         'clarity': 0.25,
@@ -439,8 +707,22 @@ def calculate_quality_score(text: str, dna: PromptDNA) -> tuple[float, Dict[str,
         'output_format': 0.25
     }
     overall = sum(breakdown[k] * weights[k] for k in weights)
+    
+    # Calculate confidence based on indicators found
+    total_indicators = sum(len(v) for v in confidence_info["indicators_found"].values())
+    if total_indicators >= 12:
+        confidence_info["confidence_level"] = "high"
+        confidence_info["confidence_note"] = "Many quality signals detected"
+    elif total_indicators >= 6:
+        confidence_info["confidence_level"] = "medium"
+        confidence_info["confidence_note"] = "Moderate quality signals detected"
+    else:
+        confidence_info["confidence_level"] = "low"
+        confidence_info["confidence_note"] = "Few quality signals detected; score may be less reliable"
+    
+    confidence_info["total_indicators"] = total_indicators
 
-    return round(overall, 1), breakdown
+    return round(overall, 1), breakdown, confidence_info
 
 
 def determine_improvement_areas(
@@ -788,19 +1070,33 @@ def analyze_prompt(text: str) -> PromptAnalysis:
         role=role
     )
 
-    # Detect prompt type
-    primary_type, all_types = detect_prompt_type(text)
+    # Detect prompt type using multi-label classification
+    multi_label_result = detect_prompt_type_multi_label(text)
+    primary_type = multi_label_result.primary_type
+    all_types = [label.type for label in multi_label_result.all_labels]
 
-    # Calculate quality
-    quality_score, quality_breakdown = calculate_quality_score(text, dna)
+    # Calculate quality with confidence information
+    quality_score, quality_breakdown, confidence_info = calculate_quality_score(text, dna)
 
     # Determine improvements
     improvement_needed, improvement_areas, strengths = determine_improvement_areas(
         quality_breakdown, dna, primary_type
     )
 
-    # Generate eval dimensions
+    # Generate eval dimensions (consider multiple types for multi-type prompts)
     eval_dimensions = generate_eval_dimensions(primary_type, dna)
+
+    # For multi-type prompts, add dimensions from secondary types
+    if multi_label_result.is_multi_type:
+        secondary_types = multi_label_result.get_secondary_types(threshold=0.35)
+        for secondary_type in secondary_types[:2]:  # Max 2 secondary types
+            secondary_dims = generate_eval_dimensions(secondary_type, dna)
+            # Add unique dimensions not already present
+            existing_names = {d["name"] for d in eval_dimensions}
+            for dim in secondary_dims:
+                if dim["name"] not in existing_names:
+                    dim["from_secondary_type"] = secondary_type.value
+                    eval_dimensions.append(dim)
 
     # Generate test categories
     test_categories = generate_test_categories(primary_type, dna)
@@ -815,13 +1111,15 @@ def analyze_prompt(text: str) -> PromptAnalysis:
         improvement_areas=improvement_areas,
         strengths=strengths,
         suggested_eval_dimensions=eval_dimensions,
-        suggested_test_categories=test_categories
+        suggested_test_categories=test_categories,
+        multi_label_result=multi_label_result,
+        confidence_info=confidence_info
     )
 
 
 def analysis_to_dict(analysis: PromptAnalysis) -> Dict[str, Any]:
     """Convert PromptAnalysis to dictionary for JSON serialization"""
-    return {
+    result = {
         "prompt_type": analysis.prompt_type.value,
         "prompt_types_detected": [pt.value for pt in analysis.prompt_types_detected],
         "dna": {
@@ -842,3 +1140,396 @@ def analysis_to_dict(analysis: PromptAnalysis) -> Dict[str, Any]:
         "suggested_eval_dimensions": analysis.suggested_eval_dimensions,
         "suggested_test_categories": analysis.suggested_test_categories
     }
+
+    # Add multi-label typing results if available
+    if analysis.multi_label_result:
+        mlr = analysis.multi_label_result
+        result["multi_label_typing"] = {
+            "primary_type": mlr.primary_type.value,
+            "primary_confidence": mlr.primary_confidence,
+            "is_multi_type": mlr.is_multi_type,
+            "type_composition": mlr.type_composition,
+            "all_labels": [
+                {
+                    "type": label.type.value,
+                    "confidence": label.confidence,
+                    "indicators_found": label.indicators_found,
+                    "indicator_count": label.indicator_count
+                }
+                for label in mlr.all_labels
+            ]
+        }
+    
+    # Add confidence information for score reliability
+    if analysis.confidence_info:
+        result["confidence_info"] = {
+            "confidence_level": analysis.confidence_info.get("confidence_level", "unknown"),
+            "confidence_note": analysis.confidence_info.get("confidence_note", ""),
+            "total_indicators": analysis.confidence_info.get("total_indicators", 0),
+            "scoring_method": "earned",  # Document that we use earned scoring (start at 0)
+            "score_interpretation": _get_score_interpretation(analysis.quality_score)
+        }
+
+    return result
+
+
+def _get_score_interpretation(score: float) -> str:
+    """Provide human-readable interpretation of quality score"""
+    if score >= 8.5:
+        return "Production-ready: Comprehensive, well-structured, follows best practices"
+    elif score >= 7.0:
+        return "Good quality: Solid foundation with minor improvements possible"
+    elif score >= 5.0:
+        return "Functional: Works but has significant room for improvement"
+    elif score >= 3.0:
+        return "Weak: Missing critical elements, needs substantial work"
+    else:
+        return "Poor: Fundamentally incomplete or flawed, requires major revision"
+
+
+# =============================================================================
+# SECTION: SEMANTIC VALIDATION - Detect contradictions, vague terms, issues
+# =============================================================================
+
+# Vague terms that should be made specific
+# Note: Common rubric terms (acceptable, good, poor) are excluded as they're often
+# intentionally used in scoring contexts with clear ordinal meaning
+VAGUE_TERMS = [
+    ("good quality", "Specify measurable quality thresholds (e.g., '≥90% accuracy')"),
+    ("relevant information", "Define relevance criteria explicitly"),
+    ("suitable for", "Specify what makes something 'suitable'"),
+    ("properly formatted", "Define proper format with specific examples"),
+    ("correctly implemented", "Add verification criteria for correctness"),
+    ("reasonable time", "Quantify what is 'reasonable' (e.g., 'within 5 seconds')"),
+    ("adequate coverage", "Specify minimum coverage requirements"),
+    ("as needed", "Define triggers and conditions explicitly"),
+    ("when necessary", "Specify the conditions that make it necessary"),
+    ("if applicable", "List the cases where it applies"),
+    ("etc.", "List all items explicitly instead of using 'etc.'"),
+    ("and so on", "Enumerate all cases explicitly"),
+    ("similar to", "Define similarity criteria"),
+    ("optimal solution", "Specify optimization criteria and constraints"),
+    ("efficient enough", "Define efficiency metrics"),
+]
+
+# Contradiction patterns to detect
+# These are tuned to avoid false positives from normal rule lists
+CONTRADICTION_PATTERNS = [
+    # Always X and Never X about the SAME thing (not just nearby)
+    # Requires same subject to be a real contradiction
+    (r'\b(always|must always)\s+(\w+)\b[^.]*\b(never|must never|do not)\s+\2\b', "Direct contradiction: same action marked as 'always' and 'never'"),
+    (r'\b(never|must never)\s+(\w+)\b[^.]*\b(always|must always)\s+\2\b', "Direct contradiction: same action marked as 'never' and 'always'"),
+    # All X and No X about the same thing
+    (r'\b(all|every)\s+(\w+)\b[^.]*\b(no|none of the)\s+\2\b', "Contradiction: 'all X' and 'no X'"),
+    # Specific numbers that directly conflict
+    (r'(?:must be|exactly|precisely)\s+(\d+)\b[^.]*(?:must be|exactly|precisely)\s+(?!\1)(\d+)\b', "Numerical contradiction: conflicting exact values"),
+    # Include and exclude same thing
+    (r'\b(include|add)\s+(\w+)\b[^.]*\b(exclude|remove|omit)\s+\2\b', "Contradiction: include and exclude same item"),
+]
+
+# Ambiguity patterns
+AMBIGUITY_PATTERNS = [
+    (r'\b(it|this|that|these|those)\b\s+(?:should|must|will|can)', "Ambiguous pronoun reference - clarify what 'it/this/that' refers to"),
+    (r'\b(some|many|few|several)\b', "Vague quantifier - use specific numbers or percentages"),
+    (r'\b(soon|quickly|fast|slow|long|short)\b', "Vague time/speed reference - use specific durations"),
+    (r'\b(large|small|big|little|high|low)\b\s+(?:amount|number|value)', "Vague magnitude - use specific thresholds"),
+]
+
+
+@dataclass
+class SemanticIssue:
+    """A semantic issue found in the prompt"""
+    severity: str  # "critical", "warning", "suggestion"
+    category: str  # "contradiction", "vague_term", "ambiguity", "missing_spec"
+    description: str
+    location: str  # The text snippet where issue was found
+    recommendation: str  # Specific fix recommendation
+
+
+@dataclass
+class SemanticValidationResult:
+    """Result of semantic validation"""
+    is_valid: bool  # True if no critical issues
+    critical_issues: List[SemanticIssue]
+    warnings: List[SemanticIssue]
+    suggestions: List[SemanticIssue]
+    overall_semantic_score: float  # 0-100
+    actionable_fixes: List[Dict[str, str]]  # Priority-ordered fixes
+
+
+def validate_prompt_semantics(prompt_text: str) -> SemanticValidationResult:
+    """
+    Perform semantic validation on a prompt.
+
+    Checks for:
+    1. Contradictions (always vs never, etc.)
+    2. Vague terms that need specificity
+    3. Ambiguous references
+    4. Missing specifications
+
+    Returns actionable recommendations to fix issues.
+    """
+    issues: List[SemanticIssue] = []
+    prompt_lower = prompt_text.lower()
+
+    # 1. Check for vague terms
+    for vague_term, recommendation in VAGUE_TERMS:
+        if vague_term in prompt_lower:
+            # Find the context
+            pattern = re.compile(rf'.{{0,50}}\b{re.escape(vague_term)}\b.{{0,50}}', re.IGNORECASE)
+            matches = pattern.findall(prompt_text)
+            for match in matches[:2]:  # Limit to 2 instances per term
+                issues.append(SemanticIssue(
+                    severity="warning",
+                    category="vague_term",
+                    description=f"Vague term '{vague_term}' found",
+                    location=match.strip(),
+                    recommendation=recommendation
+                ))
+
+    # 2. Check for contradictions
+    for pattern, description in CONTRADICTION_PATTERNS:
+        matches = re.findall(pattern, prompt_lower, re.IGNORECASE | re.DOTALL)
+        if matches:
+            # Find actual text
+            context_match = re.search(pattern, prompt_text, re.IGNORECASE | re.DOTALL)
+            if context_match:
+                issues.append(SemanticIssue(
+                    severity="critical",
+                    category="contradiction",
+                    description=description,
+                    location=context_match.group(0)[:100],
+                    recommendation="Resolve the contradiction by choosing one approach or adding conditional logic"
+                ))
+
+    # 3. Check for ambiguous references
+    for pattern, description in AMBIGUITY_PATTERNS:
+        matches = re.finditer(pattern, prompt_text, re.IGNORECASE)
+        for match in list(matches)[:3]:  # Limit to 3 per pattern
+            start = max(0, match.start() - 30)
+            end = min(len(prompt_text), match.end() + 30)
+            context = prompt_text[start:end]
+            issues.append(SemanticIssue(
+                severity="warning",
+                category="ambiguity",
+                description=description,
+                location=context.strip(),
+                recommendation="Replace with specific, measurable criteria"
+            ))
+
+    # 4. Check for missing critical specifications based on prompt type
+    missing_specs = _check_missing_specifications(prompt_text)
+    for spec in missing_specs:
+        issues.append(SemanticIssue(
+            severity=spec["severity"],
+            category="missing_spec",
+            description=spec["description"],
+            location="[Not found in prompt]",
+            recommendation=spec["recommendation"]
+        ))
+
+    # Categorize issues
+    critical = [i for i in issues if i.severity == "critical"]
+    warnings = [i for i in issues if i.severity == "warning"]
+    suggestions = [i for i in issues if i.severity == "suggestion"]
+
+    # Calculate semantic score
+    # Start at 100, deduct for issues
+    score = 100.0
+    score -= len(critical) * 20  # Critical issues are severe
+    score -= len(warnings) * 5   # Warnings are moderate
+    score -= len(suggestions) * 2  # Suggestions are minor
+    score = max(0, score)
+
+    # Generate prioritized actionable fixes
+    actionable_fixes = _generate_actionable_fixes(critical + warnings + suggestions)
+
+    return SemanticValidationResult(
+        is_valid=len(critical) == 0,
+        critical_issues=critical,
+        warnings=warnings,
+        suggestions=suggestions,
+        overall_semantic_score=score,
+        actionable_fixes=actionable_fixes
+    )
+
+
+def _check_missing_specifications(prompt_text: str) -> List[Dict[str, str]]:
+    """Check for missing critical specifications based on prompt content."""
+    missing = []
+    prompt_lower = prompt_text.lower()
+
+    # Check if scoring is mentioned but no scale defined
+    if any(word in prompt_lower for word in ["score", "rate", "rating", "evaluate"]):
+        if not re.search(r'\d+\s*(?:to|-)\s*\d+|\d+\s*point|scale|1-5|1-10|0-100', prompt_lower):
+            missing.append({
+                "severity": "warning",
+                "description": "Scoring mentioned but no scale defined",
+                "recommendation": "Add explicit scoring scale (e.g., '1-5 where 5 is best')"
+            })
+
+    # Check if JSON output expected but no schema provided
+    if "json" in prompt_lower:
+        if not re.search(r'\{[^}]*"[^"]+"\s*:', prompt_text):
+            missing.append({
+                "severity": "warning",
+                "description": "JSON output expected but no schema example provided",
+                "recommendation": "Add a JSON schema example showing expected structure"
+            })
+
+    # Check for role definition
+    if not any(phrase in prompt_lower for phrase in ["you are", "act as", "your role", "as a", "as an"]):
+        missing.append({
+            "severity": "suggestion",
+            "description": "No explicit role definition found",
+            "recommendation": "Add a clear role definition (e.g., 'You are a helpful assistant that...')"
+        })
+
+    # Check for output format specification
+    if not any(phrase in prompt_lower for phrase in ["format", "output", "respond", "return", "provide"]):
+        missing.append({
+            "severity": "warning",
+            "description": "No output format specification found",
+            "recommendation": "Specify the expected output format (JSON, markdown, plain text, etc.)"
+        })
+
+    # Check for constraints
+    if not any(phrase in prompt_lower for phrase in ["must", "should", "do not", "never", "always", "required"]):
+        missing.append({
+            "severity": "suggestion",
+            "description": "No explicit constraints or requirements found",
+            "recommendation": "Add constraints to define boundaries (e.g., 'Do not include personal opinions')"
+        })
+
+    return missing
+
+
+def _generate_actionable_fixes(issues: List[SemanticIssue]) -> List[Dict[str, str]]:
+    """Generate prioritized, actionable fixes from issues."""
+    fixes = []
+
+    # Group by category and prioritize
+    critical_fixes = [i for i in issues if i.severity == "critical"]
+    warning_fixes = [i for i in issues if i.severity == "warning"]
+    suggestion_fixes = [i for i in issues if i.severity == "suggestion"]
+
+    priority = 1
+
+    # Critical fixes first
+    for issue in critical_fixes[:5]:  # Top 5 critical
+        fixes.append({
+            "priority": priority,
+            "severity": "CRITICAL",
+            "issue": issue.description,
+            "location": issue.location[:80] + "..." if len(issue.location) > 80 else issue.location,
+            "fix": issue.recommendation,
+            "impact": "High - Must fix before deployment"
+        })
+        priority += 1
+
+    # Then warnings
+    for issue in warning_fixes[:5]:  # Top 5 warnings
+        fixes.append({
+            "priority": priority,
+            "severity": "WARNING",
+            "issue": issue.description,
+            "location": issue.location[:80] + "..." if len(issue.location) > 80 else issue.location,
+            "fix": issue.recommendation,
+            "impact": "Medium - Should fix for better reliability"
+        })
+        priority += 1
+
+    # Then suggestions
+    for issue in suggestion_fixes[:3]:  # Top 3 suggestions
+        fixes.append({
+            "priority": priority,
+            "severity": "SUGGESTION",
+            "issue": issue.description,
+            "location": issue.location[:80] + "..." if len(issue.location) > 80 else issue.location,
+            "fix": issue.recommendation,
+            "impact": "Low - Nice to have"
+        })
+        priority += 1
+
+    return fixes
+
+
+def get_enhanced_analysis(prompt_text: str) -> Dict[str, Any]:
+    """
+    Get enhanced prompt analysis including semantic validation.
+
+    This combines the standard analysis with semantic validation
+    to provide a complete quality assessment.
+    """
+    # Run standard analysis
+    standard_analysis = analyze_prompt(prompt_text)
+    standard_dict = analysis_to_dict(standard_analysis)
+
+    # Run semantic validation
+    semantic_result = validate_prompt_semantics(prompt_text)
+
+    # Combine results
+    standard_dict["semantic_validation"] = {
+        "is_valid": semantic_result.is_valid,
+        "semantic_score": semantic_result.overall_semantic_score,
+        "critical_issues_count": len(semantic_result.critical_issues),
+        "warnings_count": len(semantic_result.warnings),
+        "suggestions_count": len(semantic_result.suggestions),
+        "critical_issues": [
+            {
+                "category": i.category,
+                "description": i.description,
+                "location": i.location[:100],
+                "recommendation": i.recommendation
+            }
+            for i in semantic_result.critical_issues
+        ],
+        "warnings": [
+            {
+                "category": i.category,
+                "description": i.description,
+                "recommendation": i.recommendation
+            }
+            for i in semantic_result.warnings[:5]  # Limit to 5
+        ],
+        "actionable_fixes": semantic_result.actionable_fixes
+    }
+
+    # Compute combined quality score
+    # Weight: 50% structure/clarity, 50% semantic (balanced approach)
+    # Semantic validation is equally important as structural quality
+    structural_score = standard_analysis.quality_score
+    semantic_score = semantic_result.overall_semantic_score / 10  # Convert to 0-10
+
+    # Bonus for having BOTH good structure AND good semantics
+    if structural_score >= 6.0 and semantic_score >= 8.0:
+        bonus = 0.5  # Bonus for well-rounded prompt
+    else:
+        bonus = 0.0
+
+    combined_score = (structural_score * 0.5) + (semantic_score * 0.5) + bonus
+
+    standard_dict["combined_quality_score"] = round(combined_score, 2)
+    standard_dict["quality_assessment"] = {
+        "structural_score": structural_score,
+        "semantic_score": round(semantic_score, 2),
+        "combined_score": round(combined_score, 2),
+        "is_production_ready": combined_score >= 7.5 and semantic_result.is_valid,
+        "recommendation": _get_quality_recommendation(combined_score, semantic_result.is_valid)
+    }
+
+    return standard_dict
+
+
+def _get_quality_recommendation(score: float, is_semantically_valid: bool) -> str:
+    """Get actionable recommendation based on quality assessment."""
+    if not is_semantically_valid:
+        return "BLOCK: Resolve critical semantic issues before deployment"
+    elif score >= 8.5:
+        return "DEPLOY: Prompt is production-ready"
+    elif score >= 7.0:
+        return "REVIEW: Minor improvements recommended before deployment"
+    elif score >= 5.0:
+        return "IMPROVE: Address key issues before deployment"
+    else:
+        return "REWRITE: Prompt needs significant revision"

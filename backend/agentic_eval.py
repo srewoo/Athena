@@ -1,5 +1,22 @@
 """
-Agentic Eval Prompt Generator for Athena
+Agentic Eval Prompt Generator for Athena (V1)
+
+DEPRECATION WARNING:
+====================
+This module is DEPRECATED. Use eval_generator_v3.py instead.
+V3 provides:
+- 20 best practices from Anthropic engineering
+- Better calibration examples
+- More robust self-validation
+- Production metrics tracking
+
+To migrate: Replace `from agentic_eval import ...` with 
+           `from eval_generator_v3 import generate_gold_standard_eval_prompt`
+
+This file is kept for backward compatibility only.
+
+---
+
 Implements multi-step, self-validating evaluation prompt generation with thinking model support.
 
 Workflow:
@@ -9,6 +26,7 @@ Workflow:
 4. Self-Test - Validate criteria would actually catch bad outputs
 5. Refine - Add missing criteria if gaps found
 """
+import warnings
 import re
 import json
 import logging
@@ -665,7 +683,16 @@ async def agentic_eval_generation(
     """
     Main agentic eval generation function.
     Orchestrates the multi-step workflow with thinking model support.
+    
+    DEPRECATED: Use eval_generator_v3.generate_gold_standard_eval_prompt() instead.
     """
+    warnings.warn(
+        "agentic_eval_generation() is deprecated. "
+        "Use eval_generator_v3.generate_gold_standard_eval_prompt() instead. "
+        "V3 includes 20 best practices, better calibration, and production metrics.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     steps_taken = []
     analysis_model = thinking_model or model_name
 

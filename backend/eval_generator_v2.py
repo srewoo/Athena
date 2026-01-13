@@ -1,9 +1,24 @@
 """
 Advanced Evaluator Prompt Generator for Athena (V2)
 
-This is the core feature - generates best-in-class evaluation prompts based on system prompts.
+DEPRECATION WARNING:
+====================
+This module is DEPRECATED. Use eval_generator_v3.py instead.
+V3 provides:
+- All V2 features plus 20 additional best practices from Anthropic
+- Better calibration examples with boundary cases
+- Auto-fail conditions with severity levels
+- Production metrics tracking for eval quality monitoring
+- Self-validation with adversarial test cases
 
-Key improvements:
+To migrate: Replace `from eval_generator_v2 import generate_best_eval_prompt` with 
+           `from eval_generator_v3 import generate_gold_standard_eval_prompt`
+
+This file is kept for backward compatibility only.
+
+---
+
+Key features (now in V3 with improvements):
 1. Deep semantic analysis of system prompt intent
 2. Comprehensive failure mode taxonomy
 3. Multi-dimensional evaluation with weighted scoring
@@ -13,6 +28,7 @@ Key improvements:
 7. Domain-specific evaluation patterns
 8. Evaluation consistency checks
 """
+import warnings
 import re
 import json
 import logging
@@ -1307,7 +1323,16 @@ async def generate_best_eval_prompt(
     2. Have clear, unambiguous rubrics
     3. Include calibration examples
     4. Are self-validated for quality
+    
+    DEPRECATED: Use eval_generator_v3.generate_gold_standard_eval_prompt() instead.
     """
+    warnings.warn(
+        "generate_best_eval_prompt() from eval_generator_v2 is deprecated. "
+        "Use eval_generator_v3.generate_gold_standard_eval_prompt() instead. "
+        "V3 includes 20 best practices, auto-fail conditions, and production metrics.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     analysis_model = thinking_model or model_name
     steps_taken = []
 

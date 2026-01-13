@@ -1,8 +1,11 @@
 """
-Advanced Evaluator Prompt Generator for Athena (V3)
+Advanced Evaluator Prompt Generator for Athena (V3) - CANONICAL VERSION
 
-This is the gold-standard eval prompt generator incorporating all 20 best practices:
+This is the gold-standard eval prompt generator incorporating all 20 best practices.
+This is the RECOMMENDED version - V1 (agentic_eval.py) and V2 (eval_generator_v2.py) 
+are deprecated.
 
+Best Practices Implemented:
 1. Explicit Role Separation - Evaluator doesn't re-do the task
 2. Clear Success Definition - System-specific, not generic
 3. Auto-Fail Conditions - Non-negotiable failures
@@ -23,18 +26,127 @@ This is the gold-standard eval prompt generator incorporating all 20 best practi
 18. Evaluator Self-Check - Mandatory bias check
 19. Downstream Consumer Awareness - Who uses this
 20. Minimal but Sufficient Output - Concise explanations
+
+Production Metrics:
+- Tracks generation latency, LLM calls, and validation outcomes
+- Records precision/recall estimates from self-validation
+- Provides quality indicators for eval prompt reliability
 """
 import re
 import json
 import logging
+import time
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime
 
 from prompt_analyzer import analyze_prompt, analysis_to_dict, PromptType, PromptDNA
 from llm_client_v2 import EnhancedLLMClient, parse_json_response
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# PRODUCTION METRICS TRACKING
+# ============================================================================
+
+@dataclass
+class EvalGenerationMetrics:
+    """
+    Production metrics for eval prompt generation.
+    Track these to monitor eval quality over time.
+    """
+    # Generation metadata
+    project_id: Optional[str] = None
+    generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    generation_latency_ms: int = 0
+    llm_calls_made: int = 0
+    total_tokens_used: int = 0
+    
+    # Validation outcomes
+    self_validation_passed: bool = False
+    calibration_examples_count: int = 0
+    dimensions_count: int = 0
+    auto_fail_conditions_count: int = 0
+    
+    # Quality indicators
+    estimated_precision: float = 0.0  # From self-validation
+    estimated_recall: float = 0.0  # From coverage analysis
+    best_practices_score: int = 0  # Out of 20
+    
+    # Issues detected
+    warnings: List[str] = field(default_factory=list)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "generated_at": self.generated_at,
+            "latency_ms": self.generation_latency_ms,
+            "llm_calls": self.llm_calls_made,
+            "tokens_used": self.total_tokens_used,
+            "validation": {
+                "passed": self.self_validation_passed,
+                "calibration_examples": self.calibration_examples_count,
+                "dimensions": self.dimensions_count,
+                "auto_fail_conditions": self.auto_fail_conditions_count
+            },
+            "quality": {
+                "estimated_precision": self.estimated_precision,
+                "estimated_recall": self.estimated_recall,
+                "best_practices_score": self.best_practices_score,
+                "best_practices_max": 20
+            },
+            "warnings": self.warnings
+        }
+
+
+# Global metrics storage (in-memory for now; can be persisted to DB)
+_metrics_history: List[EvalGenerationMetrics] = []
+
+
+def record_eval_metrics(metrics: EvalGenerationMetrics) -> None:
+    """Record metrics for monitoring and analysis"""
+    _metrics_history.append(metrics)
+    # Keep only last 1000 entries in memory
+    if len(_metrics_history) > 1000:
+        _metrics_history.pop(0)
+    logger.info(
+        f"Eval generation metrics: latency={metrics.generation_latency_ms}ms, "
+        f"llm_calls={metrics.llm_calls_made}, precision={metrics.estimated_precision:.2f}, "
+        f"best_practices={metrics.best_practices_score}/20"
+    )
+
+
+def get_eval_metrics_summary() -> Dict[str, Any]:
+    """Get summary statistics of recent eval generations"""
+    if not _metrics_history:
+        return {"count": 0, "message": "No metrics recorded yet"}
+    
+    recent = _metrics_history[-100:]  # Last 100
+    return {
+        "count": len(recent),
+        "avg_latency_ms": sum(m.generation_latency_ms for m in recent) / len(recent),
+        "avg_llm_calls": sum(m.llm_calls_made for m in recent) / len(recent),
+        "validation_pass_rate": sum(1 for m in recent if m.self_validation_passed) / len(recent),
+        "avg_precision": sum(m.estimated_precision for m in recent) / len(recent),
+        "avg_best_practices_score": sum(m.best_practices_score for m in recent) / len(recent),
+        "total_generations": len(_metrics_history)
+    }
+
+# Import quality enhancements for numeric thresholds
+try:
+    from eval_prompt_quality import (
+        NUMERIC_RUBRIC_THRESHOLDS,
+        get_numeric_rubric,
+        TIEBREAKER_RULES_COMPACT,
+        INTERMEDIATE_SCORE_GUIDANCE,
+    )
+    QUALITY_THRESHOLDS_AVAILABLE = True
+except ImportError:
+    QUALITY_THRESHOLDS_AVAILABLE = False
+    NUMERIC_RUBRIC_THRESHOLDS = {}
+    logger.warning("eval_prompt_quality not available - using basic rubrics")
 
 
 def extract_template_variables(prompt_text: str) -> List[str]:
@@ -1039,10 +1151,13 @@ def build_evaluation_dimensions_static(
     if deep.get("explicit_rules"):
         dimensions.append(ADDITIONAL_DIMENSIONS[EvalDimensionType.RULE_ADHERENCE])
 
-    # Normalize weights
+    # Normalize weights and add deterministic IDs
     total_weight = sum(d["weight"] for d in dimensions)
-    for d in dimensions:
+    for i, d in enumerate(dimensions):
         d["weight"] = round(d["weight"] / total_weight, 2)
+        # Add deterministic ID for stable identification
+        d["id"] = generate_deterministic_dimension_id(d.get("name", f"dim_{i}"), i)
+        d["display_name"] = d.get("name", f"Dimension {i+1}")
 
     return dimensions
 
@@ -1157,13 +1272,17 @@ Focus on what makes outputs from THIS system valuable, not generic LLM quality m
     try:
         dimensions = parse_json_response(result["output"], "array")
         if dimensions and len(dimensions) >= 3:
-            # Normalize weights
+            # Normalize weights and add deterministic IDs
             total_weight = sum(d.get("weight", 0.2) for d in dimensions)
-            for d in dimensions:
+            for i, d in enumerate(dimensions):
                 d["weight"] = round(d.get("weight", 0.2) / total_weight, 2)
                 # Convert rubric keys to integers for consistency
                 if "rubric" in d:
                     d["rubric"] = {int(k): v for k, v in d["rubric"].items()}
+                # Add deterministic ID for stable identification across regenerations
+                d["id"] = generate_deterministic_dimension_id(d.get("name", f"dim_{i}"), i)
+                # Keep display_name separate from id for UI purposes
+                d["display_name"] = d.get("name", f"Dimension {i+1}")
 
             logger.info(f"Generated {len(dimensions)} domain-specific dimensions: {[d['name'] for d in dimensions]}")
             return dimensions
@@ -1197,47 +1316,75 @@ async def generate_calibration_examples_v3(
     api_key: str,
     model_name: str
 ) -> List[Dict[str, Any]]:
-    """Generate 4 calibration examples: 5, 4, 3, and 1-2 score"""
+    """
+    Generate 10 calibration examples covering full score range with intermediate scores.
 
-    calibration_prompt = """Generate 4 calibration examples for an LLM evaluator:
+    Includes:
+    - Score 5.0: Perfect example
+    - Score 4.5: Near-perfect with trivial issue
+    - Score 4.0: Good with minor gaps
+    - Score 3.5: Acceptable edge case
+    - Score 3.0: Borderline acceptable
+    - Score 2.5: Borderline unacceptable
+    - Score 2.0: Poor quality
+    - Score 1.5: Very poor with some redeeming quality
+    - Score 1.0: Complete failure
+    - Edge case: Auto-fail override (good scores but auto-fail triggered)
+    """
 
-1. **SCORE 5 (Excellent)**: Perfect output meeting all requirements
-2. **SCORE 4 (Good)**: Solid output with minor issues only
-3. **SCORE 3 (Acceptable)**: Passable but has notable weaknesses
-4. **SCORE 1-2 (Poor)**: Fails due to specific critical issues
+    calibration_prompt = """Generate 10 calibration examples for an LLM evaluator covering the FULL score range:
+
+1. **SCORE 5.0 (Perfect)**: Zero issues, exceeds expectations
+2. **SCORE 4.5 (Near-perfect)**: One trivial issue that doesn't affect usability
+3. **SCORE 4.0 (Good)**: Meets requirements with minor imperfections
+4. **SCORE 3.5 (Acceptable)**: Meets core requirements but has noticeable gaps
+5. **SCORE 3.0 (Borderline pass)**: Minimum acceptable quality
+6. **SCORE 2.5 (Borderline fail)**: Close to acceptable but has blocking issues
+7. **SCORE 2.0 (Poor)**: Significant problems across multiple dimensions
+8. **SCORE 1.5 (Very poor)**: Mostly fails but has some correct elements
+9. **SCORE 1.0 (Failure)**: Completely wrong or triggers auto-fail
+10. **EDGE CASE (Auto-fail override)**: Good dimension scores BUT triggers an auto-fail condition
+
+CRITICAL: Use INTERMEDIATE SCORES (4.5, 3.5, 2.5, 1.5) - DO NOT round to whole numbers!
 
 For EACH example, provide:
-- Realistic input
+- Realistic input scenario
 - Complete output (not truncated)
-- Score with reasoning
-- Dimension-by-dimension breakdown
+- Score with evidence-based reasoning
+- Dimension-by-dimension breakdown with percentages
 - Specific failures present (for low scores)
+- Whether it's an edge case
 
 Return JSON array:
 [
     {
         "input": "...",
         "output": "...",
-        "score": 5,
+        "score": 5.0,
         "reasoning": "Evidence-based reasoning citing specific output elements",
-        "dimension_scores": {"accuracy": 5, "completeness": 5, ...},
+        "dimension_scores": {"accuracy": {"score": 5, "pct": 98}, "completeness": {"score": 5, "pct": 100}},
         "failures_present": [],
-        "why_this_score": "Calibration note explaining why this deserves exactly this score"
+        "why_this_score": "Calibration note explaining why this deserves exactly this score",
+        "is_edge_case": false,
+        "edge_case_type": ""
     }
 ]
 
-IMPORTANT: Make the score=1-2 example fail due to an AUTO-FAIL condition to show how those work."""
+IMPORTANT:
+- Include at least 4 intermediate scores (4.5, 3.5, 2.5, 1.5)
+- The auto-fail edge case should show high dimension scores BUT still FAIL due to auto-fail
+- Include "pct" (percentage) in dimension_scores to show numeric justification"""
 
     user_message = f"""System prompt:
 ```
-{system_prompt}
+{system_prompt[:2000]}
 ```
 
 Dimensions: {json.dumps([{"name": d["name"], "weight": d["weight"]} for d in dimensions])}
 
 Auto-fail conditions: {json.dumps([{"name": af["name"]} for af in auto_fails[:5]])}
 
-Generate 4 calibration examples."""
+Generate 10 calibration examples with intermediate scores (4.5, 3.5, 2.5, 1.5)."""
 
     result = await llm_client.chat(
         system_prompt=calibration_prompt,
@@ -1280,13 +1427,27 @@ def build_gold_standard_eval_prompt(
 
     logger.info(f"Found template variables: {all_input_vars} (primary: {primary_input_var})")
 
-    # Build dimension sections with full rubrics and NOT-to-check
+    # Build dimension sections with full rubrics, NUMERIC THRESHOLDS, and NOT-to-check
     dimension_sections = []
     for i, dim in enumerate(dimensions, 1):
-        rubric_lines = "\n".join([
-            f"    - **{score}**: {desc}"
-            for score, desc in sorted(dim["rubric"].items(), key=lambda x: -x[0])
-        ])
+        # Get numeric thresholds for this dimension
+        dim_name = dim["name"]
+        numeric_rubric = None
+        if QUALITY_THRESHOLDS_AVAILABLE:
+            numeric_rubric = get_numeric_rubric(dim_name)
+
+        # Build rubric lines with NUMERIC THRESHOLDS injected
+        rubric_lines_list = []
+        for score, desc in sorted(dim["rubric"].items(), key=lambda x: -x[0]):
+            if numeric_rubric and score in numeric_rubric:
+                threshold = numeric_rubric[score]
+                min_pct = threshold.get("min_pct", 0)
+                # Inject numeric threshold into rubric description
+                rubric_lines_list.append(f"    - **{score}** [≥{min_pct}%]: {desc}")
+            else:
+                rubric_lines_list.append(f"    - **{score}**: {desc}")
+
+        rubric_lines = "\n".join(rubric_lines_list)
 
         checks = "\n".join([f"    - {c}" for c in dim["what_to_check"][:5]])
         not_checks = "\n".join([f"    - {c}" for c in dim.get("what_NOT_to_check", [])[:3]])
@@ -1305,7 +1466,7 @@ def build_gold_standard_eval_prompt(
 **Grounding Requirements:**
 {grounding}
 
-**Scoring Rubric:**
+**Scoring Rubric (with numeric thresholds):**
 {rubric_lines}"""
         dimension_sections.append(section)
 
@@ -1364,23 +1525,56 @@ The system output **MUST** include the following elements. Missing ANY of these 
 ---
 """
 
-    # Build calibration section
+    # Build calibration section with UP TO 8 EXAMPLES including intermediate scores
     calibration_section = ""
     if calibration_examples:
         cal_text = []
-        for ex in calibration_examples[:3]:
+        # Include up to 8 examples to cover full score range
+        for ex in calibration_examples[:8]:
+            score = ex.get('score', '?')
+            is_edge = ex.get('is_edge_case', False)
+            edge_marker = " [EDGE CASE]" if is_edge else ""
+
+            # Format dimension scores with percentages if available
+            dim_scores = ex.get('dimension_scores', {})
+            if isinstance(dim_scores, dict):
+                dim_parts = []
+                for dim_name, dim_data in list(dim_scores.items())[:3]:
+                    if isinstance(dim_data, dict):
+                        dim_parts.append(f"{dim_name}={dim_data.get('score', '?')} ({dim_data.get('pct', '?')}%)")
+                    else:
+                        dim_parts.append(f"{dim_name}={dim_data}")
+                dim_str = ", ".join(dim_parts) if dim_parts else "N/A"
+            else:
+                dim_str = str(dim_scores)
+
             cal_text.append(f"""
-**Example (Score {ex.get('score', '?')}/5):**
+**Example (Score {score}/5){edge_marker}:**
 - Input: "{str(ex.get('input', ''))[:80]}..."
 - Output: "{str(ex.get('output', ''))[:120]}..."
+- Dimension Scores: {dim_str}
 - Reasoning: {ex.get('reasoning', '')[:150]}
 - Why this score: {ex.get('why_this_score', '')}""")
 
+        # Add intermediate score guidance
+        intermediate_guidance = ""
+        if QUALITY_THRESHOLDS_AVAILABLE:
+            intermediate_guidance = """
+
+**IMPORTANT - Use Intermediate Scores:**
+- **4.5**: Almost perfect, one trivial issue
+- **3.5**: Acceptable but has notable gaps
+- **2.5**: Borderline, human should review
+- **1.5**: Very poor but not completely wrong
+
+Do NOT round all scores to whole numbers. Use half-point increments when appropriate."""
+
         calibration_section = f"""
-## VIII. Calibration Examples
+## VIII. Calibration Examples (Including Edge Cases & Intermediate Scores)
 
 Use these to calibrate your scoring. Similar outputs should receive similar scores.
 {''.join(cal_text)}
+{intermediate_guidance}
 """
 
     # Build the inputs section with ALL template variables
@@ -1490,13 +1684,19 @@ These significantly lower scores if present:
 
 ---
 
-## IX. Verdict Criteria
+## IX. Verdict Criteria & Tiebreaker Rules
 
 | Verdict | Criteria |
 |---------|----------|
-| **PASS** | Score ≥ 4.0 AND no auto-fail issues |
-| **NEEDS_REVIEW** | Score 3.0 – 3.99 AND no auto-fail issues |
-| **FAIL** | Score < 3.0 OR any auto-fail condition present |
+| **PASS** | Score ≥ 3.5 AND no auto-fail issues |
+| **NEEDS_REVIEW** | Score 2.5 – 3.49 AND no auto-fail issues |
+| **FAIL** | Score < 2.5 OR any auto-fail condition present |
+
+**Tiebreaker Rules (when dimension scores conflict):**
+1. **Auto-fail trumps all** → FAIL immediately, regardless of dimension scores
+2. **Accuracy priority** → If accuracy differs >1pt from other dimensions, weight it 2x
+3. **Minimum floor** → Lowest dimension can't pull score down >0.5 from weighted avg
+4. **Round to 0.5** → Final score rounds to nearest 0.5 (3.7→3.5, 3.8→4.0)
 
 ---
 
@@ -1568,6 +1768,327 @@ Now evaluate the output below:
     return eval_prompt
 
 
+def generate_deterministic_dimension_id(name: str, index: int) -> str:
+    """
+    Generate a stable, deterministic ID for a dimension based on its name.
+    This ensures consistent IDs across regenerations for the same dimension type.
+    """
+    import hashlib
+    # Normalize the name: lowercase, remove special chars, collapse whitespace
+    normalized = re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+    # Create a short hash suffix for uniqueness
+    hash_suffix = hashlib.md5(name.encode()).hexdigest()[:6]
+    return f"dim_{normalized}_{hash_suffix}"
+
+
+def extract_output_schema(system_prompt: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract the expected output schema from a system prompt.
+    Returns a JSON schema if one can be detected, None otherwise.
+    """
+    # Look for JSON code blocks with schema-like content
+    json_pattern = r'```json\s*(\{[\s\S]*?\})\s*```'
+    matches = re.findall(json_pattern, system_prompt)
+
+    for match in matches:
+        try:
+            parsed = json.loads(match)
+            # Check if it looks like a schema or example output
+            if isinstance(parsed, dict):
+                # Extract keys and their types
+                schema = {
+                    "type": "object",
+                    "required": [],
+                    "properties": {}
+                }
+                for key, value in parsed.items():
+                    schema["required"].append(key)
+                    if isinstance(value, str):
+                        schema["properties"][key] = {"type": "string"}
+                    elif isinstance(value, (int, float)):
+                        schema["properties"][key] = {"type": "number"}
+                    elif isinstance(value, bool):
+                        schema["properties"][key] = {"type": "boolean"}
+                    elif isinstance(value, list):
+                        schema["properties"][key] = {"type": "array"}
+                    elif isinstance(value, dict):
+                        schema["properties"][key] = {"type": "object"}
+                return schema
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+def validate_output_against_schema(output: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate an output string against an expected schema.
+    Returns validation results with specific errors if any.
+    """
+    result = {
+        "valid": False,
+        "parseable": False,
+        "errors": [],
+        "missing_keys": [],
+        "type_mismatches": []
+    }
+
+    # Try to parse the output as JSON
+    try:
+        # Extract JSON from output (may have surrounding text)
+        json_match = re.search(r'\{[\s\S]*\}', output)
+        if not json_match:
+            json_match = re.search(r'\[[\s\S]*\]', output)
+
+        if not json_match:
+            result["errors"].append("No JSON object or array found in output")
+            return result
+
+        parsed = json.loads(json_match.group())
+        result["parseable"] = True
+
+    except json.JSONDecodeError as e:
+        result["errors"].append(f"JSON parse error: {str(e)}")
+        return result
+
+    # Validate against schema
+    if schema.get("type") == "object" and isinstance(parsed, dict):
+        # Check required keys
+        for key in schema.get("required", []):
+            if key not in parsed:
+                result["missing_keys"].append(key)
+
+        # Check property types
+        for key, prop_schema in schema.get("properties", {}).items():
+            if key in parsed:
+                expected_type = prop_schema.get("type")
+                actual_value = parsed[key]
+
+                if expected_type == "string" and not isinstance(actual_value, str):
+                    result["type_mismatches"].append(f"{key}: expected string, got {type(actual_value).__name__}")
+                elif expected_type == "number" and not isinstance(actual_value, (int, float)):
+                    result["type_mismatches"].append(f"{key}: expected number, got {type(actual_value).__name__}")
+                elif expected_type == "boolean" and not isinstance(actual_value, bool):
+                    result["type_mismatches"].append(f"{key}: expected boolean, got {type(actual_value).__name__}")
+                elif expected_type == "array" and not isinstance(actual_value, list):
+                    result["type_mismatches"].append(f"{key}: expected array, got {type(actual_value).__name__}")
+                elif expected_type == "object" and not isinstance(actual_value, dict):
+                    result["type_mismatches"].append(f"{key}: expected object, got {type(actual_value).__name__}")
+
+    result["valid"] = (
+        result["parseable"] and
+        len(result["missing_keys"]) == 0 and
+        len(result["type_mismatches"]) == 0
+    )
+
+    return result
+
+
+async def run_eval_on_calibration_samples(
+    eval_prompt: str,
+    calibration_examples: List[Dict[str, Any]],
+    llm_client: EnhancedLLMClient,
+    provider: str,
+    api_key: str,
+    model_name: str,
+    temperature: float = 0.0
+) -> Dict[str, Any]:
+    """
+    Actually run the eval prompt on calibration examples to verify:
+    1. JSON output is parseable
+    2. Scores are consistent with expected calibration scores
+    3. Required fields are present
+
+    Returns detailed results for each sample.
+    """
+    results = {
+        "samples_tested": 0,
+        "json_parse_success": 0,
+        "score_consistent": 0,
+        "details": [],
+        "issues": []
+    }
+
+    # Expected eval output schema
+    eval_output_schema = {
+        "type": "object",
+        "required": ["score", "verdict"],
+        "properties": {
+            "score": {"type": "number"},
+            "verdict": {"type": "string"},
+            "summary": {"type": "string"},
+            "dimension_scores": {"type": "object"}
+        }
+    }
+
+    for i, example in enumerate(calibration_examples[:4]):  # Test up to 4 examples
+        sample_result = {
+            "example_index": i,
+            "expected_score": example.get("score", 3.0),
+            "actual_score": None,
+            "json_valid": False,
+            "score_diff": None,
+            "errors": []
+        }
+
+        try:
+            # Fill in the eval prompt with the example
+            filled_eval = eval_prompt
+            example_input = str(example.get("input", ""))[:1000]
+            example_output = str(example.get("output", ""))[:2000]
+
+            # Replace common placeholders
+            for placeholder in ["{{input}}", "{input}", "{{INPUT}}"]:
+                filled_eval = filled_eval.replace(placeholder, example_input)
+            for placeholder in ["{{output}}", "{output}", "{{OUTPUT}}"]:
+                filled_eval = filled_eval.replace(placeholder, example_output)
+
+            # Run the eval
+            eval_result = await llm_client.chat(
+                system_prompt=filled_eval,
+                user_message="Evaluate the output above and return your assessment as JSON.",
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=temperature,
+                max_tokens=2000
+            )
+
+            if eval_result.get("error"):
+                sample_result["errors"].append(f"LLM error: {eval_result['error']}")
+            else:
+                eval_output = eval_result.get("output", "")
+
+                # Validate JSON parsing
+                validation = validate_output_against_schema(eval_output, eval_output_schema)
+
+                if validation["parseable"]:
+                    sample_result["json_valid"] = True
+                    results["json_parse_success"] += 1
+
+                    # Extract actual score
+                    try:
+                        json_match = re.search(r'\{[\s\S]*\}', eval_output)
+                        if json_match:
+                            parsed = json.loads(json_match.group())
+                            actual_score = parsed.get("score")
+                            if actual_score is not None:
+                                sample_result["actual_score"] = float(actual_score)
+                                expected = float(example.get("score", 3.0))
+                                sample_result["score_diff"] = abs(actual_score - expected)
+
+                                # Consider consistent if within 1 point
+                                if sample_result["score_diff"] <= 1.0:
+                                    results["score_consistent"] += 1
+                                else:
+                                    sample_result["errors"].append(
+                                        f"Score inconsistent: expected ~{expected}, got {actual_score}"
+                                    )
+                    except (json.JSONDecodeError, ValueError) as e:
+                        sample_result["errors"].append(f"Score extraction failed: {str(e)}")
+                else:
+                    sample_result["errors"].extend(validation["errors"])
+                    if validation["missing_keys"]:
+                        sample_result["errors"].append(f"Missing keys: {validation['missing_keys']}")
+
+        except Exception as e:
+            sample_result["errors"].append(f"Exception: {str(e)}")
+
+        results["details"].append(sample_result)
+        results["samples_tested"] += 1
+
+    # Summarize issues
+    if results["json_parse_success"] < results["samples_tested"]:
+        results["issues"].append(
+            f"JSON parsing failed for {results['samples_tested'] - results['json_parse_success']}/{results['samples_tested']} samples"
+        )
+    if results["score_consistent"] < results["samples_tested"]:
+        results["issues"].append(
+            f"Score inconsistency in {results['samples_tested'] - results['score_consistent']}/{results['samples_tested']} samples"
+        )
+
+    results["success_rate"] = (
+        (results["json_parse_success"] + results["score_consistent"]) /
+        (results["samples_tested"] * 2) * 100
+        if results["samples_tested"] > 0 else 0
+    )
+
+    return results
+
+
+async def check_judge_reliability(
+    eval_prompt: str,
+    test_sample: Dict[str, Any],
+    llm_client: EnhancedLLMClient,
+    provider: str,
+    api_key: str,
+    model_name: str,
+    num_runs: int = 3
+) -> Dict[str, Any]:
+    """
+    Check judge reliability by running the same eval multiple times with temp=0.
+    High variance indicates an unreliable eval prompt.
+    """
+    scores = []
+    verdicts = []
+
+    sample_input = str(test_sample.get("input", ""))[:1000]
+    sample_output = str(test_sample.get("output", ""))[:2000]
+
+    filled_eval = eval_prompt
+    for placeholder in ["{{input}}", "{input}", "{{INPUT}}"]:
+        filled_eval = filled_eval.replace(placeholder, sample_input)
+    for placeholder in ["{{output}}", "{output}", "{{OUTPUT}}"]:
+        filled_eval = filled_eval.replace(placeholder, sample_output)
+
+    for run in range(num_runs):
+        try:
+            result = await llm_client.chat(
+                system_prompt=filled_eval,
+                user_message="Evaluate the output above.",
+                provider=provider,
+                api_key=api_key,
+                model_name=model_name,
+                temperature=0.0,  # Deterministic
+                max_tokens=2000
+            )
+
+            if not result.get("error"):
+                json_match = re.search(r'\{[\s\S]*\}', result.get("output", ""))
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    if "score" in parsed:
+                        scores.append(float(parsed["score"]))
+                    if "verdict" in parsed:
+                        verdicts.append(parsed["verdict"])
+        except Exception:
+            pass
+
+    # Calculate variance
+    variance = 0.0
+    if len(scores) >= 2:
+        mean = sum(scores) / len(scores)
+        variance = sum((s - mean) ** 2 for s in scores) / len(scores)
+
+    # Check verdict consistency
+    verdict_consistent = len(set(verdicts)) <= 1 if verdicts else False
+
+    return {
+        "num_runs": num_runs,
+        "scores_collected": len(scores),
+        "scores": scores,
+        "score_variance": round(variance, 4),
+        "score_range": round(max(scores) - min(scores), 2) if scores else 0,
+        "verdicts": verdicts,
+        "verdict_consistent": verdict_consistent,
+        "reliable": variance < 0.25 and verdict_consistent,
+        "issues": [] if (variance < 0.25 and verdict_consistent) else [
+            f"High score variance: {variance:.2f}" if variance >= 0.25 else None,
+            "Inconsistent verdicts across runs" if not verdict_consistent else None
+        ]
+    }
+
+
 async def self_validate_eval_prompt(
     eval_prompt: str,
     dimensions: List[Dict[str, Any]],
@@ -1578,7 +2099,7 @@ async def self_validate_eval_prompt(
     api_key: str,
     model_name: str
 ) -> Dict[str, Any]:
-    """Validate the eval prompt against the 20-point checklist"""
+    """Validate the eval prompt against the 20-point checklist AND run live tests"""
 
     validation_prompt = """Audit this evaluation prompt against best practices:
 
@@ -1636,6 +2157,34 @@ Return JSON:
         if parsed:
             validation.update(parsed)
 
+    # Run live calibration tests if we have examples
+    if calibration_examples:
+        logger.info("Running live calibration tests on eval prompt...")
+        calibration_test_results = await run_eval_on_calibration_samples(
+            eval_prompt, calibration_examples,
+            llm_client, provider, api_key, model_name
+        )
+        validation["live_calibration_tests"] = calibration_test_results
+
+        # Check judge reliability on first calibration example
+        if calibration_examples:
+            logger.info("Checking judge reliability (variance check)...")
+            reliability = await check_judge_reliability(
+                eval_prompt, calibration_examples[0],
+                llm_client, provider, api_key, model_name,
+                num_runs=2  # Quick check with 2 runs
+            )
+            validation["judge_reliability"] = reliability
+
+        # Adjust overall score based on live test results
+        base_score = validation.get("overall_score", 80)
+        if calibration_test_results.get("success_rate", 100) < 75:
+            validation["overall_score"] = max(50, base_score - 20)
+            validation["live_test_penalty"] = "Score reduced due to calibration test failures"
+        if not reliability.get("reliable", True):
+            validation["overall_score"] = max(50, validation.get("overall_score", base_score) - 10)
+            validation["reliability_penalty"] = "Score reduced due to judge inconsistency"
+
     return validation
 
 
@@ -1652,7 +2201,8 @@ async def generate_gold_standard_eval_prompt(
     api_key: str,
     model_name: str,
     thinking_model: Optional[str] = None,
-    max_iterations: int = 2
+    max_iterations: int = 2,
+    project_id: Optional[str] = None
 ) -> EvalPromptResult:
     """
     Generate a gold-standard evaluation prompt incorporating all 20 best practices.
@@ -1662,7 +2212,15 @@ async def generate_gold_standard_eval_prompt(
     - Regression testing
     - QA automation
     - CI/CD pipelines
+    
+    Production Metrics:
+    - Tracks generation latency, LLM calls, validation outcomes
+    - Records estimated precision/recall from self-validation
+    - Logs quality indicators for monitoring
     """
+    # Start metrics tracking
+    start_time = time.time()
+    metrics = EvalGenerationMetrics(project_id=project_id)
 
     analysis_model = thinking_model or model_name
     steps = []
@@ -1700,36 +2258,128 @@ async def generate_gold_standard_eval_prompt(
     )
     steps.append({"step": "calibration", "count": len(calibration_examples)})
 
-    # Step 6: Build Gold-Standard Eval Prompt
-    logger.info(f"Step 6: Building gold-standard eval prompt")
-    eval_prompt = build_gold_standard_eval_prompt(
-        system_prompt, use_case, analysis,
-        auto_fails, major_issues, dimensions, calibration_examples
-    )
-    steps.append({"step": "build_prompt", "status": "completed"})
+    # Step 6: Build Gold-Standard Eval Prompt with Iteration
+    iteration = 0
+    eval_prompt = None
+    validation = None
 
-    # Step 7: Self-Validation
-    logger.info(f"Step 7: Validating against 20-point checklist")
-    validation = await self_validate_eval_prompt(
-        eval_prompt, dimensions, auto_fails, calibration_examples,
-        llm_client, provider, api_key, model_name
-    )
-    steps.append({
-        "step": "validation",
-        "overall_score": validation.get("overall_score", 80)
-    })
+    while iteration < max_iterations:
+        iteration += 1
+        logger.info(f"Step 6: Building gold-standard eval prompt (iteration {iteration}/{max_iterations})")
+
+        eval_prompt = build_gold_standard_eval_prompt(
+            system_prompt, use_case, analysis,
+            auto_fails, major_issues, dimensions, calibration_examples
+        )
+        steps.append({"step": f"build_prompt_iter_{iteration}", "status": "completed"})
+
+        # Step 7: Self-Validation (includes live calibration tests)
+        logger.info(f"Step 7: Validating against 20-point checklist (iteration {iteration})")
+        validation = await self_validate_eval_prompt(
+            eval_prompt, dimensions, auto_fails, calibration_examples,
+            llm_client, provider, api_key, model_name
+        )
+
+        # Check if calibration tests passed
+        live_tests = validation.get("live_calibration_tests", {})
+        success_rate = live_tests.get("success_rate", 100)
+        reliability = validation.get("judge_reliability", {})
+        is_reliable = reliability.get("reliable", True)
+
+        if success_rate >= 75 and is_reliable:
+            logger.info(f"Eval prompt passed validation (success_rate={success_rate}%, reliable={is_reliable})")
+            steps.append({
+                "step": f"validation_iter_{iteration}",
+                "overall_score": validation.get("overall_score", 80),
+                "passed": True
+            })
+            break
+        elif iteration < max_iterations:
+            logger.warning(f"Eval prompt validation issues (success_rate={success_rate}%, reliable={is_reliable}), iterating...")
+            steps.append({
+                "step": f"validation_iter_{iteration}",
+                "overall_score": validation.get("overall_score", 80),
+                "passed": False,
+                "reason": live_tests.get("issues", []) + reliability.get("issues", [])
+            })
+
+            # Try to improve dimensions for next iteration
+            # Regenerate dimensions with feedback from validation issues
+            logger.info("Regenerating dimensions based on validation feedback...")
+            dimensions = await generate_dynamic_evaluation_dimensions(
+                system_prompt, use_case, analysis, auto_fails, major_issues,
+                llm_client, provider, api_key, model_name
+            )
+        else:
+            logger.warning(f"Max iterations reached, using best available eval prompt")
+            steps.append({
+                "step": f"validation_iter_{iteration}",
+                "overall_score": validation.get("overall_score", 80),
+                "passed": False,
+                "reason": "Max iterations reached"
+            })
 
     # Build rationale
+    live_tests = validation.get("live_calibration_tests", {}) if validation else {}
+    reliability = validation.get("judge_reliability", {}) if validation else {}
+
     rationale = (
         f"Generated gold-standard eval prompt with {len(auto_fails)} auto-fail conditions, "
         f"{len(dimensions)} weighted dimensions, and {len(calibration_examples)} calibration examples. "
-        f"Validation score: {validation.get('overall_score', 80)}/100. "
+        f"Validation score: {validation.get('overall_score', 80) if validation else 'N/A'}/100. "
+        f"Iterations: {iteration}/{max_iterations}. "
     )
 
-    if validation.get("strengths"):
+    if live_tests.get("success_rate"):
+        rationale += f"Live calibration success: {live_tests['success_rate']:.0f}%. "
+
+    if reliability.get("reliable") is not None:
+        rationale += f"Judge reliable: {'Yes' if reliability['reliable'] else 'No'}. "
+
+    if validation and validation.get("strengths"):
         rationale += f"Strengths: {', '.join(validation['strengths'][:2])}."
 
-    return EvalPromptResult(
+    # ========================================================================
+    # RECORD PRODUCTION METRICS
+    # ========================================================================
+    metrics.generation_latency_ms = int((time.time() - start_time) * 1000)
+    metrics.dimensions_count = len(dimensions)
+    metrics.auto_fail_conditions_count = len(auto_fails)
+    metrics.calibration_examples_count = len(calibration_examples)
+    metrics.self_validation_passed = live_tests.get("success_rate", 0) >= 75 and reliability.get("reliable", False)
+    
+    # Estimate precision/recall from validation results
+    if live_tests.get("success_rate") is not None:
+        metrics.estimated_precision = live_tests["success_rate"] / 100.0
+    if validation and validation.get("checklist_passed"):
+        metrics.estimated_recall = sum(1 for v in validation["checklist_passed"].values() if v) / 20.0
+    
+    # Calculate best practices score
+    if validation and validation.get("checklist_passed"):
+        metrics.best_practices_score = sum(1 for v in validation["checklist_passed"].values() if v)
+    else:
+        # Estimate from structure
+        bp_score = 0
+        if auto_fails: bp_score += 2  # Auto-fail conditions
+        if dimensions: bp_score += 3  # Dimensions with rubrics
+        if calibration_examples: bp_score += 2  # Calibration examples
+        if any(d.get("what_NOT_to_check") for d in dimensions): bp_score += 1  # Scope enforcement
+        if any(d.get("grounding_requirements") for d in dimensions): bp_score += 1  # Grounding
+        bp_score += min(5, len(dimensions))  # Up to 5 for dimension count
+        metrics.best_practices_score = bp_score
+    
+    # Collect warnings
+    if not reliability.get("reliable"):
+        metrics.warnings.append("Judge reliability check failed")
+    if live_tests.get("success_rate", 100) < 75:
+        metrics.warnings.append(f"Low calibration success rate: {live_tests.get('success_rate', 0):.0f}%")
+    if len(dimensions) < 3:
+        metrics.warnings.append("Low dimension count (<3)")
+    
+    # Record metrics
+    record_eval_metrics(metrics)
+    
+    result = EvalPromptResult(
         eval_prompt=eval_prompt,
         eval_criteria=[d["name"] for d in dimensions],
         rationale=rationale,
@@ -1744,7 +2394,9 @@ async def generate_gold_standard_eval_prompt(
         ],
         dimensions=[
             {
+                "id": d.get("id", f"dim_{i}"),  # Deterministic ID for stable tracking
                 "name": d["name"],
+                "display_name": d.get("display_name", d["name"]),  # UI-friendly name
                 "type": d.get("description", ""),
                 "weight": d["weight"],
                 "what_to_check": d["what_to_check"],
@@ -1752,7 +2404,7 @@ async def generate_gold_standard_eval_prompt(
                 "grounding_requirements": d.get("grounding_requirements", []),
                 "rubric": {str(k): v for k, v in d["rubric"].items()}
             }
-            for d in dimensions
+            for i, d in enumerate(dimensions)
         ],
         calibration_examples=calibration_examples,
         self_test_results=validation,
@@ -1761,9 +2413,16 @@ async def generate_gold_standard_eval_prompt(
             "prompt_type": str(prompt_type),
             "model_used": model_name,
             "analysis_model": analysis_model,
-            "checklist_version": "20-point-v1"
+            "checklist_version": "20-point-v1",
+            "iterations_used": iteration,
+            "max_iterations": max_iterations,
+            "live_calibration_success_rate": live_tests.get("success_rate"),
+            "judge_reliable": reliability.get("reliable"),
+            "generation_metrics": metrics.to_dict()  # Include metrics in response
         }
     )
+    
+    return result
 
 
 # Alias for backward compatibility
