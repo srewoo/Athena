@@ -1027,12 +1027,12 @@ Return JSON:
 
     if result.get("error"):
         logger.error(f"Analysis failed: {result['error']}")
-        return {"programmatic": analysis_dict, "deep": None, "prompt_type": programmatic.prompt_type}
+        return {"programmatic": analysis_dict, "deep": {}, "prompt_type": programmatic.prompt_type}
 
     deep = parse_json_response(result["output"], "object")
     return {
         "programmatic": analysis_dict,
-        "deep": deep or {"raw": result["output"]},
+        "deep": deep or {},
         "prompt_type": programmatic.prompt_type
     }
 
@@ -1171,13 +1171,18 @@ async def generate_dynamic_evaluation_dimensions(
     llm_client,
     provider: str,
     api_key: str,
-    model_name: str
+    model_name: str,
+    structured_requirements: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """
     Generate domain-specific evaluation dimensions dynamically using LLM.
 
     This analyzes the system prompt to understand WHAT matters for this specific
     domain and generates appropriate dimension names, descriptions, and rubrics.
+    
+    Args:
+        structured_requirements: Optional structured requirements to incorporate
+                               into evaluation dimensions
 
     For example:
     - Call scoring system → "Diagnostic Signal Quality", "Severity Calibration"
@@ -1229,6 +1234,22 @@ IMPORTANT:
     core_function = deep.get("core_function", use_case)
     critical_factors = deep.get("critical_success_factors", [])
     failure_names = [f["name"] for f in auto_fails + major_issues]
+    
+    # Add structured requirements context
+    structured_req_section = ""
+    if structured_requirements:
+        sr_parts = []
+        if structured_requirements.get('must_do'):
+            sr_parts.append(f"Must Do: {', '.join(structured_requirements['must_do'])}")
+        if structured_requirements.get('must_not_do'):
+            sr_parts.append(f"Must NOT Do: {', '.join(structured_requirements['must_not_do'])}")
+        if structured_requirements.get('tone'):
+            sr_parts.append(f"Required Tone: {structured_requirements['tone']}")
+        if structured_requirements.get('success_criteria'):
+            sr_parts.append(f"Success Criteria: {', '.join(structured_requirements['success_criteria'])}")
+        
+        if sr_parts:
+            structured_req_section = f"\n\n**Structured Requirements:**\n" + "\n".join(sr_parts)
 
     user_message = f"""Design evaluation dimensions for this system:
 
@@ -1243,6 +1264,7 @@ IMPORTANT:
 
 **Failure Modes to Catch:**
 {json.dumps(failure_names[:10], indent=2)}
+{structured_req_section}
 
 **System Prompt:**
 ```
@@ -1250,7 +1272,8 @@ IMPORTANT:
 ```
 
 Create 4-6 domain-specific evaluation dimensions that will effectively judge outputs from this system.
-Focus on what makes outputs from THIS system valuable, not generic LLM quality metrics."""
+Focus on what makes outputs from THIS system valuable, not generic LLM quality metrics.
+{f"IMPORTANT: Ensure dimensions cover all structured requirements (must_do, must_not_do, tone, success_criteria)." if structured_requirements else ""}"""
 
     result = await llm_client.chat(
         system_prompt=dimension_prompt,
@@ -2202,7 +2225,10 @@ async def generate_gold_standard_eval_prompt(
     model_name: str,
     thinking_model: Optional[str] = None,
     max_iterations: int = 2,
-    project_id: Optional[str] = None
+    project_id: Optional[str] = None,
+    structured_requirements: Optional[Dict[str, Any]] = None,
+    run_bias_detection: bool = False,
+    test_cases_for_bias: Optional[List[Dict[str, str]]] = None
 ) -> EvalPromptResult:
     """
     Generate a gold-standard evaluation prompt incorporating all 20 best practices.
@@ -2212,6 +2238,10 @@ async def generate_gold_standard_eval_prompt(
     - Regression testing
     - QA automation
     - CI/CD pipelines
+    
+    Args:
+        structured_requirements: Optional structured requirements with must_do, must_not_do, 
+                                tone, output_format, success_criteria, edge_cases
     
     Production Metrics:
     - Tracks generation latency, LLM calls, validation outcomes
@@ -2236,17 +2266,32 @@ async def generate_gold_standard_eval_prompt(
     # Step 2: Build Auto-Fail Conditions
     prompt_type = analysis.get("prompt_type", PromptType.HYBRID)
     auto_fails = build_auto_fail_conditions(prompt_type, analysis)
+    
+    # Enhance auto-fails with structured requirements must_not_do items
+    if structured_requirements and structured_requirements.get('must_not_do'):
+        for forbidden_item in structured_requirements['must_not_do']:
+            auto_fails.append(f"Output violates requirement: Must NOT {forbidden_item}")
+    
     steps.append({"step": "auto_fails", "count": len(auto_fails)})
 
     # Step 3: Build Major Issues
     major_issues = build_major_issues(prompt_type, analysis)
+    
+    # Add major issues from structured requirements
+    if structured_requirements:
+        if structured_requirements.get('must_do'):
+            major_issues.append(f"Missing required behaviors: {', '.join(structured_requirements['must_do'][:3])}")
+        if structured_requirements.get('edge_cases'):
+            major_issues.append(f"Fails to handle edge cases: {', '.join(structured_requirements['edge_cases'][:2])}")
+    
     steps.append({"step": "major_issues", "count": len(major_issues)})
 
     # Step 4: Generate Domain-Specific Evaluation Dimensions (Dynamic)
     logger.info(f"Step 4: Generating domain-specific evaluation dimensions")
     dimensions = await generate_dynamic_evaluation_dimensions(
         system_prompt, use_case, analysis, auto_fails, major_issues,
-        llm_client, provider, api_key, model_name
+        llm_client, provider, api_key, model_name,
+        structured_requirements=structured_requirements
     )
     steps.append({"step": "dimensions", "count": len(dimensions), "dynamic": True})
 
@@ -2379,6 +2424,52 @@ async def generate_gold_standard_eval_prompt(
     # Record metrics
     record_eval_metrics(metrics)
     
+    # Optional: Run bias detection if requested
+    bias_report = None
+    if run_bias_detection and test_cases_for_bias and len(test_cases_for_bias) >= 3:
+        try:
+            logger.info("Running bias detection on generated eval prompt...")
+            from eval_bias_detector import check_eval_bias
+            
+            # Create eval function for bias detection
+            async def run_eval_for_bias(prompt, input_text, output_text):
+                result = await llm_client.chat(
+                    system_prompt=prompt.replace('{{input}}', input_text).replace('{{output}}', output_text),
+                    user_message="Evaluate and return JSON.",
+                    provider=provider,
+                    api_key=api_key,
+                    model_name=model_name,
+                    temperature=0.0,
+                    max_tokens=2000
+                )
+                
+                # Parse score from result
+                import json as json_lib
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', result.get('output', ''))
+                    if json_match:
+                        parsed = json_lib.loads(json_match.group())
+                        return float(parsed.get('score', 3.0)), parsed.get('verdict', 'UNKNOWN')
+                except:
+                    pass
+                return 3.0, 'UNKNOWN'
+            
+            bias_report_obj = await check_eval_bias(
+                eval_prompt=eval_prompt,
+                run_eval_func=run_eval_for_bias,
+                test_cases=test_cases_for_bias,
+                baseline_scores=None
+            )
+            
+            from eval_bias_detector import bias_report_to_dict
+            bias_report = bias_report_to_dict(bias_report_obj)
+            
+            logger.info(f"Bias detection complete: Score={bias_report_obj.overall_bias_score}, Biased={bias_report_obj.is_biased}")
+            
+        except Exception as e:
+            logger.warning(f"Bias detection failed: {e}")
+            bias_report = {"error": str(e), "overall_bias_score": 0, "is_biased": False}
+    
     result = EvalPromptResult(
         eval_prompt=eval_prompt,
         eval_criteria=[d["name"] for d in dimensions],
@@ -2418,7 +2509,8 @@ async def generate_gold_standard_eval_prompt(
             "max_iterations": max_iterations,
             "live_calibration_success_rate": live_tests.get("success_rate"),
             "judge_reliable": reliability.get("reliable"),
-            "generation_metrics": metrics.to_dict()  # Include metrics in response
+            "generation_metrics": metrics.to_dict(),  # Include metrics in response
+            "bias_report": bias_report  # Include bias detection results
         }
     )
     

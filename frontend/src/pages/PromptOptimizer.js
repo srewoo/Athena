@@ -61,6 +61,15 @@ const PromptOptimizer = () => {
   const [projectName, setProjectName] = useState("");
   const [useCase, setUseCase] = useState("");
   const [keyRequirements, setKeyRequirements] = useState("");
+  
+  // PRD & Enhanced Context state
+  const [showEnhancedContext, setShowEnhancedContext] = useState(false);
+  const [prdDocument, setPrdDocument] = useState("");
+  const [tone, setTone] = useState("");
+  const [outputFormat, setOutputFormat] = useState("");
+  const [successCriteria, setSuccessCriteria] = useState("");
+  const [edgeCases, setEdgeCases] = useState("");
+  
   const [targetProvider, setTargetProvider] = useState("openai");
   const [initialPrompt, setInitialPrompt] = useState("");
   const [projectId, setProjectId] = useState(null);
@@ -372,6 +381,20 @@ const PromptOptimizer = () => {
       setUseCase(project.requirements?.use_case || project.use_case);
       setKeyRequirements(project.requirements.key_requirements.join("\n"));
       setTargetProvider(project.requirements.target_provider);
+      
+      // Load enhanced context if available
+      if (project.structured_requirements) {
+        const sr = project.structured_requirements;
+        setPrdDocument(sr.prd_document || '');
+        setTone(sr.tone || '');
+        setOutputFormat(sr.output_format || '');
+        setSuccessCriteria(sr.success_criteria ? sr.success_criteria.join(', ') : '');
+        setEdgeCases(sr.edge_cases ? sr.edge_cases.join(', ') : '');
+        // Auto-expand if there are any enhanced context fields
+        if (sr.prd_document || sr.tone || sr.output_format || sr.success_criteria || sr.edge_cases) {
+          setShowEnhancedContext(true);
+        }
+      }
 
       // Set versions
       if (project.system_prompt_versions && project.system_prompt_versions.length > 0) {
@@ -723,6 +746,28 @@ const PromptOptimizer = () => {
         description: "Please wait while we set up your project and analyze your prompt. This may take 20-30 seconds.",
       });
 
+      // Build structured requirements if any fields are filled
+      let structuredRequirements = null;
+      if (prdDocument || tone || outputFormat || successCriteria || edgeCases) {
+        structuredRequirements = {};
+        
+        if (prdDocument) {
+          structuredRequirements.prd_document = prdDocument.trim();
+        }
+        if (tone) {
+          structuredRequirements.tone = tone.trim();
+        }
+        if (outputFormat) {
+          structuredRequirements.output_format = outputFormat.trim();
+        }
+        if (successCriteria) {
+          structuredRequirements.success_criteria = successCriteria.split(',').map(s => s.trim()).filter(s => s);
+        }
+        if (edgeCases) {
+          structuredRequirements.edge_cases = edgeCases.split(',').map(s => s.trim()).filter(s => s);
+        }
+      }
+
       const response = await fetch(`${API}/projects`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -730,6 +775,7 @@ const PromptOptimizer = () => {
           name: projectName,
           use_case: useCase,
           key_requirements: reqList,
+          structured_requirements: structuredRequirements,
           target_provider: targetProvider,
           initial_prompt: initialPrompt
         })
@@ -2735,6 +2781,104 @@ const PromptOptimizer = () => {
                     placeholder="e.g.,&#10;- Handle customer queries professionally&#10;- Provide accurate product information&#10;- Escalate complex issues to human agents"
                     className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[120px]"
                   />
+                </div>
+
+                {/* Enhanced Context (Optional) - PRD Import + Specific Fields */}
+                <div className="border-t border-slate-300 dark:border-slate-700 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => setShowEnhancedContext(!showEnhancedContext)}
+                    className="flex items-center justify-between w-full text-left p-3 bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 rounded-lg hover:from-blue-100 hover:to-purple-100 dark:hover:from-blue-900/30 dark:hover:to-purple-900/30 transition-colors border border-blue-200 dark:border-blue-800"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                        📄 Enhanced Context (Optional)
+                      </span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {showEnhancedContext ? 'Click to collapse' : 'Add PRD or specific context for better generation'}
+                      </span>
+                    </div>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      {showEnhancedContext ? '▼' : '▶'}
+                    </span>
+                  </button>
+                  
+                  {showEnhancedContext && (
+                    <div className="mt-4 space-y-4 p-4 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700">
+                      {/* PRD Document Import */}
+                      <div>
+                        <Label htmlFor="prdDocument" className="text-slate-700 dark:text-slate-300 text-sm font-semibold">
+                          📋 PRD / Requirements Document
+                        </Label>
+                        <Textarea
+                          id="prdDocument"
+                          value={prdDocument}
+                          onChange={(e) => setPrdDocument(e.target.value)}
+                          placeholder="Paste your Product Requirements Document here...&#10;&#10;The system will automatically extract:&#10;- User personas and target audience&#10;- Success criteria and metrics&#10;- Edge cases and constraints&#10;- Must-do and forbidden behaviors&#10;&#10;Supports: Plain text, Markdown"
+                          className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[150px] text-sm mt-2 font-mono"
+                        />
+                        <div className="flex items-start gap-2 mt-2 p-2 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
+                          <span className="text-blue-600 dark:text-blue-400 text-xs">💡</span>
+                          <p className="text-xs text-blue-700 dark:text-blue-300">
+                            AI will analyze your PRD to extract must-do behaviors, constraints, success criteria, and edge cases automatically.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Specific Context Fields */}
+                      <div className="border-t border-slate-200 dark:border-slate-700 pt-4">
+                        <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-3">SPECIFIC CONTEXT (Optional)</p>
+                        
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                          <div>
+                            <Label htmlFor="tone" className="text-slate-700 dark:text-slate-300 text-sm">Required Tone</Label>
+                            <input
+                              id="tone"
+                              type="text"
+                              value={tone}
+                              onChange={(e) => setTone(e.target.value)}
+                              placeholder="e.g., Professional, Empathetic"
+                              className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 rounded-md text-sm mt-1"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="outputFormat" className="text-slate-700 dark:text-slate-300 text-sm">Output Format</Label>
+                            <input
+                              id="outputFormat"
+                              type="text"
+                              value={outputFormat}
+                              onChange={(e) => setOutputFormat(e.target.value)}
+                              placeholder="e.g., JSON, Structured text"
+                              className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 rounded-md text-sm mt-1"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="mb-4">
+                          <Label htmlFor="successCriteria" className="text-slate-700 dark:text-slate-300 text-sm">Success Criteria (comma-separated)</Label>
+                          <Textarea
+                            id="successCriteria"
+                            value={successCriteria}
+                            onChange={(e) => setSuccessCriteria(e.target.value)}
+                            placeholder="e.g., Response time < 3s, Customer satisfaction > 4.5, Resolution rate > 80%"
+                            className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[60px] text-sm mt-1"
+                          />
+                        </div>
+
+                        <div>
+                          <Label htmlFor="edgeCases" className="text-slate-700 dark:text-slate-300 text-sm">Known Edge Cases (comma-separated)</Label>
+                          <Textarea
+                            id="edgeCases"
+                            value={edgeCases}
+                            onChange={(e) => setEdgeCases(e.target.value)}
+                            placeholder="e.g., Angry customers, Technical jargon, International customers"
+                            className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[60px] text-sm mt-1"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div>

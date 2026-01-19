@@ -324,6 +324,7 @@ class CreateProjectRequest(BaseModel):
     use_case: str
     key_requirements: list = None
     requirements: str = None
+    structured_requirements: Optional[Dict[str, Any]] = None  # New structured format
     target_provider: str = None
     initial_prompt: str = ""  # Optional for eval imports
     eval_prompt: Optional[str] = None  # For imported eval prompts
@@ -352,11 +353,65 @@ async def create_project(request: CreateProjectRequest):
         "key_requirements": key_reqs
     }
 
+    # Parse structured requirements if provided
+    from models import StructuredRequirements
+    from prd_extractor import extract_requirements_from_prd, merge_extracted_with_manual
+    from llm_client_v2 import get_llm_client as get_llm
+    from shared_settings import get_settings
+    
+    structured_reqs = None
+    if request.structured_requirements:
+        try:
+            manual_reqs = request.structured_requirements.copy()
+            prd_document = manual_reqs.get('prd_document', '')
+            
+            # If PRD document is provided, extract requirements using LLM
+            if prd_document and len(prd_document.strip()) > 50:
+                logger.info(f"Extracting requirements from PRD document ({len(prd_document)} chars)")
+                
+                # Get LLM settings for extraction
+                settings = get_settings()
+                provider = settings.get("provider", "openai")
+                api_key = settings.get("api_key", "")
+                model_name = settings.get("model_name", "gpt-4o-mini")
+                
+                if api_key:
+                    try:
+                        llm = get_llm()
+                        extracted = await extract_requirements_from_prd(
+                            prd_text=prd_document,
+                            llm_client=llm,
+                            provider=provider,
+                            api_key=api_key,
+                            model_name=model_name
+                        )
+                        
+                        # Merge extracted requirements with manual fields
+                        merged = merge_extracted_with_manual(extracted, manual_reqs)
+                        merged['prd_document'] = prd_document
+                        merged['prd_extracted'] = True
+                        
+                        structured_reqs = StructuredRequirements(**merged)
+                        logger.info(f"PRD extraction successful: {len(extracted.get('must_do', []))} must-do, {len(extracted.get('must_not_do', []))} must-not-do")
+                    except Exception as e:
+                        logger.warning(f"PRD extraction failed, using manual fields only: {e}")
+                        structured_reqs = StructuredRequirements(**manual_reqs)
+                else:
+                    logger.warning("No API key configured, skipping PRD extraction")
+                    structured_reqs = StructuredRequirements(**manual_reqs)
+            else:
+                # No PRD document, just use manual fields
+                structured_reqs = StructuredRequirements(**manual_reqs)
+                
+        except Exception as e:
+            logger.warning(f"Failed to parse structured requirements: {e}")
+
     project = project_storage.create_new_project(
         project_name=proj_name,
         use_case=request.use_case,
         requirements=requirements_obj,
         key_requirements=key_reqs,
+        structured_requirements=structured_reqs,
         initial_prompt=request.initial_prompt,
         eval_prompt=request.eval_prompt,
         project_type=request.project_type
@@ -692,11 +747,23 @@ async def analyze_prompt(project_id: str, request: AnalyzeRequest):
             # Get use case and requirements from project for context
             use_case = project.use_case if project.use_case else ""
             requirements = ', '.join(project.key_requirements) if project.key_requirements else ""
+            
+            # Pass structured requirements if available
+            structured_reqs_dict = None
+            if project.structured_requirements:
+                # Convert StructuredRequirements model to dict
+                if hasattr(project.structured_requirements, 'dict'):
+                    structured_reqs_dict = project.structured_requirements.dict()
+                elif hasattr(project.structured_requirements, 'model_dump'):
+                    structured_reqs_dict = project.structured_requirements.model_dump()
+                elif isinstance(project.structured_requirements, dict):
+                    structured_reqs_dict = project.structured_requirements
 
             enhanced_result = await analyze_prompt_hybrid(
                 prompt_text=prompt_text,
                 use_case=use_case,
                 requirements=requirements,
+                structured_requirements=structured_reqs_dict,
                 llm_client=enhanced_llm_client,
                 provider=provider,
                 api_key=api_key,

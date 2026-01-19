@@ -160,3 +160,7 @@ BKP/
 backend/saved_projects/
 saved_projects
 backend/.athena_settings.json
+
+# Add to .gitignore
+*.db-shm
+*.db-wal

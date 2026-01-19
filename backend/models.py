@@ -8,6 +8,19 @@ from datetime import datetime
 
 # ============= Request Models =============
 
+class StructuredRequirements(BaseModel):
+    """Structured requirements for better prompt generation"""
+    prd_document: Optional[str] = None  # Full PRD text for AI extraction
+    must_do: Optional[List[str]] = None  # List of required behaviors (auto-extracted from PRD or manual)
+    must_not_do: Optional[List[str]] = None  # List of forbidden behaviors (auto-extracted from PRD or manual)
+    tone: Optional[str] = None  # e.g., "professional", "empathetic", "concise"
+    output_format: Optional[str] = None  # Expected output structure
+    constraints: Optional[List[str]] = None  # Additional constraints
+    edge_cases: Optional[List[str]] = None  # Known edge cases to handle
+    success_criteria: Optional[List[str]] = None  # What defines success
+    prd_extracted: Optional[bool] = None  # Flag indicating if PRD was auto-extracted
+
+
 class ProjectInput(BaseModel):
     """User input for the prompt testing workflow"""
     model_config = ConfigDict(protected_namespaces=())
@@ -18,6 +31,7 @@ class ProjectInput(BaseModel):
     project_name: str
     use_case: str
     requirements: str
+    structured_requirements: Optional[StructuredRequirements] = None  # New structured format
     initial_prompt: str
 
 
@@ -135,6 +149,7 @@ class SavedProject(BaseModel):
     project_name: str
     use_case: str
     requirements: Any  # Can be string or object with use_case
+    structured_requirements: Optional[StructuredRequirements] = None  # New structured format
     key_requirements: Optional[List[str]] = None
     initial_prompt: str
     project_type: Optional[str] = None  # "eval" for imported eval prompts
@@ -143,6 +158,7 @@ class SavedProject(BaseModel):
     eval_prompt: Optional[str] = None
     eval_rationale: Optional[str] = None
     eval_prompt_versions: Optional[List[Dict[str, Any]]] = None  # Eval prompt version history
+    eval_metadata: Optional[Dict[str, Any]] = None  # Metadata for eval prompt (calibration examples, bias reports)
     calibration_examples: Optional[List[CalibrationExample]] = None  # Few-shot examples
     human_validations: Optional[List[HumanValidation]] = None  # Human validation records
     ab_tests: Optional[List[ABTestConfig]] = None  # A/B test configurations

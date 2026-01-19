@@ -226,10 +226,30 @@ def extract_format_hints(prompt_text: str, input_type: InputType) -> List[str]:
     return hints
 
 
-def build_input_generation_prompt(spec: InputFormatSpec, prompt_text: str, use_case: str, requirements: str) -> str:
-    """Build a specialized prompt for generating test inputs based on the detected format"""
+def build_input_generation_prompt(spec: InputFormatSpec, prompt_text: str, use_case: str, requirements: str, structured_requirements: dict = None) -> str:
+    """Build a specialized prompt for generating test inputs based on the detected format
+    
+    Args:
+        structured_requirements: Optional dict with must_do, must_not_do, edge_cases, etc.
+    """
 
     type_specific_instructions = get_type_specific_instructions(spec)
+    
+    # Build structured requirements section
+    structured_req_section = ""
+    if structured_requirements:
+        sr_parts = []
+        if structured_requirements.get('must_do'):
+            sr_parts.append(f"**Must Do Behaviors:** {', '.join(structured_requirements['must_do'])}")
+        if structured_requirements.get('must_not_do'):
+            sr_parts.append(f"**Forbidden Behaviors:** {', '.join(structured_requirements['must_not_do'])}")
+        if structured_requirements.get('edge_cases'):
+            sr_parts.append(f"**Known Edge Cases:** {', '.join(structured_requirements['edge_cases'])}")
+        if structured_requirements.get('success_criteria'):
+            sr_parts.append(f"**Success Criteria:** {', '.join(structured_requirements['success_criteria'])}")
+        
+        if sr_parts:
+            structured_req_section = "\n\n## STRUCTURED REQUIREMENTS\n" + "\n".join(sr_parts)
 
     prompt = f"""You are generating REALISTIC test inputs for a prompt testing system.
 
@@ -241,6 +261,7 @@ def build_input_generation_prompt(spec: InputFormatSpec, prompt_text: str, use_c
 - **Expected Length:** {spec.expected_length}
 - **Use Case:** {use_case}
 - **Requirements:** {requirements}
+{structured_req_section}
 
 ## TYPE-SPECIFIC INSTRUCTIONS
 {type_specific_instructions}
@@ -258,6 +279,7 @@ def build_input_generation_prompt(spec: InputFormatSpec, prompt_text: str, use_c
 4. Make adversarial inputs subtle and realistic
 5. Vary the complexity, length, and content of inputs
 6. For {spec.input_type.value}: {get_realism_tips(spec.input_type)}
+{f"7. Include test cases that specifically test must_do requirements and forbidden behaviors" if structured_requirements else ""}
 
 ## OUTPUT FORMAT
 Return a JSON object with test_cases array. Each test case should have:
@@ -267,7 +289,8 @@ Return a JSON object with test_cases array. Each test case should have:
 - "expected_behavior": Expected system behavior
 - "variation": Brief description of what makes this case unique
 
-For {spec.input_type.value.replace('_', ' ')} inputs, make them REALISTIC and COMPLETE."""
+For {spec.input_type.value.replace('_', ' ')} inputs, make them REALISTIC and COMPLETE.
+{f"IMPORTANT: Create test cases that verify all must_do requirements and test against forbidden behaviors." if structured_requirements else ""}"""
 
     return prompt
 

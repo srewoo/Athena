@@ -1045,10 +1045,21 @@ def get_adversarial_examples(prompt_type: PromptType) -> List[str]:
     ]
 
 
-def analyze_prompt(text: str) -> PromptAnalysis:
+def analyze_prompt(text: str, structured_requirements: Optional[Dict[str, Any]] = None) -> PromptAnalysis:
     """
     Main function to analyze a prompt and return complete analysis.
     This is the primary entry point for the prompt analyzer.
+    
+    Args:
+        text: The prompt text to analyze
+        structured_requirements: Optional structured requirements dict with keys:
+            - must_do: List of required behaviors
+            - must_not_do: List of forbidden behaviors  
+            - tone: Expected tone
+            - output_format: Expected output structure
+            - constraints: Additional constraints
+            - edge_cases: Known edge cases
+            - success_criteria: Success metrics
     """
     # Extract DNA components
     template_vars = extract_template_variables(text)
@@ -1058,6 +1069,13 @@ def analyze_prompt(text: str) -> PromptAnalysis:
     sections = extract_sections(text)
     constraints = extract_constraints(text)
     role = extract_role(text)
+    
+    # Enhance constraints with structured requirements
+    if structured_requirements:
+        if structured_requirements.get('constraints'):
+            constraints.extend(structured_requirements['constraints'])
+        if structured_requirements.get('must_not_do'):
+            constraints.extend([f"Must NOT: {item}" for item in structured_requirements['must_not_do']])
 
     dna = PromptDNA(
         template_variables=template_vars,
@@ -1082,9 +1100,58 @@ def analyze_prompt(text: str) -> PromptAnalysis:
     improvement_needed, improvement_areas, strengths = determine_improvement_areas(
         quality_breakdown, dna, primary_type
     )
+    
+    # Enhance improvement areas with structured requirements checks
+    if structured_requirements:
+        sr_improvements = []
+        
+        # Check must_do items
+        if structured_requirements.get('must_do'):
+            for item in structured_requirements['must_do']:
+                if item.lower() not in text.lower():
+                    sr_improvements.append(f"Missing required behavior: {item}")
+        
+        # Check tone alignment
+        if structured_requirements.get('tone'):
+            expected_tone = structured_requirements['tone']
+            if expected_tone.lower() not in text.lower():
+                sr_improvements.append(f"Consider specifying '{expected_tone}' tone explicitly")
+        
+        # Check output format
+        if structured_requirements.get('output_format'):
+            expected_format = structured_requirements['output_format']
+            if not dna.output_format:
+                sr_improvements.append(f"Specify output format: {expected_format}")
+        
+        # Add structured requirement improvements
+        if sr_improvements:
+            improvement_areas.extend(sr_improvements)
+            improvement_needed = True
 
     # Generate eval dimensions (consider multiple types for multi-type prompts)
     eval_dimensions = generate_eval_dimensions(primary_type, dna)
+    
+    # Enhance eval dimensions with structured requirements
+    if structured_requirements:
+        # Add requirement compliance dimension
+        if structured_requirements.get('must_do') or structured_requirements.get('must_not_do'):
+            eval_dimensions.insert(0, {
+                "name": "Requirement Compliance",
+                "description": "Checks if output follows all specified must-do and must-not-do requirements",
+                "check": "Verify all required behaviors present and forbidden behaviors absent",
+                "weight": 1.5,
+                "from_structured_requirements": True
+            })
+        
+        # Add success criteria dimension
+        if structured_requirements.get('success_criteria'):
+            eval_dimensions.insert(0, {
+                "name": "Success Criteria",
+                "description": f"Evaluates: {', '.join(structured_requirements['success_criteria'][:3])}",
+                "check": "Measure against defined success metrics",
+                "weight": 1.5,
+                "from_structured_requirements": True
+            })
 
     # For multi-type prompts, add dimensions from secondary types
     if multi_label_result.is_multi_type:

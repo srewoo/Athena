@@ -75,6 +75,7 @@ async def analyze_prompt_hybrid(
     prompt_text: str,
     use_case: str = "",
     requirements: str = "",
+    structured_requirements: Optional[Dict[str, Any]] = None,
     llm_client: EnhancedLLMClient = None,
     provider: str = "openai",
     api_key: str = "",
@@ -88,6 +89,7 @@ async def analyze_prompt_hybrid(
         prompt_text: The system prompt to analyze
         use_case: Optional context about what the prompt is for
         requirements: Optional requirements the prompt should meet
+        structured_requirements: Optional structured requirements dict
         llm_client: LLM client for enhanced analysis
         provider: LLM provider
         api_key: API key for LLM
@@ -112,6 +114,7 @@ async def analyze_prompt_hybrid(
             programmatic=prog_dict,
             use_case=use_case,
             requirements=requirements,
+            structured_requirements=structured_requirements,
             llm_client=llm_client,
             provider=provider,
             api_key=api_key,
@@ -131,6 +134,7 @@ async def _get_llm_analysis(
     programmatic: Dict[str, Any],
     use_case: str,
     requirements: str,
+    structured_requirements: Optional[Dict[str, Any]],
     llm_client: EnhancedLLMClient,
     provider: str,
     api_key: str,
@@ -237,6 +241,26 @@ Return your analysis as JSON:
 - Constraints: {len(programmatic.get('dna', {}).get('constraints', []))} found
 """
 
+    # Add structured requirements context if provided
+    structured_req_context = ""
+    if structured_requirements:
+        sr_parts = []
+        if structured_requirements.get('must_do'):
+            sr_parts.append(f"**Must Do:** {', '.join(structured_requirements['must_do'])}")
+        if structured_requirements.get('must_not_do'):
+            sr_parts.append(f"**Must NOT Do:** {', '.join(structured_requirements['must_not_do'])}")
+        if structured_requirements.get('tone'):
+            sr_parts.append(f"**Required Tone:** {structured_requirements['tone']}")
+        if structured_requirements.get('output_format'):
+            sr_parts.append(f"**Required Output Format:** {structured_requirements['output_format']}")
+        if structured_requirements.get('success_criteria'):
+            sr_parts.append(f"**Success Criteria:** {', '.join(structured_requirements['success_criteria'])}")
+        if structured_requirements.get('edge_cases'):
+            sr_parts.append(f"**Edge Cases to Handle:** {', '.join(structured_requirements['edge_cases'])}")
+        
+        if sr_parts:
+            structured_req_context = "\n\n**Structured Requirements:**\n" + "\n".join(sr_parts)
+
     user_message = f"""Analyze this system prompt:
 
 ```
@@ -245,10 +269,12 @@ Return your analysis as JSON:
 
 {f"**Use Case:** {use_case}" if use_case else ""}
 {f"**Requirements:** {requirements}" if requirements else ""}
+{structured_req_context}
 
 {prog_context}
 
-Provide a deep analysis focusing on semantic understanding, not just surface patterns. Be specific and actionable in your suggestions."""
+Provide a deep analysis focusing on semantic understanding, not just surface patterns. Be specific and actionable in your suggestions.
+{f"IMPORTANT: Check if the prompt addresses all structured requirements (must_do, must_not_do, tone, output_format, success_criteria, edge_cases)." if structured_requirements else ""}"""
 
     result = await llm_client.chat(
         system_prompt=system_prompt,

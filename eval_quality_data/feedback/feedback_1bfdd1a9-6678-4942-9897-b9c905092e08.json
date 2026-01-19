@@ -1,0 +1,20 @@
+[
+  {
+    "id": "d63629c9085d",
+    "project_id": "1bfdd1a9-6678-4942-9897-b9c905092e08",
+    "eval_prompt_version": 1,
+    "test_case_id": "manual_refinement",
+    "llm_score": 3.0,
+    "llm_verdict": "NEEDS_REVIEW",
+    "llm_reasoning": "Manual refinement requested",
+    "human_score": null,
+    "human_verdict": null,
+    "human_feedback": "Focus more on accuracy and safety",
+    "score_difference": null,
+    "agreement": null,
+    "dimension_scores": {},
+    "dimension_feedback": {},
+    "created_at": "2026-01-19T11:11:49.672801",
+    "feedback_type": "human_validation"
+  }
+]

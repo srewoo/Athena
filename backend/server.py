@@ -181,6 +181,11 @@ app.include_router(project_api.router)
 # Include quality API router for eval quality features
 app.include_router(quality_api.router)
 
+# Include calibration & bias detection router
+# DISABLED: calibration_api routes conflict with existing project_api routes
+# from calibration_api import router as calibration_router
+# app.include_router(calibration_router)
+
 
 # NOTE: The following endpoints were removed as they are not used by the UI:
 #   - GET / (root endpoint)

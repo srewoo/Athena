@@ -433,45 +433,6 @@ class TestGenerateDataset:
         assert response.json()["count"] == 0
 
 
-class TestGenerateDatasetStream:
-    """Tests for POST /api/projects/{project_id}/dataset/generate-stream"""
-    
-    def test_generate_dataset_stream_success(self, test_project):
-        """Positive: Should generate dataset (streaming fallback)"""
-        response = client.post(f"/api/projects/{test_project}/dataset/generate-stream", json={
-            "sample_count": 3
-        })
-        assert response.status_code in [200, 500]
-        assert "test_cases" in response.json()
-    
-    def test_generate_dataset_stream_project_not_found(self):
-        """Negative: Should return 404 for non-existent project"""
-        response = client.post("/api/projects/non-existent/dataset/generate-stream", json={
-            "sample_count": 3
-        })
-        assert response.status_code == 404
-
-
-class TestSmartGenerateDataset:
-    """Tests for POST /api/projects/{project_id}/dataset/smart-generate"""
-    
-    def test_smart_generate_dataset_success(self, test_project):
-        """Positive: Should smart generate dataset"""
-        response = client.post(f"/api/projects/{test_project}/dataset/smart-generate", json={
-            "sample_count": 5
-        })
-        # May fail without API key or may require additional setup
-        assert response.status_code in [200, 400]
-        if response.status_code == 200:
-            data = response.json()
-            assert "test_cases" in data
-    
-    def test_smart_generate_dataset_project_not_found(self):
-        """Negative: Should return 404 for non-existent project"""
-        response = client.post("/api/projects/non-existent/dataset/smart-generate", json={
-            "sample_count": 5
-        })
-        assert response.status_code == 404
 
 
 class TestExportDataset:

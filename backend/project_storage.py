@@ -118,6 +118,7 @@ def create_new_project(
     use_case: str,
     requirements: any,
     key_requirements: list = None,
+    structured_requirements: any = None,
     initial_prompt: str = "",
     eval_prompt: str = None,
     project_type: str = None
@@ -150,6 +151,7 @@ def create_new_project(
         project_name=project_name,
         use_case=use_case,
         requirements=requirements,
+        structured_requirements=structured_requirements,
         key_requirements=key_requirements or [],
         initial_prompt=initial_prompt,
         eval_prompt=eval_prompt,
