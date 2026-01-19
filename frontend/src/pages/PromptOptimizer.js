@@ -3381,6 +3381,42 @@ const PromptOptimizer = () => {
                         </div>
                       )}
 
+                      {/* Review Recommendations Notice */}
+                      {evalPrompt && (
+                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg p-4">
+                          <div className="flex items-start gap-3">
+                            <div className="flex-shrink-0 mt-0.5">
+                              <svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                            </div>
+                            <div className="flex-1">
+                              <h3 className="font-semibold text-amber-600 dark:text-amber-400 mb-2">Review Before Using</h3>
+                              <p className="text-sm text-amber-700 dark:text-amber-300 mb-2">
+                                <strong>Priority areas to customize for your use case:</strong>
+                              </p>
+                              <ul className="text-sm text-amber-700 dark:text-amber-300 space-y-1 ml-4">
+                                <li className="flex items-start gap-2">
+                                  <span className="text-amber-600 dark:text-amber-400 font-bold">•</span>
+                                  <span><strong>Calibration examples</strong> (most important) - Add 3-5 examples with diverse scores for consistency</span>
+                                </li>
+                                <li className="flex items-start gap-2">
+                                  <span className="text-amber-600 dark:text-amber-400 font-bold">•</span>
+                                  <span><strong>Dimension weights</strong> - Adjust if defaults don't match your priorities</span>
+                                </li>
+                                <li className="flex items-start gap-2">
+                                  <span className="text-amber-600 dark:text-amber-400 font-bold">•</span>
+                                  <span><strong>Auto-fail conditions</strong> - Add domain-specific critical failures</span>
+                                </li>
+                              </ul>
+                              <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 italic">
+                                The rest can be used as-is (structure, rubrics, and consistency rules are AI-optimized)
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       <div>
                         <Label>Evaluation Prompt</Label>
                         <Textarea
