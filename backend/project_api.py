@@ -13,11 +13,10 @@ import logging
 
 import project_storage
 from models import SavedProject, ProjectListItem
-from llm_client import get_llm_client
+from llm_client_v2 import get_llm_client
 from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
 from prompt_analyzer import analyze_prompt as analyze_prompt_dna
 from prompt_analyzer_v2 import analyze_prompt_hybrid, enhanced_analysis_to_dict
-from llm_client_v2 import get_llm_client as get_enhanced_llm_client
 from eval_best_practices import (
     get_anthropic_system_prompt_for_generation,
     get_anthropic_system_prompt_for_improvement,
@@ -742,7 +741,7 @@ async def analyze_prompt(project_id: str, request: AnalyzeRequest):
     if api_key:
         # Use the enhanced hybrid analyzer for deep semantic understanding
         try:
-            enhanced_llm_client = get_enhanced_llm_client()
+            enhanced_llm_client = get_llm_client()
 
             # Get use case and requirements from project for context
             use_case = project.use_case if project.use_case else ""

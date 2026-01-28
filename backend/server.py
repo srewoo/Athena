@@ -28,35 +28,19 @@ import re
 import uuid
 from datetime import datetime
 
-from models import (
-    ProjectInput,
-    PromptOptimizationResult,
-    EvaluationPromptResult,
-    TestDataResult,
-    TestExecutionResult,
-    FinalReport
-)
+from models import ProjectInput
 
-# Use new enhanced components
-from llm_client_v2 import get_llm_client, parse_json_response, EnhancedLLMClient
+from llm_client_v2 import get_llm_client, parse_json_response
 from shared_settings import settings_store, get_settings as get_llm_settings_shared, update_settings
 import project_api
 import database as db
-from prompt_analyzer import analyze_prompt, analysis_to_dict, PromptType
-from prompt_analyzer_v2 import analyze_prompt_hybrid, enhanced_analysis_to_dict, analyze_prompt_quick
-from agentic_rewrite import agentic_rewrite, result_to_dict as agentic_result_to_dict, get_thinking_model_for_provider
-from agentic_eval import agentic_eval_generation, result_to_dict as agentic_eval_result_to_dict
-from eval_generator_v2 import generate_best_eval_prompt
+from prompt_analyzer import PromptType
+from agentic_rewrite import agentic_rewrite, get_thinking_model_for_provider
 from eval_generator_v3 import generate_gold_standard_eval_prompt
 from eval_best_practices import apply_best_practices_check
-from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
-from security import check_rate_limit, validate_api_key_format, mask_api_key, generate_request_id
-from logging_config import (
-    setup_logging, get_logger, set_request_id, get_request_id,
-    log_performance, metrics
-)
+from security import check_rate_limit, validate_api_key_format, generate_request_id
+from logging_config import setup_logging, get_logger, set_request_id, metrics
 import quality_api
-from eval_quality_system import get_quality_manager, build_compact_eval_prompt
 
 # Setup structured logging
 log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -452,8 +436,7 @@ async def agentic_rewrite_optimization(project: ProjectInput, current_result: di
 async def agentic_generate_evaluation_prompt(
     project: ProjectInput,
     optimized_prompt: str = Body(...),
-    use_thinking_model: bool = Body(True),
-    use_gold_standard: bool = Body(True)
+    use_thinking_model: bool = Body(True)
 ):
     """
     Step 3 Agentic Eval Generation: Gold-standard evaluation prompt generation.
@@ -488,7 +471,6 @@ async def agentic_generate_evaluation_prompt(
     - project: Project configuration including API keys
     - optimized_prompt: The system prompt to generate eval for
     - use_thinking_model: Whether to use a thinking model for analysis (default: True)
-    - use_gold_standard: Use v3 gold-standard generator (default: True)
     """
     if not optimized_prompt:
         raise HTTPException(status_code=400, detail="optimized_prompt is required")
@@ -505,32 +487,17 @@ async def agentic_generate_evaluation_prompt(
         logger.info(f"Using thinking model: {thinking_model} for eval generation")
 
     try:
-        # Use gold-standard v3 generator by default
-        if use_gold_standard:
-            result = await generate_gold_standard_eval_prompt(
-                system_prompt=optimized_prompt,
-                use_case=project.use_case,
-                requirements=project.requirements,
-                llm_client=llm_client,
-                provider=project.provider,
-                api_key=project.api_key,
-                model_name=project.model_name,
-                thinking_model=thinking_model,
-                max_iterations=2
-            )
-        else:
-            # Fallback to v2
-            result = await generate_best_eval_prompt(
-                system_prompt=optimized_prompt,
-                use_case=project.use_case,
-                requirements=project.requirements,
-                llm_client=llm_client,
-                provider=project.provider,
-                api_key=project.api_key,
-                model_name=project.model_name,
-                thinking_model=thinking_model,
-                max_iterations=2
-            )
+        result = await generate_gold_standard_eval_prompt(
+            system_prompt=optimized_prompt,
+            use_case=project.use_case,
+            requirements=project.requirements,
+            llm_client=llm_client,
+            provider=project.provider,
+            api_key=project.api_key,
+            model_name=project.model_name,
+            thinking_model=thinking_model,
+            max_iterations=2
+        )
 
         # Record metrics
         metrics.increment("eval_prompts_generated")

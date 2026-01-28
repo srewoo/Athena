@@ -2,8 +2,6 @@
 Advanced Evaluator Prompt Generator for Athena (V3) - CANONICAL VERSION
 
 This is the gold-standard eval prompt generator incorporating all 20 best practices.
-This is the RECOMMENDED version - V1 (agentic_eval.py) and V2 (eval_generator_v2.py) 
-are deprecated.
 
 Best Practices Implemented:
 1. Explicit Role Separation - Evaluator doesn't re-do the task
@@ -2515,7 +2513,3 @@ async def generate_gold_standard_eval_prompt(
     )
     
     return result
-
-
-# Alias for backward compatibility
-generate_best_eval_prompt_v3 = generate_gold_standard_eval_prompt

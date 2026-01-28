@@ -9,21 +9,21 @@ from unittest.mock import AsyncMock, patch, MagicMock
 # Add backend to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
-from llm_client import LLMClient, get_llm_client
+from llm_client_v2 import EnhancedLLMClient, get_llm_client
 
 
 class TestLLMClient:
-    """Tests for LLMClient class"""
-    
+    """Tests for EnhancedLLMClient class"""
+
     def test_get_llm_client_returns_instance(self):
-        """Positive: Should return LLMClient instance"""
+        """Positive: Should return EnhancedLLMClient instance"""
         client = get_llm_client()
-        assert isinstance(client, LLMClient)
+        assert isinstance(client, EnhancedLLMClient)
     
     @pytest.mark.asyncio
     async def test_chat_openai_success(self):
         """Positive: Should handle OpenAI provider successfully"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -51,7 +51,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_openai_reasoning_model(self):
         """Positive: Should handle reasoning models (o1, o3)"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -80,7 +80,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_claude_success(self):
         """Positive: Should handle Claude provider successfully"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         mock_response = MagicMock()
         mock_response.content = [MagicMock()]
@@ -109,7 +109,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_gemini_success(self):
         """Positive: Should handle Gemini provider successfully"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         mock_response = MagicMock()
         mock_response.text = "Gemini response"
@@ -134,7 +134,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_unsupported_provider(self):
         """Negative: Should return error for unsupported provider"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         result = await client.chat(
             system_prompt="Test",
@@ -150,7 +150,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_openai_exception(self):
         """Negative: Should handle OpenAI API exceptions"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         with patch('openai.AsyncOpenAI') as mock_openai:
             mock_client_instance = AsyncMock()
@@ -170,7 +170,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_default_model_names(self):
         """Positive: Should use default model names when not specified"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         # Test OpenAI default
         with patch('openai.AsyncOpenAI') as mock_openai:
@@ -197,7 +197,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_tracks_latency(self):
         """Positive: Should track latency in milliseconds"""
-        client = LLMClient()
+        client = EnhancedLLMClient()
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
