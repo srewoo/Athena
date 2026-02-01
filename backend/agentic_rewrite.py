@@ -65,13 +65,19 @@ class AgenticRewriteResult:
     validation: Optional[Dict[str, Any]]
     no_change: bool
     reason: str
+    # Convergence tracking
+    converged: bool = False  # True if stopped due to convergence (no meaningful improvement)
+    convergence_reason: Optional[str] = None  # Why convergence was detected
+    score_history: List[float] = field(default_factory=list)  # Score at each iteration
+    total_tokens_used: int = 0  # Total tokens used across all LLM calls
 
 
-# Thinking model identifiers
+# Thinking/reasoning model identifiers
+# These models have special API requirements (no temperature, max_completion_tokens, etc.)
 THINKING_MODELS = {
-    "openai": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "gpt-5"],
-    "claude": ["claude-sonnet-4-5", "claude-opus-4"],  # Latest Claude models
-    "gemini": ["gemini-3", "gemini-2.0-flash-thinking"]
+    "openai": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"],  # Reasoning models
+    "claude": ["claude-sonnet-4-5", "claude-opus-4"],  # Extended thinking models
+    "gemini": ["gemini-2.0-flash-thinking", "gemini-2.5-flash-preview-04-17"]  # Thinking variants
 }
 
 
@@ -615,16 +621,20 @@ The input will be provided in the following format:
 ## IMPROVEMENTS TO INCORPORATE
 {improvements_str}
 
-## TEMPLATE VARIABLES TO PRESERVE
+## TEMPLATE VARIABLES - MANDATORY PRESERVATION
 {template_vars_str}
-These must appear EXACTLY as written (with double curly braces) in your output.
+
+⚠️ CRITICAL: These template variables are PLACEHOLDERS that get replaced with real data at runtime.
+You MUST include EVERY variable listed above in your output, using the EXACT syntax shown (with double curly braces).
+If you omit ANY variable, the prompt will break. Copy them exactly as shown.
 
 ## CRITICAL RULES
 1. DO NOT copy sentences from the original - rephrase everything
 2. DO NOT skip any section - include ALL sections listed above
 3. DO NOT add explanations before or after the prompt
 4. DO NOT wrap in markdown code blocks
-5. The output should be 2-3x longer than the input due to added structure"""
+5. The output should be 2-3x longer than the input due to added structure
+6. PRESERVE ALL TEMPLATE VARIABLES - failure to include {template_vars_str} will cause rejection"""
 
     user_message = f"""ORIGINAL PROMPT TO REWRITE:
 \"\"\"
@@ -703,7 +713,67 @@ Now output the COMPLETE rewritten prompt with all sections. Start directly with 
         logger.warning("Empty rewrite result, returning original")
         return prompt
 
+    # POST-PROCESSING: Verify and recover missing template variables
+    rewritten = _ensure_template_variables(rewritten, template_vars, prompt)
+
     logger.info(f"Rewrite complete. Original length: {len(prompt)}, New length: {len(rewritten)}")
+    return rewritten
+
+
+def _ensure_template_variables(rewritten: str, template_vars: List[str], original: str) -> str:
+    """
+    Ensure all template variables from the original are present in the rewrite.
+    If missing, attempt to find their context in the original and add a note.
+    """
+    if not template_vars:
+        return rewritten
+
+    missing_vars = []
+    for var in template_vars:
+        # Check for both {{var}} and {var} formats
+        if f"{{{{{var}}}}}" not in rewritten and f"{{{var}}}" not in rewritten:
+            missing_vars.append(var)
+
+    if not missing_vars:
+        return rewritten  # All variables present
+
+    logger.warning(f"Rewrite missing template variables: {missing_vars}. Attempting recovery...")
+
+    # Try to find the context where each variable appears in the original
+    # and add a section for it if not present
+    for var in missing_vars:
+        # Find how the variable is used in the original
+        var_pattern = f"{{{{{var}}}}}"
+        if var_pattern in original:
+            # Find the line containing the variable
+            for line in original.split('\n'):
+                if var_pattern in line:
+                    # Add the variable reference to the rewrite
+                    # Look for a good place to insert it (after ## Input section or at end)
+                    if "## Input" in rewritten:
+                        # Insert after Input section
+                        parts = rewritten.split("## Input")
+                        if len(parts) >= 2:
+                            # Find the end of the Input section
+                            rest = parts[1]
+                            next_section = rest.find("\n##")
+                            if next_section > 0:
+                                insert_point = next_section
+                                rewritten = (
+                                    parts[0] + "## Input" +
+                                    rest[:insert_point] +
+                                    f"\n\nThe input data will be provided as: {var_pattern}\n" +
+                                    rest[insert_point:]
+                                )
+                            else:
+                                rewritten += f"\n\n**Input Variable:** {var_pattern}\n"
+                    else:
+                        # Append at the end
+                        rewritten += f"\n\n## Input Data\nThe following variable will be provided: {var_pattern}\n"
+
+                    logger.info(f"Recovered missing variable: {var}")
+                    break
+
     return rewritten
 
 
@@ -986,7 +1056,10 @@ async def agentic_rewrite(
             improvement_plan=None,
             validation=None,
             no_change=True,
-            reason=f"Prompt is already production-ready (score: {original_score}/10). No changes needed."
+            reason=f"Prompt is already production-ready (score: {original_score}/10). No changes needed.",
+            converged=True,
+            convergence_reason="Prompt already production-ready, no iterations needed",
+            score_history=[original_score]
         )
 
     # Step 2: Plan Improvements
@@ -1027,7 +1100,10 @@ async def agentic_rewrite(
             },
             validation=None,
             no_change=True,
-            reason="Analysis found no improvements needed."
+            reason="Analysis found no improvements needed.",
+            converged=True,
+            convergence_reason="No improvements identified during planning phase",
+            score_history=[original_score]
         )
 
     # Step 3: Execute Rewrite
@@ -1049,9 +1125,19 @@ async def agentic_rewrite(
 
     steps_taken[-1]["status"] = "completed"
 
-    # Iteration loop
+    # Iteration loop with convergence detection
     iteration = 0
     final_validation = None
+    score_history = [original_score]  # Track scores for convergence detection
+    converged = False
+    convergence_reason = None
+    previous_iteration_score = original_score
+
+    # Convergence threshold - stop if improvement is less than this
+    CONVERGENCE_THRESHOLD = 0.1  # 0.1 points on 10-point scale
+    # Also stop if score hasn't improved in consecutive iterations
+    NO_IMPROVEMENT_THRESHOLD = 2  # Stop after 2 iterations with no improvement
+    no_improvement_count = 0
 
     while iteration < max_iterations:
         iteration += 1
@@ -1078,6 +1164,40 @@ async def agentic_rewrite(
         }
 
         final_validation = validation
+
+        # Get current score for convergence check
+        current_iteration_score = await llm_score_prompt(
+            prompt=current_prompt,
+            use_case=use_case,
+            llm_client=llm_client,
+            provider=provider,
+            api_key=api_key,
+            model_name=model_name
+        )
+        score_history.append(current_iteration_score)
+
+        # Check for convergence
+        score_delta = current_iteration_score - previous_iteration_score
+        logger.info(f"Iteration {iteration}: Score {current_iteration_score:.2f} (delta: {score_delta:+.2f})")
+
+        if abs(score_delta) < CONVERGENCE_THRESHOLD:
+            no_improvement_count += 1
+            if no_improvement_count >= NO_IMPROVEMENT_THRESHOLD or iteration > 1:
+                converged = True
+                convergence_reason = f"Score converged (delta {score_delta:+.2f} < threshold {CONVERGENCE_THRESHOLD})"
+                logger.info(f"Convergence detected: {convergence_reason}")
+                break
+        else:
+            no_improvement_count = 0  # Reset counter on improvement
+
+        # Check if score is getting worse
+        if score_delta < -0.5:
+            converged = True
+            convergence_reason = f"Score regressed significantly (delta {score_delta:+.2f})"
+            logger.warning(f"Stopping due to regression: {convergence_reason}")
+            break
+
+        previous_iteration_score = current_iteration_score
 
         # If valid, we're done
         if validation.is_valid and not validation.regression_detected:
@@ -1189,7 +1309,10 @@ async def agentic_rewrite(
                 "max_allowed_drop": MAX_ALLOWED_SCORE_DROP
             },
             no_change=True,
-            reason=f"Rewrite reverted: {revert_reason}. Original prompt preserved."
+            reason=f"Rewrite reverted: {revert_reason}. Original prompt preserved.",
+            converged=converged,
+            convergence_reason=convergence_reason or f"Reverted due to quality regression",
+            score_history=score_history
         )
 
     improvement = final_score - original_score
@@ -1220,7 +1343,10 @@ async def agentic_rewrite(
             }
         },
         no_change=False,
-        reason=f"Successfully improved prompt from {original_score:.1f}/10 to {final_score:.1f}/10 (+{improvement:.1f}, {final_score_result.confidence_level} confidence)"
+        reason=f"Successfully improved prompt from {original_score:.1f}/10 to {final_score:.1f}/10 (+{improvement:.1f}, {final_score_result.confidence_level} confidence)",
+        converged=converged,
+        convergence_reason=convergence_reason,
+        score_history=score_history
     )
 
 
@@ -1236,5 +1362,10 @@ def result_to_dict(result: AgenticRewriteResult) -> Dict[str, Any]:
         "improvement_plan": result.improvement_plan,
         "validation": result.validation,
         "no_change": result.no_change,
-        "reason": result.reason
+        "reason": result.reason,
+        # Convergence tracking fields
+        "converged": result.converged,
+        "convergence_reason": result.convergence_reason,
+        "score_history": result.score_history,
+        "total_tokens_used": result.total_tokens_used
     }

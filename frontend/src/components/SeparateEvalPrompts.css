@@ -1,0 +1,374 @@
+/**
+ * SeparateEvalPrompts.css
+ */
+
+.separate-eval-prompts {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* ============================================================================
+   Header
+   ============================================================================ */
+
+.separate-eval-prompts .header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.separate-eval-prompts .header h2 {
+  margin: 0 0 8px 0;
+  font-size: 28px;
+  color: #111827;
+}
+
+.separate-eval-prompts .subtitle {
+  margin: 0 0 16px 0;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.separate-eval-prompts .stats {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  margin-top: 16px;
+}
+
+.separate-eval-prompts .stat {
+  font-size: 14px;
+  color: #4b5563;
+}
+
+.separate-eval-prompts .stat strong {
+  color: #111827;
+  font-size: 18px;
+}
+
+/* ============================================================================
+   Evaluators Grid
+   ============================================================================ */
+
+.evaluators-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .evaluators-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================================
+   Eval Prompt Box
+   ============================================================================ */
+
+.eval-prompt-box {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  border: 2px solid #e5e7eb;
+  transition: all 0.3s ease;
+}
+
+.eval-prompt-box:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transform: translateY(-2px);
+}
+
+.eval-prompt-box.passes {
+  border-left: 4px solid #22c55e;
+}
+
+.eval-prompt-box.needs-work {
+  border-left: 4px solid #f59e0b;
+}
+
+/* Header */
+.box-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.header-left {
+  flex: 1;
+}
+
+.dimension-name {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  color: #111827;
+  text-transform: capitalize;
+}
+
+.critical-badge,
+.refined-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 8px;
+}
+
+.critical-badge {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fbbf24;
+}
+
+.refined-badge {
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #3b82f6;
+}
+
+.header-right {
+  flex-shrink: 0;
+}
+
+.quality-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: white;
+  min-width: 80px;
+}
+
+.quality-score {
+  font-size: 24px;
+  font-weight: bold;
+  line-height: 1;
+}
+
+.quality-label {
+  font-size: 11px;
+  margin-top: 4px;
+  opacity: 0.9;
+}
+
+/* Meta Info */
+.meta-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.info-item {
+  font-size: 12px;
+  color: #6b7280;
+  background: #f9fafb;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+/* Executive Summary */
+.executive-summary {
+  margin-bottom: 16px;
+}
+
+.executive-summary p {
+  margin: 0;
+  font-size: 13px;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+/* Action Buttons */
+.action-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-view-prompt,
+.btn-meta-details {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-view-prompt {
+  background: #3b82f6;
+  color: white;
+}
+
+.btn-view-prompt:hover {
+  background: #2563eb;
+}
+
+.btn-meta-details {
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.btn-meta-details:hover {
+  background: #e5e7eb;
+}
+
+/* Eval Prompt Content */
+.eval-prompt-content {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.eval-prompt-content h4 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  color: #374151;
+}
+
+.prompt-text {
+  background: #f9fafb;
+  padding: 16px;
+  border-radius: 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #1f2937;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* Meta Details */
+.meta-details {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.meta-details h4 {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  color: #374151;
+}
+
+.meta-details h5 {
+  margin: 16px 0 8px 0;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+/* Audit Scores */
+.audit-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.audit-score-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audit-label {
+  min-width: 140px;
+  font-size: 12px;
+  color: #4b5563;
+  text-transform: capitalize;
+}
+
+.audit-bar {
+  flex: 1;
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.audit-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+.audit-value {
+  min-width: 40px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  text-align: right;
+}
+
+/* Logic Gaps */
+.logic-gaps ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.logic-gaps li {
+  font-size: 12px;
+  color: #4b5563;
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+/* Refinement Roadmap */
+.refinement-roadmap ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.refinement-roadmap li {
+  font-size: 12px;
+  color: #4b5563;
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+/* Loading & Error States */
+.loading,
+.error {
+  text-align: center;
+  padding: 40px;
+  font-size: 16px;
+}
+
+.error {
+  color: #ef4444;
+  background: #fee2e2;
+  border-radius: 8px;
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .box-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .header-right {
+    margin-top: 12px;
+  }
+
+  .action-buttons {
+    flex-direction: column;
+  }
+
+  .btn-view-prompt,
+  .btn-meta-details {
+    width: 100%;
+  }
+}

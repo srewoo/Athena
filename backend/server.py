@@ -28,19 +28,39 @@ import re
 import uuid
 from datetime import datetime
 
-from models import ProjectInput
+from models import (
+    ProjectInput,
+    PromptOptimizationResult,
+    EvaluationPromptResult,
+    TestDataResult,
+    TestExecutionResult,
+    FinalReport
+)
 
-from llm_client_v2 import get_llm_client, parse_json_response
-from shared_settings import settings_store, get_settings as get_llm_settings_shared, update_settings
+# Use new enhanced components
+from llm_client_v2 import get_llm_client, parse_json_response, EnhancedLLMClient
+from shared_settings import (
+    settings_store,
+    get_settings as get_llm_settings_shared,
+    update_settings,
+    get_domain_context,
+    update_domain_context
+)
 import project_api
 import database as db
-from prompt_analyzer import PromptType
-from agentic_rewrite import agentic_rewrite, get_thinking_model_for_provider
+from prompt_analyzer import analyze_prompt, analysis_to_dict, PromptType
+from prompt_analyzer_v2 import analyze_prompt_hybrid, enhanced_analysis_to_dict, analyze_prompt_quick
+from agentic_rewrite import agentic_rewrite, result_to_dict as agentic_result_to_dict, get_thinking_model_for_provider
 from eval_generator_v3 import generate_gold_standard_eval_prompt
 from eval_best_practices import apply_best_practices_check
-from security import check_rate_limit, validate_api_key_format, generate_request_id
-from logging_config import setup_logging, get_logger, set_request_id, metrics
+from smart_test_generator import detect_input_type, build_input_generation_prompt, get_scenario_variations, InputType
+from security import check_rate_limit, validate_api_key_format, mask_api_key, generate_request_id
+from logging_config import (
+    setup_logging, get_logger, set_request_id, get_request_id,
+    log_performance, metrics
+)
 import quality_api
+from eval_quality_system import get_quality_manager, build_compact_eval_prompt
 
 # Setup structured logging
 log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -164,6 +184,37 @@ app.include_router(project_api.router)
 
 # Include quality API router for eval quality features
 app.include_router(quality_api.router)
+
+# ============================================================================
+# UNIFIED EVAL SYSTEM (NEW - RECOMMENDED)
+# ============================================================================
+
+# Include unified eval API - THIS IS THE MAIN EVAL API
+import unified_eval_api
+app.include_router(unified_eval_api.router)
+
+# ============================================================================
+# LEGACY EVAL APIS (DEPRECATED - For backward compatibility only)
+# ============================================================================
+
+# DEPRECATED: Use unified_eval_api instead
+# Kept for backward compatibility
+import multi_eval_api
+app.include_router(multi_eval_api.router)
+
+# DEPRECATED: Use unified_eval_api instead
+# Kept for backward compatibility
+import meta_eval_api
+app.include_router(meta_eval_api.router)
+
+# DEPRECATED: Use unified_eval_api instead
+# Kept for backward compatibility
+import multi_eval_api_extension
+app.include_router(multi_eval_api_extension.router)
+
+# Include intelligent project creation (auto-fill with intelligent extraction)
+import intelligent_project_creation
+app.include_router(intelligent_project_creation.router)
 
 # Include calibration & bias detection router
 # DISABLED: calibration_api routes conflict with existing project_api routes
@@ -1331,6 +1382,54 @@ async def save_settings(settings: dict):
         "api_key": "[REDACTED]" if updated["api_key"] else "",
         "model_name": updated["model_name"]
     }}
+
+
+# =============================================================================
+# DOMAIN CONTEXT ENDPOINTS
+# =============================================================================
+
+@app.get("/api/domain-context")
+async def get_domain_context_endpoint():
+    """Get the global domain context for test data generation"""
+    context = get_domain_context()
+    return {
+        "context": context,
+        "has_context": bool(context and any(
+            v for k, v in context.items()
+            if k != "company" and v
+        ) or (context.get("company") and any(context["company"].values())))
+    }
+
+
+@app.post("/api/domain-context")
+async def save_domain_context_endpoint(context: dict):
+    """Save the global domain context"""
+    logger.info(f"Saving domain context with {len(context)} keys")
+
+    updated = update_domain_context(context)
+
+    # Count how many fields are populated
+    populated_fields = sum(1 for k, v in updated.items() if v and (
+        (isinstance(v, list) and len(v) > 0) or
+        (isinstance(v, dict) and any(v.values())) or
+        (isinstance(v, str) and len(v) > 0)
+    ))
+
+    logger.info(f"Domain context saved successfully with {populated_fields} populated fields")
+    return {
+        "message": "Domain context saved successfully",
+        "populated_fields": populated_fields,
+        "context": updated
+    }
+
+
+@app.delete("/api/domain-context")
+async def clear_domain_context_endpoint():
+    """Clear the domain context"""
+    from shared_settings import DEFAULT_DOMAIN_CONTEXT
+    update_domain_context(DEFAULT_DOMAIN_CONTEXT.copy())
+    logger.info("Domain context cleared")
+    return {"message": "Domain context cleared"}
 
 
 if __name__ == "__main__":

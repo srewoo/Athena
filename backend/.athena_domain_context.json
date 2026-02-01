@@ -1,0 +1,61 @@
+{
+  "prospects": [
+    "CyberController",
+    "DHI",
+    "Firstsource",
+    "Ford",
+    "GM financial",
+    "HubSpot",
+    "Mahindra Comviva",
+    "Mindtickle",
+    "Olathe",
+    "ProPharma",
+    "Publicis",
+    "SharePoint"
+  ],
+  "people": [
+    "Jim scott",
+    "Sabrina Holden",
+    "Steve Acampora",
+    "Jeffrey Mcdonough",
+    "Craig Carney"
+  ],
+  "products": [
+    "Call AI",
+    "Asset Hub",
+    "LMS",
+    "Analytics",
+    "AI Copilot",
+    "AI roleplay"
+  ],
+  "sample_queries": [
+    "Can you extract the key next steps and action items discussed in the recent calls with Firstsource, especially those related to resolving the highlighted technical challenges?",
+    "What specific technical challenges has Firstsource raised during these calls, and what action items have been identified to address them?",
+    "Summarise my last call with DHI",
+    "Can you summarize the most recent sales meetings or calls with Publicis to see if any pricing strategies or incentives were discussed?",
+    "Can you summarize last calls with Mahindra Comviva for me?",
+    "What were the key discussion points in the past quarterly business reviews?",
+    "Summarize the onboarding call with Nykaa and schedule a follow-up.",
+    "Find the last call with Navex and send the action items to my manager.",
+    "Summarize the QBR and update CRM with the next steps.",
+    "Can you summarize our last call with Conviva"
+  ],
+  "industry": [
+    "Financial Services",
+    "Healthcare",
+    "Technology",
+    "Retail",
+    "Manufacturing",
+    "Education"
+  ],
+  "domain_terminology": [
+    "LMS",
+    "Sales Enablement",
+    "Analytics"
+  ],
+  "customer_types": [
+    "Enterprise",
+    "SMB",
+    "Individual"
+  ]
+}

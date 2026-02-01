@@ -93,10 +93,11 @@ class LLMResponse:
 # Model configurations
 # Models that require max_completion_tokens instead of max_tokens
 # and may not support system messages or temperature
+# NOTE: Only include actual reasoning models here - NOT standard models like gpt-4o
 REASONING_MODELS = {
-    "openai": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-4o", "gpt-4o-mini"],
+    "openai": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"],  # Reasoning models only
     "claude": ["claude-sonnet-4-5", "claude-opus-4"],
-    "gemini": ["gemini-3", "gemini-2.0-flash-thinking"]
+    "gemini": ["gemini-2.0-flash-thinking", "gemini-2.5-flash-preview-04-17"]  # Only thinking variants
 }
 
 DEFAULT_MODELS = {
@@ -482,6 +483,57 @@ class EnhancedLLMClient:
             "latency_ms": int((time.time() - start_time) * 1000),
             "tokens_used": 0
         }
+
+    async def generate(
+        self,
+        prompt: str,
+        model: str = "gpt-4o",
+        temperature: float = 0.7,
+        max_tokens: int = 8000,
+        provider: Optional[str] = None,
+        api_key: Optional[str] = None
+    ) -> str:
+        """
+        Simplified generate method for compatibility with older code.
+
+        This is a wrapper around chat() that uses a simpler interface.
+        Returns just the output string instead of a full dict.
+        """
+        # Determine provider from model name if not specified
+        if provider is None:
+            if "gpt" in model.lower() or "o1" in model.lower() or "o3" in model.lower():
+                provider = "openai"
+            elif "claude" in model.lower():
+                provider = "claude"
+            elif "gemini" in model.lower():
+                provider = "gemini"
+            else:
+                provider = "openai"  # Default
+
+        # Get API key from settings if not provided
+        if api_key is None:
+            try:
+                from shared_settings import get_settings
+                settings = get_settings()
+                api_key = settings.get("api_key", "")
+            except:
+                logger.warning("Could not get API key from settings")
+                api_key = ""
+
+        # Call chat() method with a minimal system prompt
+        result = await self.chat(
+            system_prompt="You are a helpful AI assistant.",
+            user_message=prompt,
+            provider=provider,
+            api_key=api_key,
+            model_name=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            use_cache=True
+        )
+
+        # Return just the output string
+        return result.get("output", "")
 
     async def chat_stream(
         self,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, PlayCircle, Square, CheckCircle, XCircle, AlertCircle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles, Upload } from "lucide-react";
+import { ChevronDown, ChevronRight, Save, Download, RefreshCw, Settings, Eye, EyeOff, MessageSquare, Send, X, FolderOpen, Plus, Trash2, Pencil, Play, PlayCircle, Square, CheckCircle, XCircle, AlertCircle, AlertTriangle, BarChart3, ArrowUpDown, RotateCcw, FileText, Maximize2, TrendingUp, TrendingDown, Minus, Sparkles, Upload } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -15,9 +15,11 @@ import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { useToast } from "../hooks/use-toast";
 import { API, BASE_URL } from "../App";
 import { ThemeToggle } from "../components/theme-toggle";
+import SettingsModal from "../components/optimizer/SettingsModal";
 
 // Helper function to safely get display text from test case input
 const getTestInputDisplay = (test, maxLength = 100) => {
@@ -34,7 +36,7 @@ const getTestInputDisplay = (test, maxLength = 100) => {
       return JSON.stringify(test.input).substring(0, maxLength);
     }
     // Fallback: try to find any variable field
-    const knownFields = ['id', 'category', 'test_focus', 'expected_behavior', 'difficulty', 'created_at', 'inputs'];
+    const knownFields = ['id', 'category', 'test_focus', 'expected_behavior', 'expected_output', 'difficulty', 'created_at', 'inputs', 'quality'];
     const varFields = Object.keys(test).filter(k => !knownFields.includes(k));
     if (varFields.length > 0) {
       const varsObj = {};
@@ -75,6 +77,10 @@ const PromptOptimizer = () => {
   const [projectId, setProjectId] = useState(null);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
 
+  // Auto-extraction from system prompt
+  const [isExtractingFromPrompt, setIsExtractingFromPrompt] = useState(false);
+  const extractionTimeoutRef = React.useRef(null);
+
   // Project Management
   const [savedProjects, setSavedProjects] = useState([]);
   const [projectSelectorOpen, setProjectSelectorOpen] = useState(false);
@@ -111,6 +117,15 @@ const PromptOptimizer = () => {
   const [isRefiningEval, setIsRefiningEval] = useState(false);
   const [evalChanges, setEvalChanges] = useState([]);
 
+  // Multi-Aspect Eval Generation
+  const [isEvalAspectsModalOpen, setIsEvalAspectsModalOpen] = useState(false);
+  const [evaluationAspects, setEvaluationAspects] = useState("");
+  const [multipleEvalPrompts, setMultipleEvalPrompts] = useState([]);
+  const [expandedEvalPrompts, setExpandedEvalPrompts] = useState(new Set([0])); // First prompt expanded by default
+  const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
+  const [suggestedDomain, setSuggestedDomain] = useState("");
+  const [suggestionReasoning, setSuggestionReasoning] = useState("");
+
   // Eval Prompt Testing
   const [showEvalTest, setShowEvalTest] = useState(false);
   const [evalTestInput, setEvalTestInput] = useState("");
@@ -134,6 +149,8 @@ const PromptOptimizer = () => {
   const [isGeneratingDataset, setIsGeneratingDataset] = useState(false);
   const [datasetProgress, setDatasetProgress] = useState({ progress: 0, batch: 0, total_batches: 0, status: '' });
   const [serverStatus, setServerStatus] = useState("checking"); // checking, online, offline
+  const [isUploadingDataset, setIsUploadingDataset] = useState(false);
+  const csvUploadRef = React.useRef(null);
 
   // Section 5: Test Run
   const [testRunId, setTestRunId] = useState(null);
@@ -329,6 +346,71 @@ const PromptOptimizer = () => {
       setIsSavingSettings(false);
     }
   };
+
+  // Extract use case and key requirements from system prompt
+  const extractFromPrompt = async (promptText) => {
+    if (!promptText || promptText.trim().length < 20) {
+      return;
+    }
+
+    // Don't extract if user has already filled in use case or requirements
+    if (useCase.trim() || keyRequirements.trim()) {
+      return;
+    }
+
+    setIsExtractingFromPrompt(true);
+    try {
+      const response = await fetch(`${API}/projects/extract-from-prompt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system_prompt: promptText })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.use_case && !useCase.trim()) {
+          setUseCase(data.use_case);
+        }
+        if (data.key_requirements && data.key_requirements.length > 0 && !keyRequirements.trim()) {
+          setKeyRequirements(data.key_requirements.join("\n"));
+        }
+        if (data.error) {
+          console.warn("Extraction warning:", data.error);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to extract from prompt:", error);
+    } finally {
+      setIsExtractingFromPrompt(false);
+    }
+  };
+
+  // Handle system prompt change with debounced extraction
+  const handleInitialPromptChange = (value) => {
+    setInitialPrompt(value);
+
+    // Clear any pending extraction
+    if (extractionTimeoutRef.current) {
+      clearTimeout(extractionTimeoutRef.current);
+    }
+
+    // Only trigger extraction if use case and requirements are empty
+    if (!useCase.trim() && !keyRequirements.trim() && value.trim().length >= 50) {
+      // Debounce: wait 1.5 seconds after user stops typing
+      extractionTimeoutRef.current = setTimeout(() => {
+        extractFromPrompt(value);
+      }, 1500);
+    }
+  };
+
+  // Cleanup timeout on unmount
+  React.useEffect(() => {
+    return () => {
+      if (extractionTimeoutRef.current) {
+        clearTimeout(extractionTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Check server status on mount
   useEffect(() => {
@@ -724,9 +806,9 @@ const PromptOptimizer = () => {
 
   const handleCreateProject = async () => {
     try {
-      // Parse requirements (comma or newline separated)
+      // Parse requirements (newline separated — commas are allowed within a requirement)
       const reqList = keyRequirements
-        .split(/[,\n]/)
+        .split(/\n/)
         .map(r => r.trim())
         .filter(r => r.length > 0);
 
@@ -783,7 +865,17 @@ const PromptOptimizer = () => {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || "Failed to create project. Please ensure the backend server is running.");
+        let errorMessage = "Failed to create project. Please ensure the backend server is running.";
+        if (errorData.detail) {
+          if (typeof errorData.detail === 'string') {
+            errorMessage = errorData.detail;
+          } else if (Array.isArray(errorData.detail)) {
+            errorMessage = errorData.detail
+              .map(e => e.msg || e.message || JSON.stringify(e))
+              .join('; ');
+          }
+        }
+        throw new Error(errorMessage);
       }
 
       const project = await response.json();
@@ -1159,6 +1251,161 @@ const PromptOptimizer = () => {
     }
   };
 
+  const openModalAndFetchSuggestions = async () => {
+    // Open modal first
+    setIsEvalAspectsModalOpen(true);
+
+    // Fetch suggestions in background
+    if (!projectId) return;
+
+    setIsFetchingSuggestions(true);
+
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/eval/suggest-aspects`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" }
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch suggestions");
+      }
+
+      const result = await response.json();
+
+      // Prefill textarea with suggestions (one per line)
+      const suggestionsText = result.suggested_aspects.join('\n');
+      setEvaluationAspects(suggestionsText);
+      setSuggestedDomain(result.domain);
+      setSuggestionReasoning(result.reasoning);
+
+      toast({
+        title: "✨ Suggestions Generated",
+        description: `${result.suggested_aspects.length} aspects suggested for ${result.domain} domain`
+      });
+
+    } catch (error) {
+      console.error("Error fetching suggestions:", error);
+      // Don't show error toast, just leave textarea empty for manual input
+    } finally {
+      setIsFetchingSuggestions(false);
+    }
+  };
+
+  const handleMultipleEvalGeneration = async () => {
+    if (!projectId || !currentVersion) return;
+    if (!evaluationAspects.trim()) {
+      toast({
+        title: "No Evaluation Aspects",
+        description: "Please enter at least one evaluation aspect",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    // Close modal and start generation
+    setIsEvalAspectsModalOpen(false);
+    setIsAgenticGeneratingEval(true);
+    setAgenticEvalDetails(null);
+    setMultipleEvalPrompts([]);
+
+    try {
+      // Split input by lines and filter empty lines
+      const aspects = evaluationAspects
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+
+      if (aspects.length === 0) {
+        throw new Error("No valid evaluation aspects provided");
+      }
+
+      toast({
+        title: `Generating ${aspects.length} Eval Prompts`,
+        description: "Running in parallel with retry logic..."
+      });
+
+      // Call BATCH endpoint - generates ALL aspects in PARALLEL
+      const response = await fetch(`${API}/projects/${projectId}/eval/generate-batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          aspects: aspects,  // Send all aspects at once
+          max_retries: 3     // Retry failed aspects
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        const errorMessage = Array.isArray(errorData.detail)
+          ? errorData.detail.map(e => e.msg || e.message || JSON.stringify(e)).join(', ')
+          : (errorData.detail || "Batch generation failed");
+        throw new Error(errorMessage);
+      }
+
+      const batchResult = await response.json();
+
+      // Show summary toast
+      toast({
+        title: `✅ Generation Complete`,
+        description: `${batchResult.successful} successful, ${batchResult.failed} failed. Avg: ${(batchResult.average_duration_ms / 1000).toFixed(1)}s each`
+      });
+
+      // Convert batch results to UI format (include enhanced fields)
+      const generatedPrompts = batchResult.results.map(result => ({
+        aspect: result.aspect,
+        evalPrompt: result.eval_prompt,
+        rationale: result.executive_summary,
+        metaQuality: result.meta_quality,
+        passesGate: result.passes_gate,
+        wasRefined: result.was_refined,
+        auditScores: result.audit_scores,
+        logicGaps: result.logic_gaps,
+        refinementRoadmap: result.refinement_roadmap,
+        error: result.error,
+        success: result.success,
+        attempts: result.attempts,
+        durationMs: result.duration_ms,
+        // Enhanced best practices fields
+        qualityAnalysis: result.quality_analysis,
+        calibrationExamples: result.calibration_examples,
+        rubricLevels: result.rubric_levels,
+        evaluationPurpose: result.evaluation_purpose,
+        aiSystemContext: result.ai_system_context
+      }));
+
+      setMultipleEvalPrompts(generatedPrompts);
+
+      // NOTE: Multi-aspect prompts are NOT saved as versions
+      // These are individual aspect-specific evaluation prompts, not iterations
+      // Users can copy any prompt they want to use, but these don't pollute version history
+
+      // Optional: If user wants to save a specific prompt as a version,
+      // they can do so manually using the "Save as Version" button (future feature)
+
+      toast({
+        title: "Multiple Eval Prompts Generated",
+        description: `Successfully generated ${generatedPrompts.length} evaluation prompt(s)`
+      });
+
+      setExpandedSections(prev => ({
+        ...prev,
+        evalPrompt: true
+      }));
+
+      // Clear the input
+      setEvaluationAspects("");
+
+    } catch (error) {
+      toast({
+        title: "Multi-Eval Generation Error",
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsAgenticGeneratingEval(false);
+    }
+  };
+
   const handleRefineEvalPrompt = async () => {
     if (!projectId || !evalFeedback.trim()) {
       toast({
@@ -1428,6 +1675,69 @@ const PromptOptimizer = () => {
         description: error.message,
         variant: "destructive"
       });
+    }
+  };
+
+  // Handle CSV file upload for custom dataset
+  const handleUploadDataset = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file || !projectId) return;
+
+    // Validate file type
+    if (!file.name.endsWith('.csv')) {
+      toast({
+        title: "Invalid File",
+        description: "Please upload a CSV file",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsUploadingDataset(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('replace_existing', 'true');
+
+      const response = await fetch(`${API}/projects/${projectId}/dataset/upload`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.detail || "Failed to upload dataset");
+      }
+
+      // Update local state with the uploaded dataset
+      setDataset(result.dataset);
+      setIsCurrentSessionDataset(true);
+
+      toast({
+        title: "Upload Successful",
+        description: `${result.dataset.count} test cases imported from ${file.name}`,
+      });
+
+      // Show detected columns info
+      if (result.columns_detected) {
+        console.log("Detected columns:", result.columns_detected);
+      }
+
+    } catch (error) {
+      console.error("Upload error:", error);
+      toast({
+        title: "Upload Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsUploadingDataset(false);
+      // Reset file input so same file can be uploaded again
+      if (csvUploadRef.current) {
+        csvUploadRef.current.value = '';
+      }
     }
   };
 
@@ -2567,123 +2877,40 @@ const PromptOptimizer = () => {
             </Dialog>
 
             {/* Settings Button */}
-            <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-              <DialogTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-700"
-                  title="Settings"
-                >
-                  <Settings className="h-5 w-5" />
-                </Button>
-              </DialogTrigger>
-            <DialogContent className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white">
-              <DialogHeader>
-                <DialogTitle className="text-xl text-slate-900 dark:text-white">LLM Settings</DialogTitle>
-                <DialogDescription className="text-slate-600 dark:text-slate-600 dark:text-slate-400">
-                  Configure your LLM provider and API key for AI-powered features
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4 py-4">
-                {/* Provider Selection */}
-                <div className="space-y-2">
-                  <Label className="text-slate-700 dark:text-slate-300">LLM Provider</Label>
-                  <Select value={llmProvider} onValueChange={(value) => {
-                    setLlmProvider(value);
-                    setLlmModel(""); // Reset model when provider changes
-                  }}>
-                    <SelectTrigger className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-white">
-                      <SelectValue placeholder="Select provider" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
-                      <SelectItem value="openai" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700">OpenAI</SelectItem>
-                      <SelectItem value="claude" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700">Claude (Anthropic)</SelectItem>
-                      <SelectItem value="gemini" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700">Gemini (Google)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* Model Selection */}
-                <div className="space-y-2">
-                  <Label className="text-slate-700 dark:text-slate-300">Model</Label>
-                  <Select value={llmModel} onValueChange={setLlmModel}>
-                    <SelectTrigger className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-white">
-                      <SelectValue placeholder={`Select ${llmProvider} model`} />
-                    </SelectTrigger>
-                    <SelectContent className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100">
-                      {modelOptions[llmProvider]?.map((model, index) => {
-                        // Handle separator/disabled option objects
-                        if (typeof model === 'object' && model.label) {
-                          return (
-                            <SelectItem key={`separator-${index}`} value={`separator-${index}`} disabled className="text-slate-500 dark:text-slate-400 font-semibold">
-                              {model.label}
-                            </SelectItem>
-                          );
-                        }
-                        // Handle regular string model names
-                        return (
-                          <SelectItem key={model} value={model} className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700">
-                            {model}
-                          </SelectItem>
-                        );
-                      })}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* API Key Input */}
-                <div className="space-y-2">
-                  <Label className="text-slate-700 dark:text-slate-300">API Key</Label>
-                  <div className="relative">
-                    <Input
-                      type={showApiKey ? "text" : "password"}
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={`Enter your ${llmProvider === "claude" ? "Anthropic" : llmProvider === "gemini" ? "Google AI" : "OpenAI"} API key`}
-                      className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-white pr-10 placeholder:text-slate-400 dark:placeholder:text-slate-500"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-0 top-0 h-full px-3 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-white"
-                      onClick={() => setShowApiKey(!showApiKey)}
-                    >
-                      {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </Button>
-                  </div>
-                  <p className="text-xs text-slate-600 dark:text-slate-500">
-                    Your API key is stored locally and used for AI rewrite and evaluation features
-                  </p>
-                </div>
-
-                {/* Status Indicator */}
-                {settingsLoaded && apiKey && (
-                  <div className="flex items-center gap-2 p-2 bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded">
-                    <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-                    <span className="text-sm text-green-600 dark:text-green-400">Settings configured</span>
-                  </div>
-                )}
-              </div>
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => setSettingsOpen(false)}
-                  className="border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleSaveSettings}
-                  disabled={isSavingSettings}
-                  className="bg-blue-600 hover:bg-blue-700 text-white"
-                >
-                  {isSavingSettings ? "Saving..." : "Save Settings"}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-700"
+              title="Settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings className="h-5 w-5" />
+            </Button>
+            <SettingsModal
+              open={settingsOpen}
+              onOpenChange={setSettingsOpen}
+              settings={{
+                llmProvider,
+                llmModel,
+                apiKey
+              }}
+              onSettingsChange={(newSettings) => {
+                if (newSettings.llmProvider !== undefined) setLlmProvider(newSettings.llmProvider);
+                if (newSettings.llmModel !== undefined) setLlmModel(newSettings.llmModel);
+                if (newSettings.apiKey !== undefined) setApiKey(newSettings.apiKey);
+              }}
+              onSave={(savedSettings) => {
+                // Sync state after save from modal
+                if (savedSettings) {
+                  setLlmProvider(savedSettings.llm_provider || llmProvider);
+                  setLlmModel(savedSettings.model_name || llmModel);
+                  setApiKey(savedSettings.api_key || apiKey);
+                  setSettingsLoaded(true);
+                  // Also save to localStorage
+                  localStorage.setItem('athena_llm_settings', JSON.stringify(savedSettings));
+                }
+              }}
+            />
           </div>
 
           {/* Title - Centered */}
@@ -2762,7 +2989,39 @@ const PromptOptimizer = () => {
                 </div>
 
                 <div>
-                  <Label htmlFor="useCase" className="text-slate-700 dark:text-slate-300 font-medium">Use Case *</Label>
+                  <Label htmlFor="initialPrompt" className="text-slate-700 dark:text-slate-300 font-medium">Initial System Prompt *</Label>
+                  <Textarea
+                    id="initialPrompt"
+                    value={initialPrompt}
+                    onChange={(e) => handleInitialPromptChange(e.target.value)}
+                    placeholder="Enter your initial system prompt here..."
+                    className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[200px] font-mono text-sm"
+                  />
+                  {isExtractingFromPrompt && (
+                    <div className="flex items-center gap-2 mt-2 p-3 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 rounded-lg">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-500"></div>
+                      <span className="text-sm text-purple-600 dark:text-purple-400">
+                        Analyzing prompt to extract use case and requirements...
+                      </span>
+                    </div>
+                  )}
+                  {!isExtractingFromPrompt && initialPrompt.trim().length > 0 && !useCase.trim() && !keyRequirements.trim() && initialPrompt.trim().length < 50 && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                      Keep typing... Use case and requirements will be auto-extracted once prompt is longer
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <Label htmlFor="useCase" className="text-slate-700 dark:text-slate-300 font-medium">Use Case *</Label>
+                    {useCase && initialPrompt.trim().length >= 50 && (
+                      <span className="text-xs text-purple-500 dark:text-purple-400 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" />
+                        Auto-filled - review and edit as needed
+                      </span>
+                    )}
+                  </div>
                   <Textarea
                     id="useCase"
                     value={useCase}
@@ -2773,7 +3032,15 @@ const PromptOptimizer = () => {
                 </div>
 
                 <div>
-                  <Label htmlFor="requirements" className="text-slate-700 dark:text-slate-300 font-medium">Key Requirements * (one per line or comma-separated)</Label>
+                  <div className="flex items-center justify-between mb-1">
+                    <Label htmlFor="requirements" className="text-slate-700 dark:text-slate-300 font-medium">Key Requirements * (one per line or comma-separated)</Label>
+                    {keyRequirements && initialPrompt.trim().length >= 50 && (
+                      <span className="text-xs text-purple-500 dark:text-purple-400 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" />
+                        Auto-filled
+                      </span>
+                    )}
+                  </div>
                   <Textarea
                     id="requirements"
                     value={keyRequirements}
@@ -2896,17 +3163,6 @@ const PromptOptimizer = () => {
                   </Select>
                 </div>
 
-                <div>
-                  <Label htmlFor="initialPrompt" className="text-slate-700 dark:text-slate-300 font-medium">Initial System Prompt *</Label>
-                  <Textarea
-                    id="initialPrompt"
-                    value={initialPrompt}
-                    onChange={(e) => setInitialPrompt(e.target.value)}
-                    placeholder="Enter your initial system prompt here..."
-                    className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 min-h-[200px] font-mono text-sm"
-                  />
-                </div>
-
                 {(
                   <>
                     {isCreatingProject && (
@@ -2978,6 +3234,41 @@ const PromptOptimizer = () => {
                           </div>
                         </div>
                       </div>
+
+                      {/* Dual Score Breakdown - Pattern vs LLM Analysis */}
+                      {analysisResults.enhanced_analysis && analysisResults.enhanced_analysis.llm_score > 0 && (
+                        <div className="bg-slate-700/50 p-4 rounded-lg">
+                          <div className="text-xs font-medium text-slate-400 mb-3">Score Analysis Breakdown</div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="text-center p-3 bg-slate-800 rounded border border-slate-600">
+                              <div className="text-xs text-slate-400">Pattern Analysis</div>
+                              <div className={`text-2xl font-bold ${
+                                analysisResults.enhanced_analysis.programmatic_score >= 8 ? 'text-green-400' :
+                                analysisResults.enhanced_analysis.programmatic_score >= 6 ? 'text-yellow-400' : 'text-red-400'
+                              }`}>
+                                {analysisResults.enhanced_analysis.programmatic_score?.toFixed(1)}/10
+                              </div>
+                              <div className="text-xs text-slate-500">Rule-based (30% weight)</div>
+                            </div>
+                            <div className="text-center p-3 bg-slate-800 rounded border border-slate-600">
+                              <div className="text-xs text-slate-400">LLM Analysis</div>
+                              <div className={`text-2xl font-bold ${
+                                analysisResults.enhanced_analysis.llm_score >= 8 ? 'text-green-400' :
+                                analysisResults.enhanced_analysis.llm_score >= 6 ? 'text-yellow-400' : 'text-red-400'
+                              }`}>
+                                {analysisResults.enhanced_analysis.llm_score?.toFixed(1)}/10
+                              </div>
+                              <div className="text-xs text-slate-500">Semantic (70% weight)</div>
+                            </div>
+                          </div>
+                          {Math.abs(analysisResults.enhanced_analysis.programmatic_score - analysisResults.enhanced_analysis.llm_score) > 1.5 && (
+                            <div className="mt-3 text-xs text-yellow-400 flex items-center gap-1">
+                              <AlertTriangle className="h-3 w-3" />
+                              Score discrepancy: Pattern analysis found issues that LLM considers acceptable. Review suggestions carefully.
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {analysisResults.requirements_gaps.length > 0 && (
                         <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg p-4">
@@ -3338,9 +3629,442 @@ const PromptOptimizer = () => {
               </CardHeader>
               {expandedSections.evalPrompt && (
                 <CardContent className="p-6 space-y-4">
-                  {!evalPrompt ? (
+                  {/* Multiple Eval Prompts Display */}
+                  {multipleEvalPrompts.length > 0 && (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-semibold text-slate-700 dark:text-slate-300">
+                          Generated Evaluation Prompts ({multipleEvalPrompts.length})
+                        </h3>
+                        <Button
+                          onClick={() => {
+                            setMultipleEvalPrompts([]);
+                            setEvaluationAspects("");
+                          }}
+                          variant="outline"
+                          size="sm"
+                        >
+                          <X className="w-4 h-4 mr-1" />
+                          Clear All
+                        </Button>
+                      </div>
+
+                      {multipleEvalPrompts.map((promptData, index) => (
+                        <Collapsible
+                          key={index}
+                          open={expandedEvalPrompts.has(index)}
+                          onOpenChange={(isOpen) => {
+                            const newSet = new Set(expandedEvalPrompts);
+                            if (isOpen) {
+                              newSet.add(index);
+                            } else {
+                              newSet.delete(index);
+                            }
+                            setExpandedEvalPrompts(newSet);
+                          }}
+                          className="border border-slate-300 dark:border-slate-700 rounded-lg overflow-hidden"
+                        >
+                          {/* Header - Clickable to toggle */}
+                          <CollapsibleTrigger className="w-full">
+                            <div className="bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 border-b border-slate-300 dark:border-slate-700 px-4 py-3 hover:from-purple-100 hover:to-blue-100 dark:hover:from-purple-900/30 dark:hover:to-blue-900/30 transition-colors cursor-pointer">
+                              <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-2 flex-1">
+                                  {expandedEvalPrompts.has(index) ? (
+                                    <ChevronDown className="w-4 h-4 text-purple-600 dark:text-purple-400 flex-shrink-0" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4 text-purple-600 dark:text-purple-400 flex-shrink-0" />
+                                  )}
+                                  <div className="flex-1 text-left">
+                                    <h4 className="font-semibold text-purple-700 dark:text-purple-400 mb-1">
+                                      {index + 1}. {promptData.aspect}
+                                    </h4>
+                                <div className="flex items-center gap-3 text-xs">
+                                  {promptData.metaQuality && (
+                                    <span className={`px-2 py-1 rounded ${
+                                      promptData.passesGate
+                                        ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                                        : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300'
+                                    }`}>
+                                      Quality: {promptData.metaQuality.toFixed(1)}/10
+                                    </span>
+                                  )}
+                                  {promptData.wasRefined && (
+                                    <span className="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded">
+                                      ✨ Auto-Refined
+                                    </span>
+                                  )}
+                                  {promptData.passesGate && (
+                                    <span className="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded">
+                                      ✓ Passes Quality Gate
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        </CollapsibleTrigger>
+
+                          {/* Collapsible Content */}
+                          <CollapsibleContent>
+                            {/* Quality Analysis - Best Practices Implementation */}
+                          {promptData.qualityAnalysis && (
+                            <div className="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-green-700 dark:text-green-400 mb-2">
+                                ✓ Industry Best Practices Implementation
+                              </h5>
+                              <div className="grid grid-cols-3 gap-3">
+                                <div className={`flex items-center gap-2 text-xs ${
+                                  promptData.qualityAnalysis.has_chain_of_thought
+                                    ? 'text-green-700 dark:text-green-300'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  <span>{promptData.qualityAnalysis.has_chain_of_thought ? '✓' : '○'}</span>
+                                  <span>Chain-of-Thought</span>
+                                </div>
+                                <div className={`flex items-center gap-2 text-xs ${
+                                  promptData.qualityAnalysis.has_0_10_scale
+                                    ? 'text-green-700 dark:text-green-300'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  <span>{promptData.qualityAnalysis.has_0_10_scale ? '✓' : '○'}</span>
+                                  <span>0-10 Scale</span>
+                                </div>
+                                <div className={`flex items-center gap-2 text-xs ${
+                                  promptData.qualityAnalysis.has_xml_format
+                                    ? 'text-green-700 dark:text-green-300'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  <span>{promptData.qualityAnalysis.has_xml_format ? '✓' : '○'}</span>
+                                  <span>Structured Output</span>
+                                </div>
+                                <div className={`flex items-center gap-2 text-xs ${
+                                  promptData.qualityAnalysis.num_examples >= 3
+                                    ? 'text-green-700 dark:text-green-300'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  <span>{promptData.qualityAnalysis.num_examples >= 3 ? '✓' : '○'}</span>
+                                  <span>{promptData.qualityAnalysis.num_examples} Examples</span>
+                                </div>
+                                <div className={`flex items-center gap-2 text-xs ${
+                                  promptData.qualityAnalysis.has_behavioral_anchors
+                                    ? 'text-green-700 dark:text-green-300'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  <span>{promptData.qualityAnalysis.has_behavioral_anchors ? '✓' : '○'}</span>
+                                  <span>Behavioral Rubric</span>
+                                </div>
+                                <div className={`flex items-center gap-2 text-xs ${
+                                  promptData.qualityAnalysis.has_uncertainty_handling
+                                    ? 'text-green-700 dark:text-green-300'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  <span>{promptData.qualityAnalysis.has_uncertainty_handling ? '✓' : '○'}</span>
+                                  <span>Uncertainty Handling</span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* AI System Context */}
+                          {promptData.aiSystemContext && (
+                            <div className="bg-sky-50 dark:bg-sky-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-sky-600 dark:text-sky-400 mb-2">
+                                AI System Context:
+                              </h5>
+                              {promptData.aiSystemContext.system_summary && (
+                                <div className="mb-2">
+                                  <span className="text-xs font-medium text-sky-700 dark:text-sky-300">What This System Does: </span>
+                                  <span className="text-xs text-slate-700 dark:text-slate-300">
+                                    {promptData.aiSystemContext.system_summary}
+                                  </span>
+                                </div>
+                              )}
+                              {promptData.aiSystemContext.use_case && (
+                                <div className="mb-2">
+                                  <span className="text-xs font-medium text-sky-700 dark:text-sky-300">Use Case: </span>
+                                  <span className="text-xs text-slate-700 dark:text-slate-300">
+                                    {promptData.aiSystemContext.use_case}
+                                  </span>
+                                </div>
+                              )}
+                              {promptData.aiSystemContext.system_prompt && (
+                                <details className="mt-2">
+                                  <summary className="text-xs font-medium text-sky-700 dark:text-sky-300 cursor-pointer hover:text-sky-800 dark:hover:text-sky-200">
+                                    View Full System Prompt
+                                  </summary>
+                                  <pre className="mt-2 text-xs bg-white dark:bg-slate-900 p-2 rounded border border-sky-200 dark:border-sky-800 overflow-x-auto whitespace-pre-wrap max-h-32 overflow-y-auto">
+{promptData.aiSystemContext.system_prompt}
+                                  </pre>
+                                </details>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Evaluation Purpose */}
+                          {promptData.evaluationPurpose && (
+                            <div className="bg-indigo-50 dark:bg-indigo-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 mb-1">Purpose:</h5>
+                              <p className="text-xs text-slate-700 dark:text-slate-300">
+                                {promptData.evaluationPurpose}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Rubric Levels */}
+                          {promptData.rubricLevels && promptData.rubricLevels.length > 0 && (
+                            <div className="bg-violet-50 dark:bg-violet-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-violet-600 dark:text-violet-400 mb-2">
+                                Scoring Rubric (0-10 Scale):
+                              </h5>
+                              <div className="space-y-2">
+                                {promptData.rubricLevels.map((level, i) => (
+                                  <div key={i} className="text-xs">
+                                    <div className="font-semibold text-violet-700 dark:text-violet-300">
+                                      {level.level}
+                                    </div>
+                                    <div className="text-slate-600 dark:text-slate-400 ml-2 mt-1">
+                                      {level.description.substring(0, 150)}
+                                      {level.description.length > 150 ? '...' : ''}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Calibration Examples */}
+                          {promptData.calibrationExamples && promptData.calibrationExamples.length > 0 && (
+                            <div className="bg-cyan-50 dark:bg-cyan-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-cyan-600 dark:text-cyan-400 mb-2">
+                                Calibration Examples ({promptData.calibrationExamples.length}):
+                              </h5>
+                              <div className="space-y-3">
+                                {promptData.calibrationExamples.map((example, i) => (
+                                  <div key={i} className="text-xs border-l-2 border-cyan-300 dark:border-cyan-700 pl-2">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <span className="font-semibold text-cyan-700 dark:text-cyan-300">
+                                        Example {i + 1}
+                                      </span>
+                                      {example.score !== null && (
+                                        <span className={`px-1.5 py-0.5 rounded text-xs ${
+                                          example.score >= 7 ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' :
+                                          example.score >= 5 ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300' :
+                                          'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                                        }`}>
+                                          {example.score}/10
+                                        </span>
+                                      )}
+                                      {example.pass_fail && (
+                                        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                                          example.pass_fail === 'PASS'
+                                            ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                                            : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                                        }`}>
+                                          {example.pass_fail}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {example.analysis && (
+                                      <div className="text-slate-600 dark:text-slate-400 mb-1">
+                                        {example.analysis.substring(0, 120)}
+                                        {example.analysis.length > 120 ? '...' : ''}
+                                      </div>
+                                    )}
+                                    {(example.evidence_positive?.length > 0 || example.evidence_negative?.length > 0) && (
+                                      <div className="mt-1 space-y-0.5">
+                                        {example.evidence_positive?.length > 0 && (
+                                          <div className="text-green-700 dark:text-green-300">
+                                            + {example.evidence_positive[0]}
+                                          </div>
+                                        )}
+                                        {example.evidence_negative?.length > 0 && (
+                                          <div className="text-red-700 dark:text-red-300">
+                                            - {example.evidence_negative[0]}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Meta-Evaluation Details */}
+                          {promptData.auditScores && Object.keys(promptData.auditScores).length > 0 && (
+                            <div className="bg-slate-50 dark:bg-slate-800/50 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Meta-Evaluation Scores:</h5>
+                              <div className="grid grid-cols-5 gap-2">
+                                {Object.entries(promptData.auditScores).map(([key, score]) => (
+                                  <div key={key} className="text-center">
+                                    <div className={`text-sm font-bold ${
+                                      score >= 8 ? 'text-green-600 dark:text-green-400' :
+                                      score >= 6 ? 'text-yellow-600 dark:text-yellow-400' :
+                                      'text-red-600 dark:text-red-400'
+                                    }`}>
+                                      {score.toFixed(1)}
+                                    </div>
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 capitalize">
+                                      {key.replace(/_/g, ' ')}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Rationale */}
+                          {promptData.rationale && (
+                            <div className="bg-blue-50 dark:bg-blue-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1">Executive Summary:</h5>
+                              <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-line">
+                                {promptData.rationale}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Logic Gaps (if any) */}
+                          {promptData.logicGaps && promptData.logicGaps.length > 0 && (
+                            <div className="bg-amber-50 dark:bg-amber-900/20 px-4 py-3 border-b border-slate-300 dark:border-slate-700">
+                              <h5 className="text-xs font-semibold text-amber-600 dark:text-amber-400 mb-2">Logic Gaps Detected:</h5>
+                              <ul className="space-y-1">
+                                {promptData.logicGaps.map((gap, i) => (
+                                  <li key={i} className="text-xs text-amber-700 dark:text-amber-300 flex items-start gap-2">
+                                    <span className="text-amber-600 dark:text-amber-400">⚠</span>
+                                    <span><strong>{gap.category}:</strong> {gap.description}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {/* Eval Prompt */}
+                          <div className="p-4">
+                            <div className="flex items-center justify-between mb-2">
+                              <Label className="text-xs font-semibold">Evaluation Prompt:</Label>
+                              <div className="flex gap-2">
+                                <Button
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(promptData.evalPrompt);
+                                    toast({
+                                      title: "Copied!",
+                                      description: "Eval prompt copied to clipboard"
+                                    });
+                                  }}
+                                  variant="outline"
+                                  size="sm"
+                                >
+                                  <Download className="w-3 h-3 mr-1" />
+                                  Copy
+                                </Button>
+                                <Button
+                                  onClick={async () => {
+                                    try {
+                                      await fetch(`${API}/projects/${projectId}/eval-prompt/versions`, {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({
+                                          eval_prompt_text: promptData.evalPrompt,
+                                          changes_made: `Saved aspect: ${promptData.aspect}`,
+                                          rationale: promptData.rationale || `Evaluation prompt for ${promptData.aspect}`
+                                        })
+                                      });
+                                      await fetchEvalPromptVersions();
+                                      toast({
+                                        title: "Saved as Version!",
+                                        description: `${promptData.aspect} saved to version history`
+                                      });
+                                    } catch (error) {
+                                      toast({
+                                        title: "Save Failed",
+                                        description: "Could not save to version history",
+                                        variant: "destructive"
+                                      });
+                                    }
+                                  }}
+                                  variant="default"
+                                  size="sm"
+                                  className="bg-purple-600 hover:bg-purple-700 text-white"
+                                >
+                                  <Save className="w-3 h-3 mr-1" />
+                                  Save as Version
+                                </Button>
+                                <Button
+                                  onClick={async () => {
+                                    try {
+                                      // Save as version first
+                                      await fetch(`${API}/projects/${projectId}/eval-prompt/versions`, {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({
+                                          eval_prompt_text: promptData.evalPrompt,
+                                          changes_made: `Saved aspect: ${promptData.aspect}`,
+                                          rationale: promptData.rationale || `Evaluation prompt for ${promptData.aspect}`
+                                        })
+                                      });
+                                      await fetchEvalPromptVersions();
+
+                                      // Expand dataset section
+                                      setExpandedSections(prev => ({
+                                        ...prev,
+                                        dataset: true
+                                      }));
+
+                                      // Scroll to dataset section
+                                      setTimeout(() => {
+                                        const datasetSection = document.querySelector('[data-section="dataset"]');
+                                        if (datasetSection) {
+                                          datasetSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                        }
+                                      }, 100);
+
+                                      toast({
+                                        title: "Ready for Testing!",
+                                        description: `${promptData.aspect} saved. Generate test dataset below.`
+                                      });
+                                    } catch (error) {
+                                      toast({
+                                        title: "Save Failed",
+                                        description: "Could not save to version history",
+                                        variant: "destructive"
+                                      });
+                                    }
+                                  }}
+                                  variant="default"
+                                  size="sm"
+                                  className="bg-blue-600 hover:bg-blue-700 text-white"
+                                >
+                                  <ArrowUpDown className="w-3 h-3 mr-1" />
+                                  Continue to Dataset
+                                </Button>
+                              </div>
+                            </div>
+                            <Textarea
+                              value={promptData.evalPrompt}
+                              readOnly
+                              rows={12}
+                              className="font-mono text-xs bg-white dark:bg-slate-900"
+                            />
+                          </div>
+                          </CollapsibleContent>
+                        </Collapsible>
+                      ))}
+
+                      <Button
+                        onClick={openModalAndFetchSuggestions}
+                        variant="outline"
+                        className="w-full"
+                      >
+                        <Plus className="w-4 h-4 mr-2" />
+                        Generate More Eval Prompts
+                      </Button>
+                    </div>
+                  )}
+
+                  {!evalPrompt && multipleEvalPrompts.length === 0 ? (
                     <Button
-                      onClick={handleAgenticGenerateEvalPrompt}
+                      onClick={openModalAndFetchSuggestions}
                       disabled={isAgenticGeneratingEval}
                       className="w-full bg-purple-600 hover:bg-purple-700 text-white"
                       title="Generate evaluation prompt with failure mode analysis"
@@ -3357,7 +4081,7 @@ const PromptOptimizer = () => {
                         </>
                       )}
                     </Button>
-                  ) : (
+                  ) : evalPrompt ? (
                     <>
                       {evalRationale && (
                         <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg p-4">
@@ -3797,7 +4521,7 @@ const PromptOptimizer = () => {
                         </div>
                       )}
                     </>
-                  )}
+                  ) : null}
                 </CardContent>
               )}
             </Card>
@@ -3805,7 +4529,7 @@ const PromptOptimizer = () => {
 
           {/* Section 4: Test Dataset */}
           {projectId && (
-            <Card className="bg-white dark:bg-slate-900/50 border-slate-300 dark:border-slate-700">
+            <Card className="bg-white dark:bg-slate-900/50 border-slate-300 dark:border-slate-700" data-section="dataset">
               <CardHeader className="p-0">
                 <SectionHeader
                   section="dataset"
@@ -3815,6 +4539,15 @@ const PromptOptimizer = () => {
               </CardHeader>
               {expandedSections.dataset && (
                 <CardContent className="p-6 space-y-4">
+                  {/* Hidden file input for CSV upload - always rendered */}
+                  <input
+                    type="file"
+                    ref={csvUploadRef}
+                    onChange={handleUploadDataset}
+                    accept=".csv"
+                    className="hidden"
+                  />
+
                   {/* Sample count input */}
                   {!dataset && (
                     <div>
@@ -3830,7 +4563,7 @@ const PromptOptimizer = () => {
                         disabled={isGeneratingDataset}
                       />
                       <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-                        Default distribution: 40% positive, 30% edge cases, 20% negative, 10% adversarial
+                        Default distribution: 25% positive, 20% edge cases, 20% negative, 17% adversarial, 18% prompt injection
                       </p>
                     </div>
                   )}
@@ -3866,34 +4599,67 @@ const PromptOptimizer = () => {
                   )}
 
                   {/* Generate button (shown when no dataset and not generating) */}
-                  {!dataset && !isGeneratingDataset && (
+                  {!dataset && !isGeneratingDataset && !isUploadingDataset && (
                     <div className="space-y-3">
-                      <Button
-                        onClick={() => handleGenerateDataset()}
-                        className="w-full bg-purple-600 hover:bg-purple-700 text-white"
-                      >
-                        <Sparkles className="w-4 h-4 mr-2" />
-                        Generate Test Dataset
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          onClick={() => handleGenerateDataset()}
+                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-white"
+                        >
+                          <Sparkles className="w-4 h-4 mr-2" />
+                          Generate Dataset
+                        </Button>
+                        <Button
+                          onClick={() => csvUploadRef.current?.click()}
+                          variant="outline"
+                          className="flex-1 border-slate-400 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        >
+                          <Upload className="w-4 h-4 mr-2" />
+                          Upload CSV
+                        </Button>
+                      </div>
                       <p className="text-xs text-slate-500 dark:text-slate-400 text-center">
-                        Automatically detects input format and generates realistic test data (call transcripts, emails, code, etc.)
+                        Generate AI test cases automatically, or upload your own CSV dataset
                       </p>
+                    </div>
+                  )}
+
+                  {/* Uploading indicator */}
+                  {isUploadingDataset && (
+                    <div className="flex items-center justify-center gap-2 py-4">
+                      <RefreshCw className="w-5 h-5 animate-spin text-blue-500" />
+                      <span className="text-slate-600 dark:text-slate-400">Uploading and processing CSV...</span>
                     </div>
                   )}
 
                   {/* Dataset generated success message and preview */}
                   {dataset && (
                     <>
-                      <div className={`${dataset.metadata?.generation_type === 'smart' ? 'bg-purple-50 dark:bg-purple-900/20 border-purple-300 dark:border-purple-700' : 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'} border rounded-lg p-4`}>
+                      <div className={`${
+                        dataset.metadata?.generation_type === 'uploaded' ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700' :
+                        dataset.metadata?.generation_type === 'smart' ? 'bg-purple-50 dark:bg-purple-900/20 border-purple-300 dark:border-purple-700' :
+                        'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'
+                      } border rounded-lg p-4`}>
                         <div className="flex justify-between items-start">
                           <div>
-                            <h3 className={`font-semibold ${dataset.metadata?.generation_type === 'smart' ? 'text-purple-600 dark:text-purple-400' : 'text-green-600 dark:text-green-400'} mb-2 flex items-center gap-2`}>
+                            <h3 className={`font-semibold ${
+                              dataset.metadata?.generation_type === 'uploaded' ? 'text-blue-600 dark:text-blue-400' :
+                              dataset.metadata?.generation_type === 'smart' ? 'text-purple-600 dark:text-purple-400' :
+                              'text-green-600 dark:text-green-400'
+                            } mb-2 flex items-center gap-2`}>
+                              {dataset.metadata?.generation_type === 'uploaded' && <Upload className="w-4 h-4" />}
                               {dataset.metadata?.generation_type === 'smart' && <Sparkles className="w-4 h-4" />}
-                              {dataset.metadata?.generation_type === 'smart' ? 'Smart Dataset Generated' : 'Dataset Generated'}
+                              {dataset.metadata?.generation_type === 'uploaded' ? 'Dataset Uploaded' :
+                               dataset.metadata?.generation_type === 'smart' ? 'Smart Dataset Generated' : 'Dataset Generated'}
                             </h3>
                             <p className="text-sm text-slate-700 dark:text-slate-300">
-                              {dataset.sample_count} test cases created
-                              {dataset.metadata?.input_type && (
+                              {dataset.sample_count} test cases {dataset.metadata?.generation_type === 'uploaded' ? 'imported' : 'created'}
+                              {dataset.metadata?.source_file && (
+                                <span className="text-slate-500 dark:text-slate-400">
+                                  {' '}• From: {dataset.metadata.source_file}
+                                </span>
+                              )}
+                              {dataset.metadata?.input_type && dataset.metadata.input_type !== 'custom' && (
                                 <span className="text-slate-500 dark:text-slate-400">
                                   {' '}• Input type: {dataset.metadata.input_type.replace(/_/g, ' ')}
                                 </span>
@@ -3962,16 +4728,34 @@ const PromptOptimizer = () => {
                         </div>
                       </div>
 
-                      <div className="flex gap-2">
-                        <Button onClick={handleDownloadDataset} variant="outline" className="flex-1 border-slate-400 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
+                      <div className="flex gap-2 flex-wrap">
+                        <Button onClick={handleDownloadDataset} variant="outline" className="border-slate-400 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
                           <Download className="w-4 h-4 mr-2" />
-                          Download CSV
+                          Download
+                        </Button>
+                        <Button
+                          onClick={() => csvUploadRef.current?.click()}
+                          variant="outline"
+                          disabled={isUploadingDataset}
+                          className="border-blue-500 text-blue-600 dark:text-blue-400 hover:bg-blue-900/20"
+                        >
+                          {isUploadingDataset ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                              Uploading...
+                            </>
+                          ) : (
+                            <>
+                              <Upload className="w-4 h-4 mr-2" />
+                              Upload CSV
+                            </>
+                          )}
                         </Button>
                         <Button
                           variant="outline"
                           onClick={handleRegenerateDatasetNew}
                           disabled={isRegeneratingDataset || isGeneratingDataset}
-                          className="flex-1 border-green-600 text-green-600 dark:text-green-400 hover:bg-green-900/20"
+                          className="border-green-600 text-green-600 dark:text-green-400 hover:bg-green-900/20"
                         >
                           {isRegeneratingDataset ? (
                             <>
@@ -4726,7 +5510,7 @@ const PromptOptimizer = () => {
               <div>
                 <Label className="text-amber-600 dark:text-amber-400 font-semibold">Input</Label>
                 <div className="mt-1 p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg whitespace-pre-wrap text-sm max-h-32 overflow-y-auto text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-600">
-                  {detailViewItem.input_data?.input || detailViewItem.input || JSON.stringify(detailViewItem.input_data || detailViewItem.input, null, 2) || 'N/A'}
+                  {getTestInputDisplay(detailViewItem.input_data || detailViewItem, 5000) || 'N/A'}
                 </div>
               </div>
 
@@ -5157,6 +5941,120 @@ const PromptOptimizer = () => {
               setEvalVersionDiffData(null);
             }}>
               Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Multi-Aspect Eval Generation Modal */}
+      <Dialog open={isEvalAspectsModalOpen} onOpenChange={setIsEvalAspectsModalOpen}>
+        <DialogContent className="sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle>What do you want to evaluate?</DialogTitle>
+            <DialogDescription>
+              {isFetchingSuggestions
+                ? "✨ AI is analyzing your system prompt to suggest relevant aspects..."
+                : "Enter different evaluation aspects, one per line. A separate eval prompt will be generated for each aspect."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            {/* AI Suggestion Info */}
+            {suggestionReasoning && suggestedDomain && (
+              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <Sparkles className="w-4 h-4 text-blue-600 dark:text-blue-400 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1">
+                      AI-Generated Suggestions ({suggestedDomain} Domain)
+                    </p>
+                    <p className="text-xs text-blue-700 dark:text-blue-300">
+                      {suggestionReasoning}
+                    </p>
+                    <p className="text-xs text-blue-600 dark:text-blue-400 mt-1 italic">
+                      You can edit, add, or remove aspects below.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="evaluation-aspects">Evaluation Aspects</Label>
+              <Textarea
+                id="evaluation-aspects"
+                placeholder={isFetchingSuggestions
+                  ? "Loading AI suggestions..."
+                  : "Example:&#10;Accuracy and factual correctness&#10;Tone and professionalism&#10;Clarity and conciseness"}
+                value={evaluationAspects}
+                onChange={(e) => setEvaluationAspects(e.target.value)}
+                rows={8}
+                className="font-mono text-sm"
+                disabled={isFetchingSuggestions}
+              />
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {isFetchingSuggestions
+                  ? "⏳ Generating smart suggestions based on your system prompt..."
+                  : `Tip: Each line will generate a separate evaluation prompt. Currently ${evaluationAspects.split('\n').filter(line => line.trim().length > 0).length} aspect(s).`}
+              </p>
+            </div>
+
+            {/* Display multiple eval prompts if they exist */}
+            {multipleEvalPrompts.length > 0 && (
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                <h4 className="font-semibold text-sm">Generated Eval Prompts:</h4>
+                {multipleEvalPrompts.map((promptData, index) => (
+                  <div key={index} className="border border-slate-300 dark:border-slate-700 rounded-lg p-3 space-y-2">
+                    <div className="flex items-start justify-between">
+                      <h5 className="font-medium text-sm text-purple-600 dark:text-purple-400">
+                        {index + 1}. {promptData.aspect}
+                      </h5>
+                      {promptData.metaQuality && (
+                        <span className="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded">
+                          Quality: {promptData.metaQuality.toFixed(1)}/10
+                        </span>
+                      )}
+                    </div>
+                    <pre className="text-xs bg-slate-50 dark:bg-slate-800 p-2 rounded overflow-x-auto whitespace-pre-wrap">
+{promptData.evalPrompt}
+                    </pre>
+                    {promptData.rationale && (
+                      <p className="text-xs text-slate-600 dark:text-slate-400">
+                        <strong>Rationale:</strong> {promptData.rationale}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsEvalAspectsModalOpen(false);
+                setEvaluationAspects("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleMultipleEvalGeneration}
+              disabled={isAgenticGeneratingEval || !evaluationAspects.trim()}
+              className="bg-purple-600 hover:bg-purple-700 text-white"
+            >
+              {isAgenticGeneratingEval ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4 mr-2" />
+                  Generate Eval Prompts
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

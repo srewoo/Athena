@@ -213,7 +213,7 @@ Athena/
 │   ├── server.py              # Main FastAPI server (1300+ lines)
 │   ├── project_api.py         # Project management API (900+ lines)
 │   ├── project_storage.py     # JSON file storage
-│   ├── llm_client_v2.py       # Multi-provider LLM client (retry, caching, streaming)
+│   ├── llm_client.py          # Multi-provider LLM client
 │   ├── models.py              # Pydantic models
 │   ├── shared_settings.py     # Settings persistence module
 │   ├── requirements.txt       # Python dependencies

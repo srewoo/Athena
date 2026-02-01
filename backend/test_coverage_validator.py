@@ -323,8 +323,7 @@ async def main():
         print("\n🎉 All tests passed! Coverage validation is ready to use.")
         print("\nNext steps:")
         print("  1. Review COVERAGE_VALIDATION_README.md for usage guide")
-        print("  2. Run example_coverage_validation.py for detailed examples")
-        print("  3. Integrate into your eval generation workflow")
+        print("  2. Integrate into your eval generation workflow")
     else:
         print("\n⚠ Some tests failed. Check error messages above.")
         print("\nCommon issues:")

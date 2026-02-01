@@ -24,6 +24,24 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 
+// Helper function to safely format input for display
+// Handles objects, arrays, and strings - prevents React "Objects are not valid as a React child" error
+const formatInputForDisplay = (input, maxLength = null) => {
+  if (input === null || input === undefined) {
+    return "No input";
+  }
+  if (typeof input === 'object') {
+    try {
+      const jsonStr = JSON.stringify(input, null, 2);
+      return maxLength ? jsonStr.slice(0, maxLength) : jsonStr;
+    } catch (e) {
+      return String(input);
+    }
+  }
+  const strInput = String(input);
+  return maxLength ? strInput.slice(0, maxLength) : strInput;
+};
+
 const TestResultsPanel = ({
   results,
   summary,
@@ -167,7 +185,7 @@ const TestResultsPanel = ({
                         {testCase.category || "Test"} #{index + 1}
                       </div>
                       <div className="text-xs text-muted-foreground truncate max-w-md">
-                        {testCase.input?.slice(0, 100) || "No input"}...
+                        {formatInputForDisplay(testCase.input || testCase.inputs, 100)}...
                       </div>
                     </div>
                   </div>
@@ -205,7 +223,7 @@ const TestResultsPanel = ({
                     <div>
                       <h5 className="text-sm font-medium mb-1">Input</h5>
                       <pre className="text-xs bg-muted p-2 rounded overflow-auto max-h-32">
-                        {testCase.input || "No input"}
+                        {formatInputForDisplay(testCase.input || testCase.inputs)}
                       </pre>
                     </div>
 
@@ -278,7 +296,7 @@ const TestResultsPanel = ({
               <div>
                 <h4 className="font-medium mb-2">Input</h4>
                 <pre className="text-sm bg-muted p-4 rounded overflow-auto max-h-48 whitespace-pre-wrap">
-                  {detailViewItem.test_case?.input || "No input"}
+                  {formatInputForDisplay(detailViewItem.test_case?.input || detailViewItem.test_case?.inputs)}
                 </pre>
               </div>
 

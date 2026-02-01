@@ -139,11 +139,15 @@ try:
         get_numeric_rubric,
         TIEBREAKER_RULES_COMPACT,
         INTERMEDIATE_SCORE_GUIDANCE,
+        detect_domain_sensitivity,
+        DomainSensitivity,
     )
     QUALITY_THRESHOLDS_AVAILABLE = True
 except ImportError:
     QUALITY_THRESHOLDS_AVAILABLE = False
     NUMERIC_RUBRIC_THRESHOLDS = {}
+    detect_domain_sensitivity = None
+    DomainSensitivity = None
     logger.warning("eval_prompt_quality not available - using basic rubrics")
 
 
@@ -948,6 +952,13 @@ async def analyze_system_prompt_for_eval(
    - What decisions depend on it
    - Stakes of incorrect evaluation
 
+7. **OUTPUT SCHEMA** (If the system prompt specifies a structured output format)
+   - Extract the EXACT expected fields/keys
+   - Note which fields are required vs optional
+   - Note expected data types for each field
+   - If JSON/XML/structured output is expected, capture the full schema
+   - If no structured output is specified, set to null
+
 Return JSON:
 {
     "system_purpose": "One sentence: what this system does",
@@ -993,6 +1004,21 @@ Return JSON:
             "pattern": "Subtle failure",
             "why_common": "Why it happens",
             "how_to_detect": "Detection method"
+        }
+    ],
+    "output_schema": {
+        "format": "json|xml|markdown|plain|other",
+        "fields": [
+            {"name": "field_name", "type": "string|number|boolean|array|object", "required": true, "description": "What this field contains"}
+        ],
+        "example": "A minimal valid output example if discernible from the system prompt"
+    },
+    "domain_specific_failure_modes": [
+        {
+            "failure": "Domain-specific way this system could fail (NOT generic)",
+            "severity": "critical|high|medium",
+            "detection": "How to detect this specific failure in the output",
+            "example": "Example of what this failure looks like"
         }
     ]
 }"""
@@ -1076,6 +1102,17 @@ def build_auto_fail_conditions(
             "category": "rule_adherence"
         })
 
+    # Add domain-specific failure modes from deep analysis (critical severity → auto-fail)
+    for fm in deep.get("domain_specific_failure_modes", []):
+        if fm.get("severity") == "critical":
+            auto_fails.append({
+                "id": f"domain_failure_{len(auto_fails)}",
+                "name": fm.get("failure", "Domain-Specific Failure")[:60],
+                "description": fm.get("example", fm.get("failure", "")),
+                "detection": fm.get("detection", "Check output for this domain-specific failure"),
+                "category": "domain_specific"
+            })
+
     return auto_fails
 
 
@@ -1118,6 +1155,17 @@ def build_major_issues(
             "detection": "Check if all mandatory elements (identifiers, contextual framing, grounding elements) are present in output",
             "category": "completeness"
         })
+
+    # Add domain-specific failure modes (high/medium severity → major issues)
+    for fm in deep.get("domain_specific_failure_modes", []):
+        if fm.get("severity") in ("high", "medium"):
+            major.append({
+                "id": f"domain_issue_{len(major)}",
+                "name": fm.get("failure", "Domain Issue")[:60],
+                "description": fm.get("example", fm.get("failure", "")),
+                "detection": fm.get("detection", ""),
+                "category": "domain_specific"
+            })
 
     return major
 
@@ -1206,6 +1254,8 @@ For each dimension, provide:
 4. **what_NOT_to_check**: Scope limits to prevent evaluator overreach (list of 2-3 items)
 5. **rubric**: Score criteria for 5 (excellent), 3 (acceptable), 1 (poor)
 6. **weight**: Relative importance (0.0-1.0, should sum to ~1.0 across all dimensions)
+7. **traces_requirements**: Which specific system prompt requirements this dimension verifies (list of 1-4 quoted requirements from the system prompt)
+8. **minimum_pass_score**: The minimum score (1-5) this dimension must achieve to avoid an automatic FAIL verdict. Use 3 for critical dimensions (accuracy, safety) and 2 for non-critical ones.
 
 Return a JSON array of 4-6 dimensions:
 [
@@ -1219,14 +1269,18 @@ Return a JSON array of 4-6 dimensions:
             "3": "What earns acceptable - specific to this domain",
             "1": "What earns poor - specific to this domain"
         },
-        "weight": 0.25
+        "weight": 0.25,
+        "traces_requirements": ["Exact requirement from system prompt that this dimension tests"],
+        "minimum_pass_score": 3
     }
 ]
 
 IMPORTANT:
 - Dimension names should be UNIQUE to this system's domain
 - Rubrics should describe domain-specific quality, not generic LLM quality
-- Consider: What makes output from THIS system valuable vs useless?"""
+- Consider: What makes output from THIS system valuable vs useless?
+- traces_requirements MUST quote actual text from the system prompt — this creates a compliance traceability matrix
+- minimum_pass_score should be 3 for safety/accuracy dimensions and 2 for style/formatting dimensions"""
 
     # Build context about what the system does
     core_function = deep.get("core_function", use_case)
@@ -1430,7 +1484,8 @@ def build_gold_standard_eval_prompt(
     auto_fails: List[Dict[str, Any]],
     major_issues: List[Dict[str, Any]],
     dimensions: List[Dict[str, Any]],
-    calibration_examples: List[Dict[str, Any]]
+    calibration_examples: List[Dict[str, Any]],
+    domain_sensitivity: Optional[str] = None
 ) -> str:
     """
     Build the gold-standard evaluation prompt incorporating ALL 20 best practices.
@@ -1451,11 +1506,17 @@ def build_gold_standard_eval_prompt(
     # Build dimension sections with full rubrics, NUMERIC THRESHOLDS, and NOT-to-check
     dimension_sections = []
     for i, dim in enumerate(dimensions, 1):
-        # Get numeric thresholds for this dimension
+        # Get numeric thresholds for this dimension (domain-adjusted)
         dim_name = dim["name"]
         numeric_rubric = None
         if QUALITY_THRESHOLDS_AVAILABLE:
-            numeric_rubric = get_numeric_rubric(dim_name)
+            domain_enum = None
+            if domain_sensitivity and DomainSensitivity:
+                try:
+                    domain_enum = DomainSensitivity(domain_sensitivity)
+                except ValueError:
+                    pass
+            numeric_rubric = get_numeric_rubric(dim_name, domain=domain_enum)
 
         # Build rubric lines with NUMERIC THRESHOLDS injected
         rubric_lines_list = []
@@ -1474,6 +1535,17 @@ def build_gold_standard_eval_prompt(
         not_checks = "\n".join([f"    - {c}" for c in dim.get("what_NOT_to_check", [])[:3]])
         grounding = "\n".join([f"    - {g}" for g in dim.get("grounding_requirements", [])[:2]])
 
+        # Traceability and minimum pass score
+        traces = dim.get("traces_requirements", [])
+        traces_text = ""
+        if traces:
+            traces_text = "\n\n**Traces System Prompt Requirements:**\n" + "\n".join([f'    - "{t}"' for t in traces[:4]])
+
+        min_pass = dim.get("minimum_pass_score", 2)
+        min_pass_text = ""
+        if min_pass >= 3:
+            min_pass_text = f"\n\n**Minimum Pass Score:** {min_pass} — scoring below {min_pass} on this dimension triggers FAIL verdict regardless of other dimensions."
+
         section = f"""### {i}. {dim["name"]} (Weight: {dim["weight"]*100:.0f}%)
 
 **Definition:** {dim["description"]}
@@ -1488,7 +1560,7 @@ def build_gold_standard_eval_prompt(
 {grounding}
 
 **Scoring Rubric (with numeric thresholds):**
-{rubric_lines}"""
+{rubric_lines}{traces_text}{min_pass_text}"""
         dimension_sections.append(section)
 
     # Build mandatory output elements section
@@ -1542,6 +1614,70 @@ The system output **MUST** include the following elements. Missing ANY of these 
 {chr(10).join([l for l in mandatory_lines if not any(x in l.lower() for x in ['id', 'identifier', 'name', 'reference', 'time', 'period', 'date', 'range', 'context', 'summary', 'executive', 'overview', 'good', 'wgll', 'baseline', 'benchmark', 'ground', 'standard'])] or ['- None specified'])}
 
 **Evaluation Rule:** For each missing mandatory element, deduct points from the relevant dimension score. If multiple mandatory elements are missing, this may constitute a major failure.
+
+---
+"""
+
+    # Build schema compliance section if structured output is expected
+    schema_section = ""
+    output_schema = deep.get("output_schema")
+    if output_schema and output_schema.get("fields"):
+        schema_fields = output_schema["fields"]
+        required_fields = [f for f in schema_fields if f.get("required", True)]
+        optional_fields = [f for f in schema_fields if not f.get("required", True)]
+
+        field_lines = []
+        for f in schema_fields:
+            req_marker = "REQUIRED" if f.get("required", True) else "optional"
+            field_lines.append(f"| `{f['name']}` | {f.get('type', 'any')} | {req_marker} | {f.get('description', '')} |")
+
+        schema_section = f"""
+## II.C Schema Compliance (Graduated Scoring)
+
+The system output must conform to the following schema. Score schema compliance on a graduated scale — NOT binary pass/fail:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+{chr(10).join(field_lines)}
+
+**Schema Compliance Scoring:**
+- **5**: All fields present with correct types, output is fully parseable
+- **4**: All required fields present, minor type issues or missing optional fields
+- **3**: Most required fields present (≥70%), output is parseable with minor errors
+- **2**: Missing multiple required fields (50-69% present) or significant type mismatches
+- **1**: Unparseable output or <50% of required fields present
+
+**Total required fields:** {len(required_fields)} | **Optional fields:** {len(optional_fields)}
+
+---
+"""
+
+    # Also extract schema programmatically if LLM didn't provide one
+    if not schema_section:
+        extracted_schema = extract_output_schema(system_prompt)
+        if extracted_schema and extracted_schema.get("properties"):
+            props = extracted_schema["properties"]
+            req_keys = extracted_schema.get("required", [])
+            field_lines = []
+            for key, prop in props.items():
+                req_marker = "REQUIRED" if key in req_keys else "optional"
+                field_lines.append(f"| `{key}` | {prop.get('type', 'any')} | {req_marker} | — |")
+
+            schema_section = f"""
+## II.C Schema Compliance (Graduated Scoring)
+
+Detected output schema from system prompt. Score compliance on a graduated scale:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+{chr(10).join(field_lines)}
+
+**Schema Compliance Scoring:**
+- **5**: All fields present with correct types, output is fully parseable
+- **4**: All required fields present, minor type issues or missing optional fields
+- **3**: Most required fields present (≥70%), output is parseable with minor errors
+- **2**: Missing multiple required fields (50-69% present) or significant type mismatches
+- **1**: Unparseable output or <50% of required fields present
 
 ---
 """
@@ -1651,7 +1787,7 @@ Your evaluation must be **strict, evidence-based, and consistent**.
 **Required output format:** {programmatic.get('dna', {}).get('output_format', 'As specified')}
 
 ---
-{mandatory_section}
+{mandatory_section}{schema_section}
 ## III. Inputs You Receive
 
 For each evaluation, you are given:
@@ -1667,7 +1803,7 @@ For each evaluation, you are given:
 
 If **ANY** of the following are present, the verdict is **FAIL**, regardless of other scores:
 
-{chr(10).join(f"**{i+1}. {af['name']}**" + chr(10) + f"   - {af['description']}" + chr(10) + f"   - Detection: {af['detection']}" for i, af in enumerate(auto_fails[:6]))}
+{chr(10).join(f"**{i+1}. {af['name']}**" + chr(10) + f"   - {af['description']}" + chr(10) + f"   - Detection: {af['detection']}" for i, af in enumerate(auto_fails))}
 
 ---
 
@@ -1709,19 +1845,25 @@ These significantly lower scores if present:
 
 | Verdict | Criteria |
 |---------|----------|
-| **PASS** | Score ≥ 3.5 AND no auto-fail issues |
-| **NEEDS_REVIEW** | Score 2.5 – 3.49 AND no auto-fail issues |
-| **FAIL** | Score < 2.5 OR any auto-fail condition present |
+| **PASS** | Score ≥ 3.5 AND no auto-fail issues AND all dimensions meet their minimum pass scores |
+| **NEEDS_REVIEW** | Score 2.5 – 3.49 AND no auto-fail issues AND no dimension below its minimum pass score |
+| **FAIL** | Score < 2.5 OR any auto-fail condition present OR any dimension scores below its minimum pass score |
+
+**Per-Dimension Floor Enforcement:**
+Any dimension that scores BELOW its stated minimum pass score triggers an automatic FAIL, even if the weighted average is above 3.5. This prevents high scores in non-critical dimensions from masking critical failures.
 
 **Tiebreaker Rules (when dimension scores conflict):**
 1. **Auto-fail trumps all** → FAIL immediately, regardless of dimension scores
-2. **Accuracy priority** → If accuracy differs >1pt from other dimensions, weight it 2x
-3. **Minimum floor** → Lowest dimension can't pull score down >0.5 from weighted avg
+2. **Per-dimension minimum pass scores** → Any dimension below its floor → FAIL
+3. **Accuracy priority** → If accuracy differs >1pt from other dimensions, weight it 2x
 4. **Round to 0.5** → Final score rounds to nearest 0.5 (3.7→3.5, 3.8→4.0)
 
 ---
 
 ## X. Output Format (STRICT)
+
+**CRITICAL REQUIREMENT:**
+Your output MUST include a `reason` field that explains the final score using observable evidence from the output. This field is mandatory and must directly justify why the final score was assigned based on specific, verifiable elements in the output being evaluated.
 
 Return **ONLY** valid JSON:
 
@@ -1729,6 +1871,7 @@ Return **ONLY** valid JSON:
 {{
   "score": <weighted average 1.0-5.0>,
   "verdict": "PASS | NEEDS_REVIEW | FAIL",
+  "reason": "Concise explanation of the final score based on observable evidence. Must cite specific output elements that justify this score.",
   "summary": "2-3 sentence assessment referencing observable issues.",
   "dimension_scores": {{
 {chr(10).join(f'    "{dim["name"].lower().replace(" ", "_")}": {{"score": 1, "rationale": "Evidence-based."}},' for dim in dimensions[:-1])}
@@ -1748,6 +1891,7 @@ Return **ONLY** valid JSON:
 **You MUST:**
 - Judge what IS written, not what SHOULD have been written
 - Cite specific elements of the output in your reasoning
+- Include a `reason` field that explains the final score using observable evidence
 - Apply rubrics consistently across evaluations
 - Prefer false negatives over false positives (when in doubt, lower score)
 
@@ -1776,6 +1920,18 @@ If not, **calibrate against the examples**.
 ## XIII. Consistency Clause
 
 Similar outputs should receive similar scores. If you've evaluated similar outputs before (within this session or based on calibration examples), ensure your scoring is consistent.
+
+---
+
+## XIV. Anti-Drift Reference Anchors
+
+Before scoring, mentally compare the output against these calibration anchors to prevent score drift:
+
+- **Anchor HIGH (Score 5):** All system prompt requirements met, no issues, output is immediately usable by downstream consumers.
+- **Anchor MID (Score 3):** Core requirements met but noticeable gaps or minor errors. Borderline acceptable for production use.
+- **Anchor LOW (Score 1):** Fundamental failures — auto-fail triggered, critical requirements missed, or output is unusable.
+
+Ask: "Is this output closer to the HIGH, MID, or LOW anchor?" Score accordingly. Do NOT let scores drift upward or downward over successive evaluations.
 
 ---
 
@@ -1933,10 +2089,11 @@ async def run_eval_on_calibration_samples(
     # Expected eval output schema
     eval_output_schema = {
         "type": "object",
-        "required": ["score", "verdict"],
+        "required": ["score", "verdict", "reason"],
         "properties": {
             "score": {"type": "number"},
             "verdict": {"type": "string"},
+            "reason": {"type": "string"},
             "summary": {"type": "string"},
             "dimension_scores": {"type": "object"}
         }
@@ -2301,6 +2458,13 @@ async def generate_gold_standard_eval_prompt(
     )
     steps.append({"step": "calibration", "count": len(calibration_examples)})
 
+    # Detect domain sensitivity for threshold adjustment
+    detected_domain = None
+    if QUALITY_THRESHOLDS_AVAILABLE and detect_domain_sensitivity:
+        domain_enum = detect_domain_sensitivity(system_prompt, use_case)
+        detected_domain = domain_enum.value
+        logger.info(f"Detected domain sensitivity: {detected_domain}")
+
     # Step 6: Build Gold-Standard Eval Prompt with Iteration
     iteration = 0
     eval_prompt = None
@@ -2312,7 +2476,8 @@ async def generate_gold_standard_eval_prompt(
 
         eval_prompt = build_gold_standard_eval_prompt(
             system_prompt, use_case, analysis,
-            auto_fails, major_issues, dimensions, calibration_examples
+            auto_fails, major_issues, dimensions, calibration_examples,
+            domain_sensitivity=detected_domain
         )
         steps.append({"step": f"build_prompt_iter_{iteration}", "status": "completed"})
 
@@ -2491,7 +2656,9 @@ async def generate_gold_standard_eval_prompt(
                 "what_to_check": d["what_to_check"],
                 "what_NOT_to_check": d.get("what_NOT_to_check", []),
                 "grounding_requirements": d.get("grounding_requirements", []),
-                "rubric": {str(k): v for k, v in d["rubric"].items()}
+                "rubric": {str(k): v for k, v in d["rubric"].items()},
+                "traces_requirements": d.get("traces_requirements", []),
+                "minimum_pass_score": d.get("minimum_pass_score", 2)
             }
             for i, d in enumerate(dimensions)
         ],
@@ -2507,9 +2674,14 @@ async def generate_gold_standard_eval_prompt(
             "max_iterations": max_iterations,
             "live_calibration_success_rate": live_tests.get("success_rate"),
             "judge_reliable": reliability.get("reliable"),
+            "domain_sensitivity": detected_domain,
             "generation_metrics": metrics.to_dict(),  # Include metrics in response
             "bias_report": bias_report  # Include bias detection results
         }
     )
     
     return result
+
+
+# Alias for backward compatibility
+generate_best_eval_prompt_v3 = generate_gold_standard_eval_prompt

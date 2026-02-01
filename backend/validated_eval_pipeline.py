@@ -528,9 +528,15 @@ class ValidatedEvalPipeline:
                 eval_prompt, run_eval_func, sample_input, sample_output
             )
             self._gate_results.append(consistency_result)
+
+            # Gate 10: Cross-Example Consistency (paraphrased outputs should score similarly)
+            cross_consistency_result = await self._run_cross_example_consistency_gate(
+                eval_prompt, run_eval_func, sample_input, sample_output
+            )
+            self._gate_results.append(cross_consistency_result)
         else:
             # Add skipped gates
-            for gate_name in ["ground_truth", "reliability", "adversarial", "statistical", "consistency"]:
+            for gate_name in ["ground_truth", "reliability", "adversarial", "statistical", "consistency", "cross_example_consistency"]:
                 self._gate_results.append(ValidationGateResult(
                     gate_name=gate_name,
                     status=ValidationStatus.SKIPPED,
@@ -1067,6 +1073,112 @@ class ValidatedEvalPipeline:
                 details={"error": str(e)},
                 blocking=False,
                 recommendation="Consistency check failed to run"
+            )
+
+    async def _run_cross_example_consistency_gate(
+        self,
+        eval_prompt: str,
+        run_eval_func,
+        sample_input: str,
+        sample_output: str
+    ) -> ValidationGateResult:
+        """
+        Gate 8b: Cross-example consistency check.
+
+        Verifies that semantically equivalent outputs (paraphrased) receive
+        similar scores (within ±0.5). This prevents the eval from being
+        sensitive to surface-level wording rather than actual quality.
+        """
+        try:
+            # Generate a paraphrased version of the output
+            paraphrase_prompt = (
+                "Paraphrase the following text. Keep the EXACT same meaning, facts, "
+                "and structure but use different wording. Do NOT add, remove, or change "
+                "any information. Return ONLY the paraphrased text.\n\n"
+                f"Text to paraphrase:\n{sample_output[:2000]}"
+            )
+
+            paraphrase_result = await self.llm_client.chat(
+                system_prompt="You are a precise paraphrasing tool.",
+                user_message=paraphrase_prompt,
+                provider=self.provider,
+                api_key=self.api_key,
+                model_name=self.model_name,
+                temperature=0.3,
+                max_tokens=3000
+            )
+
+            if paraphrase_result.get("error"):
+                return ValidationGateResult(
+                    gate_name="cross_example_consistency",
+                    status=ValidationStatus.WARNING,
+                    score=50,
+                    details={"error": "Failed to generate paraphrase"},
+                    blocking=False,
+                    recommendation="Could not test cross-example consistency"
+                )
+
+            paraphrased_output = paraphrase_result.get("output", "")
+            if not paraphrased_output:
+                return ValidationGateResult(
+                    gate_name="cross_example_consistency",
+                    status=ValidationStatus.WARNING,
+                    score=50,
+                    details={"error": "Empty paraphrase result"},
+                    blocking=False,
+                    recommendation="Could not test cross-example consistency"
+                )
+
+            # Score both the original and paraphrased outputs
+            original_score, original_verdict = await run_eval_func(
+                eval_prompt, sample_input, sample_output
+            )
+            paraphrased_score, paraphrased_verdict = await run_eval_func(
+                eval_prompt, sample_input, paraphrased_output
+            )
+
+            score_diff = abs(original_score - paraphrased_score)
+            max_allowed = 0.5
+            is_consistent = score_diff <= max_allowed
+
+            if is_consistent:
+                status = ValidationStatus.PASSED
+                gate_score = 100 - (score_diff * 100)
+            else:
+                status = ValidationStatus.WARNING  # Warning, not blocking
+                gate_score = max(0, 100 - (score_diff * 150))
+
+            return ValidationGateResult(
+                gate_name="cross_example_consistency",
+                status=status,
+                score=max(0, gate_score),
+                details={
+                    "original_score": original_score,
+                    "paraphrased_score": paraphrased_score,
+                    "score_difference": score_diff,
+                    "max_allowed": max_allowed,
+                    "is_consistent": is_consistent,
+                    "original_verdict": original_verdict,
+                    "paraphrased_verdict": paraphrased_verdict
+                },
+                blocking=False,  # Warning only — doesn't block deployment
+                recommendation=(
+                    "Cross-example consistency verified."
+                    if is_consistent else
+                    f"Paraphrased output scored {score_diff:.1f} points differently. "
+                    "The eval may be sensitive to wording rather than actual quality. "
+                    "Consider making rubrics more outcome-focused."
+                )
+            )
+        except Exception as e:
+            logger.error(f"Cross-example consistency gate error: {e}")
+            return ValidationGateResult(
+                gate_name="cross_example_consistency",
+                status=ValidationStatus.WARNING,
+                score=50,
+                details={"error": str(e)},
+                blocking=False,
+                recommendation="Cross-example consistency check failed to run"
             )
 
     def _merge_quality_enhancements(

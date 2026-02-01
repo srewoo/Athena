@@ -1,0 +1,408 @@
+/**
+ * MultiEvaluatorResults.css
+ *
+ * Styles for multi-evaluator results display
+ */
+
+/* ============================================================================
+   Overall Verdict
+   ============================================================================ */
+
+.multi-eval-results {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.overall-verdict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.overall-verdict.verdict-pass {
+  background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+  border: 2px solid #22c55e;
+}
+
+.overall-verdict.verdict-fail {
+  background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+  border: 2px solid #ef4444;
+}
+
+.overall-verdict.verdict-review {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 2px solid #f59e0b;
+}
+
+.verdict-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 24px;
+  font-weight: bold;
+}
+
+.verdict-text {
+  font-size: 20px;
+  letter-spacing: 0.5px;
+}
+
+.overall-score {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.score-value {
+  font-size: 48px;
+  font-weight: bold;
+  line-height: 1;
+}
+
+.score-max {
+  font-size: 24px;
+  color: #6b7280;
+}
+
+/* ============================================================================
+   Overall Reason
+   ============================================================================ */
+
+.overall-reason {
+  background: #f9fafb;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  border-left: 4px solid #3b82f6;
+}
+
+.overall-reason p {
+  margin: 0;
+  color: #374151;
+  line-height: 1.6;
+}
+
+/* ============================================================================
+   Auto-Fail Alert
+   ============================================================================ */
+
+.auto-fail-alert {
+  background: #fee2e2;
+  border: 2px solid #ef4444;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 600;
+  color: #991b1b;
+}
+
+.alert-icon {
+  font-size: 20px;
+}
+
+/* ============================================================================
+   Comparison Metrics
+   ============================================================================ */
+
+.comparison-metrics {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+  padding: 16px;
+  background: #f0fdf4;
+  border-radius: 8px;
+  border: 1px solid #86efac;
+}
+
+.metric {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.metric-label {
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.metric-value {
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.metric-value.success {
+  color: #16a34a;
+}
+
+/* ============================================================================
+   Dimensions Grid
+   ============================================================================ */
+
+.dimensions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+@media (max-width: 768px) {
+  .dimensions-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================================
+   Dimension Card
+   ============================================================================ */
+
+.dimension-card {
+  background: white;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 2px solid #e5e7eb;
+  transition: all 0.2s ease;
+}
+
+.dimension-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transform: translateY(-2px);
+}
+
+.dimension-card.pass {
+  border-left: 4px solid #22c55e;
+}
+
+.dimension-card.fail {
+  border-left: 4px solid #ef4444;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-icon {
+  font-size: 18px;
+}
+
+.dimension-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: #111827;
+  text-transform: capitalize;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dimension-score {
+  font-size: 24px;
+  font-weight: bold;
+}
+
+.chevron {
+  font-size: 12px;
+  color: #9ca3af;
+  transition: transform 0.2s ease;
+}
+
+/* ============================================================================
+   Card Meta
+   ============================================================================ */
+
+.card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.weight {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.badge {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge.critical {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fbbf24;
+}
+
+/* ============================================================================
+   Progress Bar
+   ============================================================================ */
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.progress-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+/* ============================================================================
+   Reason
+   ============================================================================ */
+
+.reason {
+  margin: 0 0 12px 0;
+  color: #4b5563;
+  line-height: 1.5;
+  font-size: 14px;
+}
+
+.reason.truncated {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.reason.expanded {
+  display: block;
+}
+
+/* ============================================================================
+   Expanded Details
+   ============================================================================ */
+
+.expanded-details {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.evidence-section {
+  margin-bottom: 12px;
+}
+
+.evidence-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.evidence-section ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.evidence-section li {
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.dimension-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.meta-item {
+  display: flex;
+  align-items: center;
+}
+
+/* ============================================================================
+   Performance Footer
+   ============================================================================ */
+
+.performance-footer {
+  display: flex;
+  justify-content: center;
+  gap: 32px;
+  padding: 16px;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.perf-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.perf-label {
+  font-size: 12px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.perf-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+}
+
+/* ============================================================================
+   Responsive
+   ============================================================================ */
+
+@media (max-width: 640px) {
+  .overall-verdict {
+    flex-direction: column;
+    gap: 16px;
+    text-align: center;
+  }
+
+  .comparison-metrics {
+    flex-direction: column;
+  }
+
+  .performance-footer {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .dimension-score {
+    font-size: 20px;
+  }
+
+  .score-value {
+    font-size: 36px;
+  }
+}

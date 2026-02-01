@@ -69,6 +69,8 @@ class EnhancedAnalysis:
     # Metadata
     analysis_method: str = "hybrid"
     llm_enhanced: bool = True
+    fallback_reason: Optional[str] = None  # Populated when LLM analysis fails
+    quality_notes: List[str] = field(default_factory=list)  # Notes/warnings about analysis quality
 
 
 async def analyze_prompt_hybrid(
@@ -104,8 +106,12 @@ async def analyze_prompt_hybrid(
     prog_dict = analysis_to_dict(programmatic)
 
     # If no LLM client or quick mode, return programmatic-only results
-    if quick_mode or not llm_client or not api_key:
-        return _convert_programmatic_to_enhanced(programmatic, prog_dict)
+    if quick_mode:
+        return _convert_programmatic_to_enhanced(programmatic, prog_dict, fallback_reason="Quick mode enabled")
+    if not llm_client:
+        return _convert_programmatic_to_enhanced(programmatic, prog_dict, fallback_reason="LLM client not configured")
+    if not api_key:
+        return _convert_programmatic_to_enhanced(programmatic, prog_dict, fallback_reason="API key not configured")
 
     # Step 2: LLM-enhanced analysis
     try:
@@ -121,12 +127,19 @@ async def analyze_prompt_hybrid(
             model_name=model_name
         )
 
+        # Check if LLM returned an error
+        if llm_analysis.get("error"):
+            error_msg = llm_analysis.get("error", "Unknown error")
+            logger.warning(f"LLM analysis returned error, falling back to programmatic: {error_msg}")
+            return _convert_programmatic_to_enhanced(programmatic, prog_dict, fallback_reason=f"LLM error: {error_msg}")
+
         # Step 3: Combine results
         return _combine_analyses(programmatic, prog_dict, llm_analysis)
 
     except Exception as e:
-        logger.error(f"LLM analysis failed, falling back to programmatic: {e}")
-        return _convert_programmatic_to_enhanced(programmatic, prog_dict)
+        error_msg = str(e)
+        logger.error(f"LLM analysis failed, falling back to programmatic: {error_msg}")
+        return _convert_programmatic_to_enhanced(programmatic, prog_dict, fallback_reason=f"Analysis failed: {error_msg}")
 
 
 async def _get_llm_analysis(
@@ -154,6 +167,8 @@ Your analysis should go BEYOND surface-level observations. Focus on:
    - Structure: Is it well-organized?
    - Actionability: Can an LLM follow it reliably?
    - Edge case handling: Does it address unusual inputs?
+
+   IMPORTANT: Provide an INDEPENDENT assessment. Do not simply echo any scores you see in the context.
 
 3. **CRITICAL ISSUES**: Identify any:
    - Ambiguities that could cause inconsistent outputs
@@ -230,10 +245,10 @@ Return your analysis as JSON:
 }"""
 
     # Build context from programmatic analysis
+    # NOTE: Intentionally NOT including quality_score to avoid biasing LLM
     prog_context = f"""
-**Programmatic Analysis Results:**
+**Structural Analysis Results (for context only - analyze quality independently):**
 - Detected Type: {programmatic.get('prompt_type', 'unknown')}
-- Quality Score: {programmatic.get('quality_score', 0)}/10
 - Output Format: {programmatic.get('dna', {}).get('output_format', 'not specified')}
 - Template Variables: {programmatic.get('dna', {}).get('template_variables', [])}
 - Sections Found: {programmatic.get('dna', {}).get('sections', [])}
@@ -300,9 +315,21 @@ Provide a deep analysis focusing on semantic understanding, not just surface pat
 
 def _convert_programmatic_to_enhanced(
     programmatic: PromptAnalysis,
-    prog_dict: Dict[str, Any]
+    prog_dict: Dict[str, Any],
+    fallback_reason: str = None
 ) -> EnhancedAnalysis:
-    """Convert programmatic-only analysis to EnhancedAnalysis format"""
+    """Convert programmatic-only analysis to EnhancedAnalysis format
+
+    Args:
+        programmatic: The programmatic analysis result
+        prog_dict: Dictionary version of programmatic analysis
+        fallback_reason: If provided, indicates why LLM analysis was skipped/failed
+    """
+    quality_notes = []
+    if fallback_reason:
+        quality_notes.append(f"LLM analysis unavailable: {fallback_reason}. Using pattern-based analysis only.")
+        quality_notes.append("For more accurate analysis, ensure your API key is configured and try again.")
+
     return EnhancedAnalysis(
         prompt_type=prog_dict.get("prompt_type", "unknown"),
         prompt_types_detected=prog_dict.get("prompt_types_detected", []),
@@ -313,7 +340,7 @@ def _convert_programmatic_to_enhanced(
         llm_score=0.0,
         combined_score=prog_dict.get("quality_score", 5.0),
 
-        intent_summary="Analysis based on pattern matching only",
+        intent_summary="Analysis based on pattern matching only" + (f" ({fallback_reason})" if fallback_reason else ""),
         target_audience="Unknown - LLM analysis not performed",
         expected_input_type="Unknown",
         expected_output_description=prog_dict.get("dna", {}).get("output_format", "Unknown"),
@@ -338,7 +365,9 @@ def _convert_programmatic_to_enhanced(
         suggested_test_categories=prog_dict.get("suggested_test_categories", []),
 
         analysis_method="programmatic_only",
-        llm_enhanced=False
+        llm_enhanced=False,
+        fallback_reason=fallback_reason,
+        quality_notes=quality_notes
     )
 
 
@@ -351,6 +380,13 @@ def _combine_analyses(
 
     prog_score = prog_dict.get("quality_score", 5.0)
     llm_score = llm_analysis.get("quality_score", 5.0)
+
+    # Log the individual scores for debugging
+    logger.info(f"Score breakdown - Programmatic: {prog_score}, LLM: {llm_score}")
+
+    # Warn if scores are suspiciously similar (within 0.1 points)
+    if abs(prog_score - llm_score) < 0.1:
+        logger.warning(f"Programmatic and LLM scores are nearly identical ({prog_score} vs {llm_score}). LLM may be influenced by context.")
 
     # Weighted average: 30% programmatic, 70% LLM
     # LLM weighted higher because it understands semantics
@@ -373,14 +409,28 @@ def _combine_analyses(
                 "suggestion": ""
             })
 
+    # Validate scores are in valid range
+    if not (0 <= prog_score <= 10):
+        logger.warning(f"Programmatic score out of range: {prog_score}, clamping to 0-10")
+        prog_score = max(0, min(10, prog_score))
+
+    if not (0 <= llm_score <= 10):
+        logger.warning(f"LLM score out of range: {llm_score}, clamping to 0-10")
+        llm_score = max(0, min(10, llm_score))
+
+    # Recalculate with validated scores
+    combined_score = (prog_score * 0.3) + (llm_score * 0.7)
+
+    logger.info(f"Final scores - Programmatic: {prog_score:.1f}, LLM: {llm_score:.1f}, Combined: {combined_score:.1f}")
+
     return EnhancedAnalysis(
         prompt_type=prog_dict.get("prompt_type", "unknown"),
         prompt_types_detected=prog_dict.get("prompt_types_detected", []),
         dna=prog_dict.get("dna", {}),
-        programmatic_score=prog_score,
+        programmatic_score=round(prog_score, 1),
         quality_breakdown=prog_dict.get("quality_breakdown", {}),
 
-        llm_score=llm_score,
+        llm_score=round(llm_score, 1),
         combined_score=round(combined_score, 1),
 
         intent_summary=llm_analysis.get("intent_summary", ""),

@@ -15,6 +15,10 @@ const AnalysisResults = ({ analysis }) => {
     prompt_type,
     prompt_types_detected = [],
     quality_score = 0,
+    programmatic_score = null,
+    llm_score = null,
+    combined_score = null,
+    llm_enhanced = false,
     quality_breakdown = {},
     improvement_needed = false,
     improvement_areas = [],
@@ -23,6 +27,10 @@ const AnalysisResults = ({ analysis }) => {
     suggested_eval_dimensions = [],
     suggested_test_categories = []
   } = analysis;
+
+  // Use combined_score if available, otherwise fall back to quality_score
+  const displayScore = combined_score || quality_score;
+  const hasMultipleScores = programmatic_score !== null && llm_score !== null && llm_score > 0;
 
   const getScoreColor = (score) => {
     if (score >= 8) return "text-green-600";
@@ -43,13 +51,49 @@ const AnalysisResults = ({ analysis }) => {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-lg">Quality Score</CardTitle>
-            <div className={`text-3xl font-bold ${getScoreColor(quality_score)}`}>
-              {quality_score}/10
+            <div className={`text-3xl font-bold ${getScoreColor(displayScore)}`}>
+              {displayScore}/10
             </div>
           </div>
         </CardHeader>
         <CardContent>
-          <Progress value={quality_score * 10} className="h-2" />
+          <Progress value={displayScore * 10} className="h-2" />
+
+          {/* Dual Score Display - Show both programmatic and LLM scores */}
+          {hasMultipleScores && (
+            <div className="mt-4 p-3 bg-muted/50 rounded-lg">
+              <div className="text-xs font-medium text-muted-foreground mb-2">Score Breakdown</div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="text-center p-2 bg-background rounded border">
+                  <div className="text-xs text-muted-foreground">Pattern Analysis</div>
+                  <div className={`text-xl font-bold ${getScoreColor(programmatic_score)}`}>
+                    {programmatic_score?.toFixed(1)}/10
+                  </div>
+                  <div className="text-xs text-muted-foreground">Rule-based (30%)</div>
+                </div>
+                <div className="text-center p-2 bg-background rounded border">
+                  <div className="text-xs text-muted-foreground">LLM Analysis</div>
+                  <div className={`text-xl font-bold ${getScoreColor(llm_score)}`}>
+                    {llm_score?.toFixed(1)}/10
+                  </div>
+                  <div className="text-xs text-muted-foreground">Semantic (70%)</div>
+                </div>
+              </div>
+              {Math.abs(programmatic_score - llm_score) > 1.5 && (
+                <div className="mt-2 text-xs text-yellow-600 flex items-center gap-1">
+                  <AlertTriangle className="h-3 w-3" />
+                  Score discrepancy: Pattern analysis finds issues that LLM considers acceptable
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Show if LLM analysis was not available */}
+          {!llm_enhanced && (
+            <div className="mt-3 text-xs text-muted-foreground bg-yellow-50 dark:bg-yellow-900/20 p-2 rounded">
+              ⚠️ LLM analysis unavailable. Score based on pattern matching only.
+            </div>
+          )}
 
           {/* Breakdown */}
           <div className="grid grid-cols-2 gap-4 mt-4">
