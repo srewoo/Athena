@@ -1,0 +1,346 @@
+{
+  "prospects": [
+    "CyberController",
+    "DHI",
+    "Firstsource",
+    "Ford",
+    "GM financial",
+    "HubSpot",
+    "Mahindra Comviva",
+    "Mindtickle",
+    "Olathe",
+    "ProPharma",
+    "Publicis",
+    "SharePoint"
+  ],
+  "people": [
+    "Jim scott",
+    "Sabrina Holden",
+    "Steve Acampora",
+    "Jeffrey Mcdonough",
+    "Craig Carney"
+  ],
+  "products": [
+    "Call AI",
+    "Asset Hub",
+    "LMS",
+    "Analytics",
+    "AI Copilot",
+    "AI roleplay"
+  ],
+  "industry": [
+    "Sales",
+    "Financial Services",
+    "Healthcare",
+    "Technology",
+    "Retail",
+    "Manufacturing",
+    "Education"
+  ],
+  "domain_terminology": [
+    "LMS",
+    "Sales Enablement",
+    "Analytics"
+  ],
+  "quality_principles": [
+    "Ground all observations in specific call evidence - never generalize without cited moments",
+    "Distinguish between skill gaps and situational factors (e.g., rep was interrupted vs. rep lacks discovery technique)",
+    "Score relative to the defined competency framework, not absolute perfection",
+    "Acknowledge partial demonstrations - a rep who attempts a technique imperfectly scores higher than one who skips it entirely",
+    "Weight recency - recent calls matter more than older patterns for coaching recommendations",
+    "Separate objective metrics (talk ratio, question count) from subjective assessments (rapport quality, tone)",
+    "Flag data insufficiency explicitly rather than inferring from limited evidence",
+    "Preserve the rep's authentic voice in coaching suggestions - don't prescribe robotic scripts",
+    "Contextualize scores within deal stage and buyer persona complexity",
+    "Distinguish correlation from causation in deal outcome analysis"
+  ],
+  "anti_patterns": [
+    "Generic praise without specific evidence ('Great job on the call!')",
+    "Scoring based on outcome rather than process (penalizing a well-run call that didn't close)",
+    "Hallucinating quotes or moments not present in the transcript",
+    "Ignoring explicit 'What Good Looks Like' (WGLL) benchmarks when scoring",
+    "Conflating multiple competencies into a single score",
+    "Providing coaching advice that contradicts the company's sales methodology",
+    "Penalizing reps for missing data that wasn't available to them",
+    "Using absolute language ('never', 'always') without sufficient evidence",
+    "Scoring tone/sentiment without observable behavioral indicators",
+    "Recommending actions outside the rep's control or authority",
+    "Treating silence or pauses as negative without context",
+    "Applying enterprise deal frameworks to transactional sales calls"
+  ],
+  "competency_taxonomy": {
+    "discovery": [
+      "Open-ended questioning",
+      "Active listening",
+      "Need identification",
+      "Pain point exploration"
+    ],
+    "presentation": [
+      "Value articulation",
+      "Feature-benefit mapping",
+      "Storytelling",
+      "Demo effectiveness"
+    ],
+    "objection_handling": [
+      "Acknowledge-respond pattern",
+      "Reframing",
+      "Evidence-based responses",
+      "Competitive positioning"
+    ],
+    "closing": [
+      "Trial closes",
+      "Next step commitment",
+      "Urgency creation",
+      "Decision process navigation"
+    ],
+    "relationship_building": [
+      "Rapport establishment",
+      "Trust signals",
+      "Personal connection",
+      "Follow-through"
+    ],
+    "product_knowledge": [
+      "Feature accuracy",
+      "Use case mapping",
+      "Integration awareness",
+      "Competitive differentiation"
+    ],
+    "communication": [
+      "Clarity",
+      "Conciseness",
+      "Adaptability",
+      "Professional tone"
+    ],
+    "deal_management": [
+      "Pipeline hygiene",
+      "Stakeholder mapping",
+      "Timeline management",
+      "Risk identification"
+    ]
+  },
+  "eval_priorities": [
+    {
+      "dimension": "evidence_grounding",
+      "weight": 0.25,
+      "description": "All claims must reference specific transcript moments or data points"
+    },
+    {
+      "dimension": "scoring_calibration",
+      "weight": 0.2,
+      "description": "Scores must align with rubric definitions and be internally consistent"
+    },
+    {
+      "dimension": "actionability",
+      "weight": 0.18,
+      "description": "Recommendations must be specific, achievable, and relevant to the rep's context"
+    },
+    {
+      "dimension": "completeness",
+      "weight": 0.15,
+      "description": "All required output elements present; no silent omissions"
+    },
+    {
+      "dimension": "framework_adherence",
+      "weight": 0.12,
+      "description": "Output follows the defined competency framework and methodology"
+    },
+    {
+      "dimension": "bias_avoidance",
+      "weight": 0.1,
+      "description": "No outcome bias, recency bias, or anchoring effects in assessments"
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "hallucinated_quote",
+      "description": "Fabricates a quote or moment not in the transcript",
+      "severity": "critical",
+      "detection": "Verify all quoted text exists verbatim in input"
+    },
+    {
+      "id": "outcome_bias",
+      "description": "Scores a call based on deal result rather than rep behavior",
+      "severity": "critical",
+      "detection": "Check if scoring rationale references process vs. outcome"
+    },
+    {
+      "id": "missing_wgll_reference",
+      "description": "Scores without referencing What Good Looks Like benchmarks",
+      "severity": "high",
+      "detection": "Verify WGLL/baseline comparisons are present when scoring"
+    },
+    {
+      "id": "score_narrative_mismatch",
+      "description": "Numeric score contradicts the written assessment",
+      "severity": "high",
+      "detection": "Compare sentiment of narrative to numeric score"
+    },
+    {
+      "id": "generic_coaching",
+      "description": "Provides advice not tailored to the specific rep's demonstrated gaps",
+      "severity": "high",
+      "detection": "Check if recommendations reference specific observed behaviors"
+    },
+    {
+      "id": "data_insufficiency_ignored",
+      "description": "Makes confident assessments from limited evidence",
+      "severity": "medium",
+      "detection": "Verify confidence qualifiers when evidence is sparse"
+    },
+    {
+      "id": "competency_conflation",
+      "description": "Merges distinct skills into a single assessment",
+      "severity": "medium",
+      "detection": "Check each competency is scored independently"
+    },
+    {
+      "id": "methodology_contradiction",
+      "description": "Recommends actions that conflict with the defined sales methodology",
+      "severity": "medium",
+      "detection": "Verify recommendations align with methodology framework"
+    }
+  ],
+  "few_shot_examples": [
+    {
+      "dimension": "Discovery Quality",
+      "description": "Example of evaluating discovery questioning - Strong performance (4/5)",
+      "input": {
+        "transcript": "Rep: Tell me about your current LMS challenges.\nProspect (Firstsource): We struggle with tracking completion rates across 5000 employees.\nRep: That sounds challenging. What impact does that have on your training programs?",
+        "prospect": "Firstsource",
+        "product_discussed": "LMS",
+        "call_duration": "15 minutes"
+      },
+      "ideal_evaluation": {
+        "score": 4,
+        "reasoning": "Rep demonstrated strong discovery with 2 open-ended questions (0:15, 1:30) that progressively uncovered pain points. First question identified the challenge (tracking completion rates), second question probed business impact. Score: 4/5 because 2 solid questions were asked versus WGLL baseline of 3-5 questions for comprehensive discovery. Missing: stakeholder impact question, competitive alternative question, budget/timeline question.",
+        "confidence": "HIGH",
+        "evidence_citations": [
+          "0:15 - Open-ended question 'Tell me about your current LMS challenges'",
+          "0:25 - Active listening: acknowledged difficulty 'That sounds challenging'",
+          "1:30 - Impact probing question 'What impact does that have...?'",
+          "1:35 - Pain point uncovered: training program effectiveness"
+        ],
+        "competencies_assessed": [
+          "open-ended questioning",
+          "active listening",
+          "pain exploration"
+        ],
+        "gaps_identified": [
+          "Only 2 discovery questions instead of 3-5 per WGLL",
+          "No stakeholder impact question ('Who else is affected?')",
+          "No competitive alternative question ('What are you using now?')",
+          "No timeline/urgency question ('When do you need this solved?')"
+        ],
+        "recommendations": [
+          "Practice SPIN questioning framework (Situation→Problem→Implication→Need)",
+          "After initial pain, ask 3 follow-ups: stakeholders, alternatives, timeline",
+          "Use 'Tell me more about...' to encourage elaboration",
+          "Aim for 3-5 discovery questions minimum per discovery call"
+        ]
+      }
+    },
+    {
+      "dimension": "Objection Handling",
+      "description": "Example of evaluating price objection handling - Excellent performance (5/5)",
+      "input": {
+        "transcript": "Prospect (DHI): Your pricing seems higher than competitors like Mindtickle.\nRep: I understand pricing is important. What specific features are you comparing across the different vendors?\nProspect: Mainly the analytics dashboard and reporting.\nRep: That makes sense. Let me show you how our Analytics platform provides real-time insights that Mindtickle's batch processing can't match.",
+        "prospect": "DHI",
+        "product_discussed": "Analytics",
+        "objection_type": "price"
+      },
+      "ideal_evaluation": {
+        "score": 5,
+        "reasoning": "Rep demonstrated textbook objection handling: (1) Acknowledged concern without being defensive (2:15), (2) Used reframing question to shift from price to value comparison (2:18), (3) Listened to specific concern (analytics/reporting), (4) Positioned competitive differentiation with concrete example (real-time vs. batch). This aligns perfectly with 'Acknowledge-Respond-Differentiate' pattern from competency framework. Score: 5/5 - handled with confidence, redirected constructively, maintained rapport, and provided specific competitive positioning.",
+        "confidence": "HIGH",
+        "evidence_citations": [
+          "2:15 - Acknowledged pricing concern ('I understand pricing is important')",
+          "2:18 - Reframed to feature comparison question",
+          "2:25 - Active listening to specific features (analytics, reporting)",
+          "2:30 - Competitive differentiation (real-time vs. batch processing)"
+        ],
+        "competencies_assessed": [
+          "objection_handling",
+          "communication",
+          "competitive positioning",
+          "product knowledge"
+        ],
+        "gaps_identified": [],
+        "recommendations": [
+          "Continue using this approach - it's highly effective",
+          "Consider adding quantified value after differentiation ('Our clients see 40% faster insights')",
+          "Could reference customer success story from similar industry (Financial Services)"
+        ]
+      }
+    },
+    {
+      "dimension": "Product Knowledge",
+      "description": "Example of evaluating technical product knowledge - Adequate performance (3/5)",
+      "input": {
+        "transcript": "Prospect (Publicis): How does Call AI integrate with Salesforce?\nRep: Call AI has native Salesforce integration. It automatically logs call summaries and action items to opportunity records.\nProspect: What about bi-directional sync?\nRep: Um, I'd need to check with our Solutions Engineer on the specifics of that.",
+        "prospect": "Publicis",
+        "product_discussed": "Call AI",
+        "technical_question": true
+      },
+      "ideal_evaluation": {
+        "score": 3,
+        "reasoning": "Rep correctly identified Call AI has Salesforce integration (5:30) and mentioned 2 specific features (call summaries, action items). However, response lacked depth: didn't know about bi-directional sync, had to defer to Solutions Engineer. Score: 3/5 - basic product knowledge demonstrated but insufficient for technical buyer at enterprise account (Publicis). This is acceptable for initial response but shows need for deeper technical enablement.",
+        "confidence": "MEDIUM",
+        "evidence_citations": [
+          "5:30 - Correctly stated 'native Salesforce integration'",
+          "5:35 - Listed 2 features (call summaries, action items)",
+          "5:42 - Technical question about bi-directional sync",
+          "5:45 - Deferred to Solutions Engineer (appropriate but shows knowledge gap)"
+        ],
+        "competencies_assessed": [
+          "product_knowledge",
+          "presentation",
+          "deal management"
+        ],
+        "gaps_identified": [
+          "Incomplete integration details (bi-directional sync unknown)",
+          "No mention of API capabilities",
+          "Missing customization/configuration options",
+          "Didn't proactively involve Solutions Engineer earlier for technical buyer"
+        ],
+        "recommendations": [
+          "Complete Call AI integration deep-dive training module",
+          "Shadow Solutions Engineer on 3 technical demos",
+          "Create personal cheat sheet: Call AI technical FAQ",
+          "For enterprise technical buyers, bring SE to discovery call proactively",
+          "Practice technical objection handling scenarios with SE team"
+        ]
+      }
+    }
+  ],
+  "one_shot_template": {
+    "description": "Universal evaluation format - apply this pattern to all assessments",
+    "template_structure": {
+      "score": "Integer 1-5",
+      "reasoning": "Format: Observations (cite timestamps) → Compare to framework/WGLL → Explain score → Identify gaps → Suggest improvements. Always ground in evidence.",
+      "confidence": "HIGH (5+ evidence points) | MEDIUM (3-4 points) | LOW (<3 points)",
+      "evidence_citations": [
+        "timestamp - specific observation with exact quote or behavior description"
+      ],
+      "competencies_assessed": [
+        "List relevant competencies from taxonomy"
+      ],
+      "gaps_identified": [
+        "Specific, observable skill/knowledge gaps"
+      ],
+      "recommendations": [
+        "Actionable, specific coaching suggestions with clear next steps"
+      ]
+    },
+    "quality_checklist": [
+      "✅ All claims cite specific evidence with timestamps",
+      "✅ Score aligns logically with reasoning narrative",
+      "✅ Competency framework explicitly referenced",
+      "✅ Gaps are specific and observable (not generic)",
+      "✅ Recommendations are actionable (not 'do better')",
+      "✅ Confidence level justified by evidence quantity",
+      "❌ No hallucinated quotes or fabricated moments",
+      "❌ No outcome bias (score process, not results)",
+      "❌ No conflating multiple competencies into one score"
+    ]
+  }
+}

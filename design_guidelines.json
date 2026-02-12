@@ -1,0 +1,122 @@
+{
+  "identity": {
+    "name": "Athena",
+    "persona": "E1 - The Anti-AI Designer",
+    "tone": "Professional, Precise, Powerful, Minimalist",
+    "archetype": "Swiss & High-Contrast"
+  },
+  "typography": {
+    "headings": {
+      "family": "Manrope, sans-serif",
+      "weights": ["600", "700", "800"],
+      "tracking": "tight",
+      "usage": "Use for all section headers, modal titles, and hero text. Avoid generic Inter for headings."
+    },
+    "body": {
+      "family": "Inter, sans-serif",
+      "weights": ["400", "500"],
+      "usage": "Standard text, labels, and descriptions."
+    },
+    "code": {
+      "family": "JetBrains Mono, monospace",
+      "usage": "Prompts, code snippets, JSON outputs, and API keys."
+    },
+    "installation": "yarn add @fontsource/manrope @fontsource/inter @fontsource/jetbrains-mono"
+  },
+  "colors": {
+    "mode": "light",
+    "palette": {
+      "primary": {
+        "name": "Electric Indigo",
+        "hex": "#4F46E5",
+        "tailwind": "indigo-600",
+        "usage": "Primary actions, active states, key highlights."
+      },
+      "background": {
+        "light": "#FFFFFF",
+        "dark": "#09090B",
+        "usage": "Main app background. Avoid pure black in dark mode, use #09090B."
+      },
+      "surface": {
+        "light": "#F8FAFC",
+        "dark": "#18181B",
+        "usage": "Sidebar, cards, secondary areas."
+      },
+      "border": {
+        "light": "#E2E8F0",
+        "dark": "#27272A",
+        "usage": "1px borders for separation."
+      },
+      "text": {
+        "primary": { "light": "#0F172A", "dark": "#F8FAFC" },
+        "secondary": { "light": "#64748B", "dark": "#94A3B8" },
+        "muted": { "light": "#94A3B8", "dark": "#52525B" }
+      }
+    },
+    "gradients": {
+      "subtle": "bg-gradient-to-b from-white to-slate-50 dark:from-zinc-950 dark:to-zinc-900",
+      "glow": "bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-pink-500/10"
+    }
+  },
+  "layout": {
+    "spacing": {
+      "base": "Generous. Use p-6 or p-8 for containers.",
+      "scale": ["p-4", "p-6", "p-8", "p-12", "p-16"]
+    },
+    "grid": {
+      "dashboard": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+      "bento": "Use col-span-2 or row-span-2 for emphasis."
+    },
+    "container": {
+      "max_width": "max-w-7xl mx-auto",
+      "padding": "px-4 sm:px-6 lg:px-8"
+    }
+  },
+  "components": {
+    "radius": "rounded-md",
+    "shadows": "shadow-sm",
+    "buttons": {
+      "style": "Sharp or slightly rounded (rounded-md). High contrast.",
+      "hover": "Transform -translate-y-0.5 transition-all duration-200"
+    },
+    "cards": {
+      "style": "Flat, 1px border (border-border), bg-card. No heavy shadows.",
+      "hover": "border-primary/50 transition-colors duration-200"
+    },
+    "inputs": {
+      "style": "bg-background border-input focus:ring-2 focus:ring-primary/20"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-xl bg-white/70 dark:bg-black/60 border border-white/20",
+    "gradients": "Use subtle noise textures or mesh gradients in empty states.",
+    "icons": "Lucide React (default). Use stroke-width={1.5} for a refined look."
+  },
+  "images": {
+    "hero_background": {
+      "url": "https://images.unsplash.com/photo-1769120061917-be8ab5b2cb80?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "alt": "Abstract geometric nodes",
+      "usage": "Subtle background for login or welcome screen (low opacity)."
+    },
+    "empty_state_workspace": {
+      "url": "https://images.unsplash.com/photo-1512686096451-a15c19314d59?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "alt": "Minimalist workspace",
+      "usage": "Empty state for 'No Projects Found'."
+    },
+    "abstract_data": {
+      "url": "https://images.unsplash.com/photo-1655993810480-c15dccf9b3a0?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "alt": "Abstract data flow",
+      "usage": "Visual accent for the 'Optimization' or 'Dataset' generation steps."
+    }
+  },
+  "universal_guidelines": [
+    "Do not use generic centered layouts.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "Do not apply universal transition (transition: all).",
+    "Every interaction needs micro-animations.",
+    "Use 2-3x more spacing than feels comfortable.",
+    "All interactive elements MUST include a data-testid attribute."
+  ],
+  "instructions_to_main_agent": "Follow the 'Swiss & High-Contrast' archetype. Prioritize clarity and data density for this developer tool. Use the provided image URLs for backgrounds and empty states. Ensure the 'Manrope' font is used for headings to give it a distinct personality."
+}

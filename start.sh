@@ -1,228 +1,222 @@
 #!/bin/bash
 
-# PromptCritic - Start Script
-# This script starts both the backend and frontend servers
+# Athena Clean Restart Script
+# This script performs a clean restart of both frontend and backend
 
 set -e  # Exit on error
 
 # Colors for output
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 RED='\033[0;31m'
+GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Get the directory where the script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_DIR="$SCRIPT_DIR/backend"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
+# Project root directory
+PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}   PromptCritic - Starting Servers${NC}"
-echo -e "${BLUE}========================================${NC}\n"
+echo -e "${BLUE}╔═══════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║                                               ║${NC}"
+echo -e "${BLUE}║        Athena Clean Restart Script            ║${NC}"
+echo -e "${BLUE}║                                               ║${NC}"
+echo -e "${BLUE}╚═══════════════════════════════════════════════╝${NC}"
+echo ""
 
-# Function to cleanup on exit
-cleanup() {
-    echo -e "\n${YELLOW}Shutting down servers...${NC}"
-    # Kill all child processes
-    pkill -P $$ 2>/dev/null || true
-    exit 0
-}
-
-# Trap SIGINT (Ctrl+C) and SIGTERM
-trap cleanup SIGINT SIGTERM
-
-# Function to kill process on a specific port
+# Function to kill processes on specific ports
 kill_port() {
     local port=$1
-    local pid=$(lsof -ti:$port)
+    local pids=$(lsof -ti:$port 2>/dev/null || true)
     
-    if [ ! -z "$pid" ]; then
-        echo -e "${YELLOW}Port $port is in use by process $pid. Killing it...${NC}"
-        kill -9 $pid 2>/dev/null || true
+    if [ ! -z "$pids" ]; then
+        echo -e "${YELLOW}⚠️  Killing processes on port $port...${NC}"
+        echo "$pids" | xargs kill -9 2>/dev/null || true
         sleep 1
-        echo -e "${GREEN}✓ Port $port is now free${NC}"
-    fi
-}
-
-# Function to clear caches and logs
-clear_caches() {
-    echo -e "${BLUE}Clearing caches and logs...${NC}"
-    
-    # Clear backend caches
-    if [ -d "$BACKEND_DIR" ]; then
-        echo -e "${YELLOW}  - Clearing backend Python cache...${NC}"
-        find "$BACKEND_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-        find "$BACKEND_DIR" -type f -name "*.pyc" -delete 2>/dev/null || true
-        find "$BACKEND_DIR" -type f -name "*.pyo" -delete 2>/dev/null || true
-        
-        # Clear backend log
-        if [ -f "$BACKEND_DIR/server.log" ]; then
-            rm -f "$BACKEND_DIR/server.log"
-            echo -e "${YELLOW}  - Cleared backend server.log${NC}"
-        fi
-        
-        echo -e "${GREEN}  ✓ Backend cache cleared${NC}"
-    fi
-    
-    # Clear frontend caches
-    if [ -d "$FRONTEND_DIR" ]; then
-        echo -e "${YELLOW}  - Clearing frontend cache...${NC}"
-        
-        # Clear node_modules cache
-        if [ -d "$FRONTEND_DIR/node_modules/.cache" ]; then
-            rm -rf "$FRONTEND_DIR/node_modules/.cache"
-            echo -e "${YELLOW}  - Cleared node_modules/.cache${NC}"
-        fi
-        
-        # Clear build directory
-        if [ -d "$FRONTEND_DIR/build" ]; then
-            rm -rf "$FRONTEND_DIR/build"
-            echo -e "${YELLOW}  - Cleared build directory${NC}"
-        fi
-        
-        # Clear yarn cache (optional, only if .yarn/cache exists)
-        if [ -d "$FRONTEND_DIR/.yarn/cache" ]; then
-            rm -rf "$FRONTEND_DIR/.yarn/cache"
-            echo -e "${YELLOW}  - Cleared .yarn/cache${NC}"
-        fi
-        
-        echo -e "${GREEN}  ✓ Frontend cache cleared${NC}"
-    fi
-    
-    echo -e "${GREEN}✓ All caches and logs cleared!${NC}\n"
-}
-
-# Check if backend directory exists
-if [ ! -d "$BACKEND_DIR" ]; then
-    echo -e "${RED}Error: Backend directory not found at $BACKEND_DIR${NC}"
-    exit 1
-fi
-
-# Check if frontend directory exists
-if [ ! -d "$FRONTEND_DIR" ]; then
-    echo -e "${RED}Error: Frontend directory not found at $FRONTEND_DIR${NC}"
-    exit 1
-fi
-
-# Clear all caches and logs
-clear_caches
-
-# Kill any processes on ports 8000 and 3000
-echo -e "${BLUE}Checking for processes on ports 8000 and 3000...${NC}"
-kill_port 8000
-kill_port 3000
-echo ""
-
-# Start Backend Server
-echo -e "${GREEN}[1/2] Starting Backend Server...${NC}"
-echo -e "Directory: $BACKEND_DIR"
-
-# Check if virtual environment exists
-if [ ! -d "$BACKEND_DIR/venv" ]; then
-    echo -e "${YELLOW}Warning: Virtual environment not found. Creating one...${NC}"
-    cd "$BACKEND_DIR"
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
-    cd "$SCRIPT_DIR"
-fi
-
-# Check if .env exists
-if [ ! -f "$BACKEND_DIR/.env" ]; then
-    echo -e "${YELLOW}Warning: .env file not found in backend directory${NC}"
-    echo -e "${YELLOW}Creating a default .env from .env.example if it exists...${NC}"
-    if [ -f "$BACKEND_DIR/env.example" ]; then
-        cp "$BACKEND_DIR/env.example" "$BACKEND_DIR/.env"
-        echo -e "${GREEN}Created .env from env.example${NC}"
-    elif [ -f "$SCRIPT_DIR/env.example" ]; then
-        cp "$SCRIPT_DIR/env.example" "$BACKEND_DIR/.env"
-        echo -e "${GREEN}Created .env from root env.example${NC}"
+        echo -e "${GREEN}✓ Port $port cleared${NC}"
     else
-        echo -e "${RED}No .env.example found. Please configure .env manually.${NC}"
+        echo -e "${GREEN}✓ Port $port is free${NC}"
     fi
-fi
+}
 
-# Start backend in background with logging
-BE_LOG="$BACKEND_DIR/server.log"
-(
-    cd "$BACKEND_DIR"
-    source venv/bin/activate
-    echo -e "${GREEN}✓ Backend virtual environment activated${NC}"
-    echo -e "${GREEN}✓ Starting FastAPI server on http://localhost:8000${NC}"
-    # Use tee to show output and save to log
-    uvicorn server:app --reload --host 0.0.0.0 --port 8000 > "$BE_LOG" 2>&1
-) &
-
-BACKEND_PID=$!
-echo -e "${GREEN}✓ Backend server process spawned (PID: $BACKEND_PID)${NC}"
-
-# Health check
-echo -e "${BLUE}Waiting for backend to become healthy...${NC}"
-MAX_RETRIES=30
-COUNT=0
-HEALTHY=0
-
-while [ $COUNT -lt $MAX_RETRIES ]; do
-    if curl -s http://localhost:8000/docs > /dev/null; then
-        HEALTHY=1
-        break
+# Function to clean directory
+clean_directory() {
+    local dir=$1
+    if [ -d "$dir" ]; then
+        echo -e "${YELLOW}🧹 Cleaning $dir...${NC}"
+        rm -rf "$dir"
+        echo -e "${GREEN}✓ Cleaned $dir${NC}"
     fi
-    # Check if process is still running
-    if ! kill -0 $BACKEND_PID 2>/dev/null; then
-        echo -e "${RED}Backend process died unexpectedly!${NC}"
-        echo -e "${RED}Last 10 lines of log ($BE_LOG):${NC}"
-        tail -n 10 "$BE_LOG"
-        exit 1
-    fi
-    sleep 1
-    echo -n "."
-    COUNT=$((COUNT+1))
-done
+}
+
+# Function to clean files by pattern
+clean_files() {
+    local pattern=$1
+    local description=$2
+    echo -e "${YELLOW}🧹 Cleaning $description...${NC}"
+    find . -name "$pattern" -type f -delete 2>/dev/null || true
+    echo -e "${GREEN}✓ Cleaned $description${NC}"
+}
+
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Step 1: Stopping Running Processes${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Kill processes on frontend port (3010)
+kill_port 3010
+
+# Kill processes on backend port (8010)
+kill_port 8010
+
 echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Step 2: Cleaning Backend${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-if [ $HEALTHY -eq 1 ]; then
-    echo -e "${GREEN}✓ Backend is healthy and responding!${NC}\n"
-else
-    echo -e "${RED}Backend failed to start within $MAX_RETRIES seconds.${NC}"
-    echo -e "${RED}Check logs at $BE_LOG${NC}"
-    kill $BACKEND_PID 2>/dev/null || true
-    echo -e "${RED}Last 10 lines of log:${NC}"
-    tail -n 10 "$BE_LOG"
-    exit 1
+cd "$PROJECT_ROOT/backend"
+
+# Clean Python cache
+echo -e "${YELLOW}🧹 Cleaning Python cache files...${NC}"
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -type f -name "*.pyc" -delete 2>/dev/null || true
+find . -type f -name "*.pyo" -delete 2>/dev/null || true
+find . -type f -name "*.pyd" -delete 2>/dev/null || true
+find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+echo -e "${GREEN}✓ Python cache cleaned${NC}"
+
+# Clean logs
+if [ -d "logs" ]; then
+    echo -e "${YELLOW}🧹 Cleaning backend logs...${NC}"
+    rm -rf logs/*
+    echo -e "${GREEN}✓ Backend logs cleaned${NC}"
 fi
 
-# Start Frontend Server
-echo -e "${GREEN}[2/2] Starting Frontend Server...${NC}"
-echo -e "Directory: $FRONTEND_DIR"
+# Clean pytest cache
+clean_directory ".pytest_cache"
+clean_directory ".coverage"
+clean_directory "htmlcov"
+
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Step 3: Cleaning Frontend${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+cd "$PROJECT_ROOT/frontend"
+
+# Clean build artifacts
+clean_directory "build"
+clean_directory "dist"
+clean_directory ".next"
+
+# Clean cache directories
+clean_directory ".cache"
+clean_directory ".parcel-cache"
+clean_directory ".eslintcache"
+
+# Clean coverage reports
+clean_directory "coverage"
+
+# Clean temp files
+echo -e "${YELLOW}🧹 Cleaning temp files...${NC}"
+rm -f .DS_Store 2>/dev/null || true
+find . -name ".DS_Store" -delete 2>/dev/null || true
+find . -name "*.log" -delete 2>/dev/null || true
+echo -e "${GREEN}✓ Temp files cleaned${NC}"
+
+# Clean Yarn cache (optional - uncomment if needed)
+# echo -e "${YELLOW}🧹 Cleaning Yarn cache...${NC}"
+# yarn cache clean 2>/dev/null || true
+# echo -e "${GREEN}✓ Yarn cache cleaned${NC}"
+
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Step 4: Checking Dependencies${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 # Check if node_modules exists
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-    echo -e "${YELLOW}Warning: node_modules not found. Installing dependencies...${NC}"
-    cd "$FRONTEND_DIR"
+if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}📦 Installing frontend dependencies...${NC}"
     yarn install
-    cd "$SCRIPT_DIR"
+    echo -e "${GREEN}✓ Frontend dependencies installed${NC}"
+else
+    echo -e "${GREEN}✓ Frontend dependencies present${NC}"
 fi
 
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Step 5: Creating .env files${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Create frontend .env if it doesn't exist
+if [ ! -f ".env" ] && [ -f "env.txt" ]; then
+    echo -e "${YELLOW}📝 Creating frontend .env from env.txt...${NC}"
+    cp env.txt .env
+    echo -e "${GREEN}✓ Frontend .env created${NC}"
+else
+    echo -e "${GREEN}✓ Frontend .env exists${NC}"
+fi
+
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Step 6: Starting Services${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+echo ""
+echo -e "${GREEN}🚀 Starting Backend Server (Port 8010)...${NC}"
+echo -e "${YELLOW}   Logs will be saved to: backend/logs/backend.log${NC}"
+
+# Create logs directory if it doesn't exist
+mkdir -p "$PROJECT_ROOT/backend/logs"
+
+# Start backend in background
+cd "$PROJECT_ROOT/backend"
+nohup python3 run_server.py > logs/backend.log 2>&1 &
+BACKEND_PID=$!
+echo -e "${GREEN}✓ Backend started (PID: $BACKEND_PID)${NC}"
+
+# Wait a moment for backend to start
+sleep 3
+
+echo ""
+echo -e "${GREEN}🚀 Starting Frontend Server (Port 3010)...${NC}"
+echo -e "${YELLOW}   Logs will be saved to: frontend/logs/frontend.log${NC}"
+
+# Create logs directory if it doesn't exist
+mkdir -p "$PROJECT_ROOT/frontend/logs"
+
 # Start frontend in background
-(
-    cd "$FRONTEND_DIR"
-    echo -e "${GREEN}✓ Starting React development server on http://localhost:3000${NC}"
-    yarn start
-) &
-
+cd "$PROJECT_ROOT/frontend"
+nohup yarn start > logs/frontend.log 2>&1 &
 FRONTEND_PID=$!
-echo -e "${GREEN}✓ Frontend server started (PID: $FRONTEND_PID)${NC}\n"
+echo -e "${GREEN}✓ Frontend started (PID: $FRONTEND_PID)${NC}"
 
-# Display status
-echo -e "${BLUE}========================================${NC}"
-echo -e "${GREEN}✓ Both servers are running!${NC}"
-echo -e "${BLUE}========================================${NC}"
-echo -e "${GREEN}Backend:${NC}  http://localhost:8000"
-echo -e "${GREEN}API Docs:${NC} http://localhost:8000/docs"
-echo -e "${GREEN}Frontend:${NC} http://localhost:3000"
-echo -e "${BLUE}========================================${NC}"
-echo -e "${YELLOW}Press Ctrl+C to stop both servers${NC}\n"
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}✨ Startup Complete!${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-# Wait for both processes
-wait
+echo ""
+echo -e "${GREEN}📍 Services Running:${NC}"
+echo -e "   Backend:  http://localhost:8010 (PID: $BACKEND_PID)"
+echo -e "   Frontend: http://localhost:3010 (PID: $FRONTEND_PID)"
+echo -e "   API Docs: http://localhost:8010/docs"
+echo ""
+echo -e "${YELLOW}📋 Useful Commands:${NC}"
+echo -e "   View backend logs:  ${BLUE}tail -f backend/logs/backend.log${NC}"
+echo -e "   View frontend logs: ${BLUE}tail -f frontend/logs/frontend.log${NC}"
+echo -e "   Stop backend:       ${BLUE}kill $BACKEND_PID${NC}"
+echo -e "   Stop frontend:      ${BLUE}kill $FRONTEND_PID${NC}"
+echo -e "   Stop all services:  ${BLUE}./stop.sh${NC}"
+echo ""
+echo -e "${GREEN}⏳ Waiting for services to be fully ready...${NC}"
+sleep 5
+
+# Health check
+echo -e "${YELLOW}🔍 Performing health check...${NC}"
+if curl -s http://localhost:8010/api/ > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Backend is responding${NC}"
+else
+    echo -e "${RED}⚠️  Backend may still be starting up. Check logs if needed.${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}🎉 All systems ready! Open http://localhost:3010 in your browser.${NC}"
+echo ""

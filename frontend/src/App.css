@@ -1,17 +1,56 @@
-/* Additional global styles */
-
 .App {
   min-height: 100vh;
+  background: var(--background);
 }
 
-/* Smooth transitions */
-* {
-  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+.prose-code {
+  font-family: 'JetBrains Mono', monospace;
+  background: hsl(var(--muted));
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
 }
 
-/* Focus visible styles for accessibility */
-:focus-visible {
-  outline: 2px solid rgb(59 130 246);
-  outline-offset: 2px;
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    hsl(var(--primary) / 0.1),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
 }
 
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.button-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.button-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px hsl(var(--primary) / 0.2);
+}

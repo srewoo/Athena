@@ -1,130 +1,93 @@
 """
-Simple LLM client wrapper
+Unified LLM Client for Multiple Providers
+Supports OpenAI, Anthropic (Claude), and Google (Gemini)
 """
-import time
-from typing import Optional
+
+import logging
+from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
+import google.generativeai as genai
 
 
-class LLMClient:
-    """Unified LLM client"""
-    
-    def __init__(self):
-        pass
-    
-    async def chat(
-        self,
-        system_prompt: str,
-        user_message: str,
-        provider: str,
-        api_key: str,
-        model_name: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: int = 8000
-    ) -> dict:
-        """Execute chat completion"""
-        start_time = time.time()
-        
+class LlmClient:
+    """Unified LLM client supporting multiple providers"""
+
+    # Supported models mapping
+    SUPPORTED_MODELS = {
+        "openai": ["gpt-4o", "gpt-4o-mini", "o1", "o1-mini", "o3", "o3-mini"],
+        "anthropic": ["claude-sonnet-4.5", "claude-opus-4.5", "claude-sonnet-4", "claude-opus-4"],
+        "google": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-thinking-exp", "gemini-1.5-pro"]
+    }
+
+    def __init__(self, provider: str, model: str, api_key: str, system_message: str = "", max_tokens: int = 4096):
+        self.provider = provider.lower()
+        self.model = model
+        self.api_key = api_key
+        self.system_message = system_message
+        self.max_tokens = max_tokens
+
+    async def send_message(self, user_message: str) -> str:
+        """Send message and get response from LLM"""
+        if self.provider == "openai":
+            return await self._send_openai(user_message)
+        elif self.provider == "claude" or self.provider == "anthropic":
+            return await self._send_claude(user_message)
+        elif self.provider == "google" or self.provider == "gemini":
+            return await self._send_google(user_message)
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+
+    async def _send_openai(self, user_message: str) -> str:
+        """Send message to OpenAI"""
         try:
-            if provider == "openai":
-                from openai import AsyncOpenAI
-                client = AsyncOpenAI(api_key=api_key)
-                model = model_name or "gpt-4o"
+            client = AsyncOpenAI(api_key=self.api_key)
+            messages = []
 
-                # Check if this is a reasoning model (o1, o3 series)
-                # These models don't support temperature, max_tokens, or system messages
-                is_reasoning_model = model.startswith("o1") or model.startswith("o3")
+            if self.system_message:
+                messages.append({"role": "system", "content": self.system_message})
 
-                if is_reasoning_model:
-                    # Reasoning models: combine system + user into single user message
-                    # Use max_completion_tokens instead of max_tokens
-                    # Don't set temperature (not supported)
-                    combined_message = f"{system_prompt}\n\n{user_message}"
-                    response = await client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "user", "content": combined_message}
-                        ],
-                        max_completion_tokens=max_tokens
-                    )
-                else:
-                    # Standard models: use system message, temperature, max_tokens
-                    response = await client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_message}
-                        ],
-                        temperature=temperature,
-                        max_tokens=max_tokens
-                    )
+            messages.append({"role": "user", "content": user_message})
 
-                return {
-                    "output": response.choices[0].message.content,
-                    "error": None,
-                    "latency_ms": int((time.time() - start_time) * 1000),
-                    "tokens_used": response.usage.total_tokens if response.usage else 0
-                }
-                
-            elif provider == "claude":
-                from anthropic import AsyncAnthropic
-                client = AsyncAnthropic(api_key=api_key)
-                model = model_name or "claude-3-5-sonnet-20241022"
-                
-                response = await client.messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_message}],
-                    temperature=temperature if temperature > 0 else 0.01
-                )
-                
-                return {
-                    "output": response.content[0].text,
-                    "error": None,
-                    "latency_ms": int((time.time() - start_time) * 1000),
-                    "tokens_used": response.usage.input_tokens + response.usage.output_tokens if response.usage else 0
-                }
-                
-            elif provider == "gemini":
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
-                model = model_name or "gemini-2.0-flash-exp"
-                
-                genai_model = genai.GenerativeModel(model)
-                full_prompt = f"{system_prompt}\n\n{user_message}"
-                
-                response = await genai_model.generate_content_async(
-                    full_prompt,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_tokens
-                    )
-                )
-                
-                return {
-                    "output": response.text,
-                    "error": None,
-                    "latency_ms": int((time.time() - start_time) * 1000),
-                    "tokens_used": 0
-                }
-                
-            else:
-                return {
-                    "output": "",
-                    "error": f"Unsupported provider: {provider}",
-                    "latency_ms": 0,
-                    "tokens_used": 0
-                }
-                
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages
+            )
+
+            return response.choices[0].message.content
         except Exception as e:
-            return {
-                "output": "",
-                "error": str(e),
-                "latency_ms": int((time.time() - start_time) * 1000),
-                "tokens_used": 0
-            }
+            logging.error(f"OpenAI API error: {e}")
+            raise
 
+    async def _send_claude(self, user_message: str) -> str:
+        """Send message to Claude/Anthropic"""
+        try:
+            client = AsyncAnthropic(api_key=self.api_key)
 
-def get_llm_client():
-    """Get LLM client instance"""
-    return LLMClient()
+            response = await client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=self.system_message if self.system_message else "You are a helpful assistant.",
+                messages=[
+                    {"role": "user", "content": user_message}
+                ]
+            )
+
+            return response.content[0].text
+        except Exception as e:
+            logging.error(f"Claude API error: {e}")
+            raise
+
+    async def _send_google(self, user_message: str) -> str:
+        """Send message to Google Gemini"""
+        try:
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(
+                model_name=self.model,
+                system_instruction=self.system_message if self.system_message else None
+            )
+
+            response = await model.generate_content_async(user_message)
+            return response.text
+        except Exception as e:
+            logging.error(f"Google Gemini API error: {e}")
+            raise
